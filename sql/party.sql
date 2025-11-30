@@ -1,10 +1,15 @@
--- party table - detailed balance changes with counterparty tracking
+-- party table - detailed balance changes with counterparty linking
+-- Each balance change is a row; counterparties are linked via counterparty_id
 CREATE TABLE IF NOT EXISTS `party` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `tx_id` BIGINT UNSIGNED NOT NULL,
   `owner_id` INT UNSIGNED NOT NULL,
   `token_account_id` INT UNSIGNED DEFAULT NULL,
   `mint_id` INT UNSIGNED NOT NULL,
+  `account_index` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Index in account_keys array',
+  `party_type` ENUM('party', 'counterparty') NOT NULL DEFAULT 'party',
+  `balance_type` ENUM('SOL', 'TOKEN') NOT NULL DEFAULT 'TOKEN',
+  `counterparty_id` BIGINT UNSIGNED DEFAULT NULL COMMENT 'Links to the counterparty party record',
   `pre_amount` BIGINT DEFAULT NULL,
   `post_amount` BIGINT DEFAULT NULL,
   `amount_change` BIGINT DEFAULT NULL,
@@ -12,18 +17,35 @@ CREATE TABLE IF NOT EXISTS `party` (
   `pre_ui_amount` DECIMAL(30,9) DEFAULT NULL,
   `post_ui_amount` DECIMAL(30,9) DEFAULT NULL,
   `ui_amount_change` DECIMAL(30,9) DEFAULT NULL,
-  `party_data` JSON DEFAULT NULL COMMENT 'Counterparties and additional metadata',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tx_owner_mint` (`tx_id`, `owner_id`, `mint_id`),
+  UNIQUE KEY `uk_tx_owner_mint_acct` (`tx_id`, `owner_id`, `mint_id`, `account_index`),
   KEY `idx_owner` (`owner_id`),
   KEY `idx_mint` (`mint_id`),
   KEY `idx_token_account` (`token_account_id`),
   KEY `idx_owner_mint` (`owner_id`, `mint_id`),
   KEY `idx_amount_change` (`amount_change`),
+  KEY `idx_party_type` (`party_type`),
+  KEY `idx_counterparty` (`counterparty_id`),
+  KEY `idx_balance_type` (`balance_type`),
   CONSTRAINT `party_ibfk_1` FOREIGN KEY (`tx_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
   CONSTRAINT `party_ibfk_2` FOREIGN KEY (`owner_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
   CONSTRAINT `party_ibfk_3` FOREIGN KEY (`token_account_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
-  CONSTRAINT `party_ibfk_4` FOREIGN KEY (`mint_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT
+  CONSTRAINT `party_ibfk_4` FOREIGN KEY (`mint_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `party_ibfk_5` FOREIGN KEY (`counterparty_id`) REFERENCES `party` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Migration script to add new columns to existing table
+-- ALTER TABLE party
+--   ADD COLUMN `account_index` SMALLINT UNSIGNED DEFAULT NULL AFTER `mint_id`,
+--   ADD COLUMN `party_type` ENUM('party', 'counterparty') NOT NULL DEFAULT 'party' AFTER `account_index`,
+--   ADD COLUMN `balance_type` ENUM('SOL', 'TOKEN') NOT NULL DEFAULT 'TOKEN' AFTER `party_type`,
+--   ADD COLUMN `counterparty_id` BIGINT UNSIGNED DEFAULT NULL AFTER `balance_type`,
+--   DROP COLUMN `party_data`,
+--   DROP INDEX `uk_tx_owner_mint`,
+--   ADD UNIQUE KEY `uk_tx_owner_mint_acct` (`tx_id`, `owner_id`, `mint_id`, `account_index`),
+--   ADD KEY `idx_party_type` (`party_type`),
+--   ADD KEY `idx_counterparty` (`counterparty_id`),
+--   ADD KEY `idx_balance_type` (`balance_type`),
+--   ADD CONSTRAINT `party_ibfk_5` FOREIGN KEY (`counterparty_id`) REFERENCES `party` (`id`) ON DELETE SET NULL;
