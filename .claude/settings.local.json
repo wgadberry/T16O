@@ -4,7 +4,12 @@
       "Bash(dir:*)",
       "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" diff --stat)",
       "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" log --oneline -3)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/ src/ .claude/settings.local.json)"
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/ src/ .claude/settings.local.json)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" commit -m \"$(cat <<''EOF''\nAdd t16o_db schema, party table, and update procedures\n\n- Add complete database schema (schema.sql) with all table DDLs\n- Add party table for detailed balance change tracking with counterparties\n- Add sp_party_merge procedure to extract balance changes from transactions\n- Add fn_reconstruct_transaction and fn_tx_get functions\n- Add sp_address_ensure, sp_address_merge, sp_tx_merge procedures\n- Update sp_addresses_build and sp_address_activity to use transaction_party\n- Fix worker configs to use t16o virtual host and t16o_db database\n- Update service database references from solana_events to t16o_db\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(ren \"C:\\Users\\wgadb\\source\\repos\\T16O\\sql\\usp_mint_get.sql\" sp_mint_get.sql)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" log --oneline -2)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/ .claude/settings.local.json)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" commit -m \"$(cat <<''EOF''\nAdd config procedures and default settings\n\n- Add sp_get_config, sp_get_configs_by_type, sp_get_config_changes, sp_set_config\n- Add config_defaults.sql with 80+ configuration settings\n- Rename usp_mint_get to sp_mint_get for consistent naming\n- Remove unused tx_party.sql\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
     ],
     "deny": [],
     "ask": []

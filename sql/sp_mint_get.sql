@@ -1,8 +1,8 @@
-DROP PROCEDURE IF EXISTS usp_mint_get;
+DROP PROCEDURE IF EXISTS sp_mint_get;
 
 DELIMITER //
 
-CREATE PROCEDURE usp_mint_get(
+CREATE PROCEDURE sp_mint_get(
     IN p_mint_address CHAR(44)
 )
 BEGIN

@@ -1,0 +1,23 @@
+DROP PROCEDURE IF EXISTS sp_get_config_changes;
+
+DELIMITER //
+
+CREATE PROCEDURE sp_get_config_changes(
+    IN p_config_type VARCHAR(64),
+    IN p_since_version INT UNSIGNED
+)
+BEGIN
+    SELECT
+        config_key,
+        config_value,
+        value_type,
+        version,
+        updated_at
+    FROM config
+    WHERE config_type = p_config_type
+      AND version > p_since_version
+      AND is_runtime_editable = 1
+    ORDER BY version;
+END //
+
+DELIMITER ;
