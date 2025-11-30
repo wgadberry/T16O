@@ -1,8 +1,8 @@
-DROP PROCEDURE IF EXISTS sp_get_config_changes;
+DROP PROCEDURE IF EXISTS sp_config_get_changes;
 
 DELIMITER //
 
-CREATE PROCEDURE sp_get_config_changes(
+CREATE PROCEDURE sp_config_get_changes(
     IN p_config_type VARCHAR(64),
     IN p_since_version INT UNSIGNED
 )

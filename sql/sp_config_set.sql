@@ -1,8 +1,8 @@
-DROP PROCEDURE IF EXISTS sp_set_config;
+DROP PROCEDURE IF EXISTS sp_config_set;
 
 DELIMITER //
 
-CREATE PROCEDURE sp_set_config(
+CREATE PROCEDURE sp_config_set(
     IN p_config_type VARCHAR(64),
     IN p_config_key VARCHAR(64),
     IN p_config_value VARCHAR(1024),

@@ -1,8 +1,8 @@
-DROP PROCEDURE IF EXISTS sp_get_configs_by_type;
+DROP PROCEDURE IF EXISTS sp_config_get_by_type;
 
 DELIMITER //
 
-CREATE PROCEDURE sp_get_configs_by_type(
+CREATE PROCEDURE sp_config_get_by_type(
     IN p_config_type VARCHAR(64)
 )
 BEGIN
