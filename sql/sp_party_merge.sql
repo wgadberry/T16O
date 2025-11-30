@@ -196,6 +196,98 @@ BEGIN
             WHERE p1.tx_id = v_tx_id
               AND p1.counterparty_id IS NULL;
 
+            -- Detect and set action_type based on log messages and heuristics
+            UPDATE party p
+            JOIN transactions t ON p.tx_id = t.id
+            SET p.action_type = (
+                CASE
+                    -- Fee: SOL decrease on fee payer (account_index 0) with no counterparty
+                    WHEN p.balance_type = 'SOL'
+                         AND p.account_index = 0
+                         AND p.amount_change < 0
+                         AND p.counterparty_id IS NULL
+                         AND ABS(p.amount_change) <= 10000000  -- <= 0.01 SOL (typical fee range)
+                    THEN 'fee'
+
+                    -- Rent: SOL decrease for account creation (small amounts, no counterparty)
+                    WHEN p.balance_type = 'SOL'
+                         AND p.amount_change < 0
+                         AND p.counterparty_id IS NULL
+                         AND ABS(p.amount_change) BETWEEN 890880 AND 2100000  -- Typical rent range
+                         AND t.log_messages LIKE '%InitializeAccount%'
+                    THEN 'rent'
+
+                    -- Burn: Token decrease with Burn instruction in logs
+                    WHEN p.balance_type = 'TOKEN'
+                         AND p.amount_change < 0
+                         AND (t.log_messages LIKE '%Instruction: Burn%'
+                              OR t.log_messages LIKE '%Instruction: BurnChecked%')
+                    THEN 'burn'
+
+                    -- Mint: Token increase with MintTo instruction in logs
+                    WHEN p.balance_type = 'TOKEN'
+                         AND p.amount_change > 0
+                         AND (t.log_messages LIKE '%Instruction: MintTo%'
+                              OR t.log_messages LIKE '%Instruction: MintToChecked%')
+                    THEN 'mint'
+
+                    -- CloseAccount: SOL increase from closing token account
+                    WHEN p.balance_type = 'SOL'
+                         AND p.amount_change > 0
+                         AND t.log_messages LIKE '%Instruction: CloseAccount%'
+                    THEN 'closeAccount'
+
+                    -- CreateAccount: Account initialization
+                    WHEN t.log_messages LIKE '%Instruction: InitializeAccount%'
+                         AND p.balance_type = 'SOL'
+                         AND p.amount_change < 0
+                    THEN 'createAccount'
+
+                    -- Swap: DEX swap detected (Jupiter, Raydium, Orca, Meteora, etc.)
+                    WHEN (t.log_messages LIKE '%Instruction: Swap%'
+                          OR t.log_messages LIKE '%Instruction: Route%'
+                          OR t.programs LIKE '%JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4%'
+                          OR t.programs LIKE '%whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc%'
+                          OR t.programs LIKE '%675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8%'
+                          OR t.programs LIKE '%CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK%'
+                          OR t.programs LIKE '%LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo%')
+                         AND p.balance_type = 'TOKEN'
+                         AND p.counterparty_id IS NOT NULL
+                    THEN 'swap'
+
+                    -- TransferChecked: Explicit TransferChecked instruction
+                    WHEN p.balance_type = 'TOKEN'
+                         AND t.log_messages LIKE '%Instruction: TransferChecked%'
+                         AND p.counterparty_id IS NOT NULL
+                    THEN 'transferChecked'
+
+                    -- Transfer: Token transfer with counterparty
+                    WHEN p.balance_type = 'TOKEN'
+                         AND t.log_messages LIKE '%Instruction: Transfer%'
+                         AND p.counterparty_id IS NOT NULL
+                    THEN 'transfer'
+
+                    -- SOL Transfer: Native SOL transfer with counterparty
+                    WHEN p.balance_type = 'SOL'
+                         AND p.counterparty_id IS NOT NULL
+                    THEN 'transfer'
+
+                    -- Stake operations
+                    WHEN t.programs LIKE '%Stake11111111111111111111111111111111111111%'
+                         AND p.amount_change < 0
+                    THEN 'stake'
+
+                    WHEN t.programs LIKE '%Stake11111111111111111111111111111111111111%'
+                         AND p.amount_change > 0
+                    THEN 'unstake'
+
+                    -- Default to unknown if we can't determine
+                    ELSE 'unknown'
+                END
+            )
+            WHERE p.tx_id = v_tx_id
+              AND p.action_type IS NULL;
+
             SET v_success = TRUE;
         END;
     END WHILE;
