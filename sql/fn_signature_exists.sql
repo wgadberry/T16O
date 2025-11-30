@@ -21,12 +21,12 @@ BEGIN
                 WHERE t.signature = p_signature
             ) INTO v_exists;
 
-        -- Check if transaction_party records exist for a signature
+        -- Check if party records exist for a signature (alias for 'party')
         WHEN 'participant' THEN
             SELECT EXISTS(
                 SELECT 1
-                FROM transaction_party tp
-                JOIN transactions t ON tp.tx_id = t.id
+                FROM party p
+                JOIN transactions t ON p.tx_id = t.id
                 WHERE t.signature = p_signature
             ) INTO v_exists;
 
