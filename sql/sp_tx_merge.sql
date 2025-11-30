@@ -68,13 +68,10 @@ BEGIN
     -- Determine success from status
     SET v_success = (p_status = 'success');
 
-    -- Ensure fee payer address exists and get ID
+    -- Ensure fee payer address exists and get ID (use INSERT IGNORE to handle race conditions)
     IF v_fee_payer_address IS NOT NULL THEN
+        INSERT IGNORE INTO addresses (address, address_type) VALUES (v_fee_payer_address, 'wallet');
         SELECT id INTO v_fee_payer_id FROM addresses WHERE address = v_fee_payer_address;
-        IF v_fee_payer_id IS NULL THEN
-            INSERT INTO addresses (address, address_type) VALUES (v_fee_payer_address, 'wallet');
-            SET v_fee_payer_id = LAST_INSERT_ID();
-        END IF;
     END IF;
 
     -- Insert or update transaction
