@@ -41,7 +41,7 @@ internal class AssetDatabaseReader
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new MySqlCommand(
-            "SELECT asset_json FROM t16o.addresses WHERE mint_address = @p_mint_address",
+            "SELECT asset_json FROM addresses WHERE mint_address = @p_mint_address",
             connection);
 
         command.Parameters.AddWithValue("@p_mint_address", mintAddress);
@@ -76,7 +76,7 @@ internal class AssetDatabaseReader
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("t16o.usp_mint_getUnknown", connection)
+        await using var command = new MySqlCommand("sp_mint_getUnknown", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure
         };
@@ -123,7 +123,7 @@ internal class AssetDatabaseReader
     }
 
     /// <summary>
-    /// Get the symbol for an asset from the database (uses usp_mint_get)
+    /// Get the symbol for an asset from the database (uses sp_mint_get)
     /// </summary>
     /// <param name="mintAddress">Mint address</param>
     /// <param name="cancellationToken">Cancellation token</param>
@@ -138,7 +138,7 @@ internal class AssetDatabaseReader
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("usp_mint_get", connection)
+        await using var command = new MySqlCommand("sp_mint_get", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure
         };
@@ -160,7 +160,7 @@ internal class AssetDatabaseReader
 
     /// <summary>
     /// Get all mint addresses from the asset table (for cache pre-loading).
-    /// Calls usp_mint_get(null) which returns all assets.
+    /// Calls sp_mint_get(null) which returns all assets.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>HashSet of all known mint addresses</returns>
@@ -172,7 +172,7 @@ internal class AssetDatabaseReader
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("usp_mint_get", connection)
+        await using var command = new MySqlCommand("sp_mint_get", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure,
             CommandTimeout = 120 // Allow 2 minutes for large result sets

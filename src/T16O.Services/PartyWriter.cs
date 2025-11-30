@@ -35,7 +35,7 @@ internal class PartyWriter
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new MySqlCommand(
-            "SELECT t16o.fn_signature_exists('participant', @p_signature)",
+            "SELECT fn_signature_exists('participant', @p_signature)",
             connection);
 
         command.Parameters.AddWithValue("@p_signature", signature);
@@ -45,7 +45,7 @@ internal class PartyWriter
     }
 
     /// <summary>
-    /// Create party records for a signature by calling usp_party_merge
+    /// Create party records for a signature by calling sp_party_merge
     /// </summary>
     internal async Task MergePartyAsync(
         string signature,
@@ -57,7 +57,7 @@ internal class PartyWriter
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("t16o.usp_party_merge", connection)
+        await using var command = new MySqlCommand("sp_party_merge", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure,
             CommandTimeout = 60 // Party merge can take time for complex transactions

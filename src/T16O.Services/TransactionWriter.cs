@@ -29,7 +29,7 @@ public class TransactionWriter
     }
 
     /// <summary>
-    /// Write transaction data to the database by calling usp_tx_merge
+    /// Write transaction data to the database by calling sp_tx_merge
     /// </summary>
     /// <param name="transaction">The transaction fetch result to write</param>
     /// <param name="cancellationToken">Cancellation token</param>
@@ -79,7 +79,7 @@ public class TransactionWriter
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("t16o.usp_tx_merge", connection)
+        await using var command = new MySqlCommand("sp_tx_merge", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure,
             CommandTimeout = 120 // 2 minutes for large transactions

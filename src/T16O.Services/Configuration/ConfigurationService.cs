@@ -162,7 +162,7 @@ public class ConfigurationService : IDisposable
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(ct);
 
-        await using var command = new MySqlCommand("CALL usp_set_config(@type, @key, @value, @updatedBy)", connection);
+        await using var command = new MySqlCommand("CALL sp_config_set(@type, @key, @value, @updatedBy)", connection);
         command.Parameters.AddWithValue("@type", configType);
         command.Parameters.AddWithValue("@key", configKey);
         command.Parameters.AddWithValue("@value", value);
@@ -216,7 +216,7 @@ public class ConfigurationService : IDisposable
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(ct);
 
-        await using var command = new MySqlCommand("CALL usp_get_configs_by_type(@type)", connection);
+        await using var command = new MySqlCommand("CALL sp_config_get_by_type(@type)", connection);
         command.Parameters.AddWithValue("@type", configType);
 
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -262,7 +262,7 @@ public class ConfigurationService : IDisposable
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(ct);
 
-        await using var command = new MySqlCommand("CALL usp_get_config(@type, @key)", connection);
+        await using var command = new MySqlCommand("CALL sp_config_get(@type, @key)", connection);
         command.Parameters.AddWithValue("@type", configType);
         command.Parameters.AddWithValue("@key", configKey);
 
@@ -302,7 +302,7 @@ public class ConfigurationService : IDisposable
 
             foreach (var (configType, lastVersion) in _typeVersions)
             {
-                await using var command = new MySqlCommand("CALL usp_get_config_changes(@type, @version)", connection);
+                await using var command = new MySqlCommand("CALL sp_config_get_changes(@type, @version)", connection);
                 command.Parameters.AddWithValue("@type", configType);
                 command.Parameters.AddWithValue("@version", lastVersion);
 

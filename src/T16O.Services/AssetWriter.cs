@@ -26,7 +26,7 @@ internal class AssetWriter
     }
 
     /// <summary>
-    /// Write asset data to the database by calling usp_asset_merge
+    /// Write asset data to the database by calling sp_asset_merge
     /// </summary>
     /// <param name="asset">The asset fetch result to write</param>
     /// <param name="cancellationToken">Cancellation token</param>
@@ -103,7 +103,7 @@ internal class AssetWriter
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("t16o.usp_address_mint_merge", connection)
+        await using var command = new MySqlCommand("sp_address_merge", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure
         };
