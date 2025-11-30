@@ -79,7 +79,7 @@ public class TransactionWriter
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("solana_events.usp_tx_merge", connection)
+        await using var command = new MySqlCommand("t16o.usp_tx_merge", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure,
             CommandTimeout = 120 // 2 minutes for large transactions

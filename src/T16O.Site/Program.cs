@@ -7,7 +7,7 @@ builder.Services.AddRazorPages();
 
 // Configure Database connection string
 var dbConnectionString = builder.Configuration["Database:ConnectionString"]
-    ?? "Server=localhost;Database=solana_events;User=root;Password=rootpassword;Allow User Variables=True;";
+    ?? "Server=localhost;Database=t16o;User=root;Password=rootpassword;Allow User Variables=True;";
 builder.Services.AddSingleton(new DatabaseSettings { ConnectionString = dbConnectionString });
 
 // Configure RabbitMQ

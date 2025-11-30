@@ -1,0 +1,28 @@
+-- tx_party table - detailed party tracking with balance changes and counterparties
+CREATE TABLE IF NOT EXISTS `tx_party` (
+  `tx_party_key` CHAR(24) NOT NULL,
+  `signature` CHAR(88) NOT NULL,
+  `slot` BIGINT UNSIGNED DEFAULT NULL,
+  `block_time` BIGINT DEFAULT NULL,
+  `token_account` CHAR(44) DEFAULT NULL,
+  `owner` CHAR(44) NOT NULL,
+  `mint_address` CHAR(44) NOT NULL,
+  `mint_symbol` VARCHAR(64) DEFAULT NULL,
+  `pre_ui_amount` DECIMAL(30,9) DEFAULT NULL,
+  `post_ui_amount` DECIMAL(30,9) DEFAULT NULL,
+  `ui_balance_change` DECIMAL(30,9) DEFAULT NULL,
+  `party_data` JSON DEFAULT NULL,
+  `transaction_type` VARCHAR(64) DEFAULT NULL,
+  `amount_raw` BIGINT DEFAULT NULL,
+  `amount_ui` DECIMAL(30,9) DEFAULT NULL,
+  `decimals` TINYINT UNSIGNED DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`tx_party_key`),
+  KEY `idx_signature` (`signature`),
+  KEY `idx_created_at` (`created_at`),
+  KEY `idx_owner_mint` (`owner`, `mint_address`),
+  KEY `idx_mint_owner` (`mint_address`, `owner`),
+  KEY `idx_block_time` (`block_time`),
+  KEY `idx_party_counterparty_owner` ((CAST(JSON_EXTRACT(`party_data`, '$.counterparties[*].owner') AS CHAR(44) ARRAY)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

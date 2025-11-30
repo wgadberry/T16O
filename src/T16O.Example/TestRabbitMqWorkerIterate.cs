@@ -28,7 +28,7 @@ public static class TestRabbitMqWorkerIterate
             TaskExchange = "tasks.topic"
         };
 
-        var connectionString = "Server=localhost;Database=solana_events;User=root;Password=rootpassword;";
+        var connectionString = "Server=localhost;Database=t16o;User=root;Password=rootpassword;";
 
         // Step 1: Fetch signatures from database
         Console.WriteLine("Fetching signatures from database...");
@@ -93,8 +93,8 @@ public static class TestRabbitMqWorkerIterate
 
         await using var command = new MySqlCommand(
             "SELECT s.signature " +
-            "FROM solana_events.temp_signatures s " +
-            "   left join solana_events.tx_payload t on s.signature = t.signature " +
+            "FROM t16o.temp_signatures s " +
+            "   left join t16o.tx_payload t on s.signature = t.signature " +
             "where t.signature is null " +
             "order by RAND() " +
             " limit 100000 ",

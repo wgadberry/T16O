@@ -71,7 +71,7 @@ class Program
         // Run pool sync
         if (args.Length > 0 && args[0] == "pool-sync")
         {
-            var connectionString = "Server=localhost;Database=solana_events;User=root;Password=rootpassword;Allow User Variables=True;";
+            var connectionString = "Server=localhost;Database=t16o;User=root;Password=rootpassword;Allow User Variables=True;";
             var poolFetcher = new PoolFetcher(connectionString);
 
             Console.WriteLine("Starting pool sync from all DEXes...\n");

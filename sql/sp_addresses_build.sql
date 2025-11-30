@@ -81,11 +81,11 @@ BEGIN
 
         IF v_pre_amount != v_post_amount THEN
             IF v_post_amount > v_pre_amount THEN
-                INSERT INTO transaction_participants (tx_id, address_id, role, amount, token_mint_id)
+                INSERT INTO transaction_party (tx_id, address_id, role, amount, token_mint_id)
                 VALUES (p_tx_id, v_address_id, 'receiver', v_post_amount - v_pre_amount, NULL)
                 ON DUPLICATE KEY UPDATE amount = VALUES(amount);
             ELSE
-                INSERT INTO transaction_participants (tx_id, address_id, role, amount, token_mint_id)
+                INSERT INTO transaction_party (tx_id, address_id, role, amount, token_mint_id)
                 VALUES (p_tx_id, v_address_id, 'sender', v_pre_amount - v_post_amount, NULL)
                 ON DUPLICATE KEY UPDATE amount = VALUES(amount);
             END IF;
@@ -111,7 +111,7 @@ BEGIN
             UPDATE addresses SET address_type = 'program' WHERE id = v_program_id AND address_type IS NULL;
         END IF;
 
-        INSERT IGNORE INTO transaction_participants (tx_id, address_id, role, instruction_index)
+        INSERT IGNORE INTO transaction_party (tx_id, address_id, role, instruction_index)
         VALUES (p_tx_id, v_program_id, 'program', v_idx);
 
         SET v_idx = v_idx + 1;
@@ -265,11 +265,11 @@ BEGIN
 
         IF v_pre_amount IS NOT NULL AND v_post_amount IS NOT NULL AND v_pre_amount != v_post_amount THEN
             IF v_post_amount > v_pre_amount THEN
-                INSERT INTO transaction_participants (tx_id, address_id, role, amount, token_mint_id)
+                INSERT INTO transaction_party (tx_id, address_id, role, amount, token_mint_id)
                 VALUES (p_tx_id, v_owner_id, 'receiver', v_post_amount - v_pre_amount, v_mint_id)
                 ON DUPLICATE KEY UPDATE amount = VALUES(amount);
             ELSE
-                INSERT INTO transaction_participants (tx_id, address_id, role, amount, token_mint_id)
+                INSERT INTO transaction_party (tx_id, address_id, role, amount, token_mint_id)
                 VALUES (p_tx_id, v_owner_id, 'sender', v_pre_amount - v_post_amount, v_mint_id)
                 ON DUPLICATE KEY UPDATE amount = VALUES(amount);
             END IF;
@@ -305,7 +305,7 @@ BEGIN
                 UPDATE addresses SET address_type = 'program' WHERE id = v_program_id AND address_type IS NULL;
             END IF;
 
-            INSERT IGNORE INTO transaction_participants (tx_id, address_id, role, instruction_index, inner_instruction_index)
+            INSERT IGNORE INTO transaction_party (tx_id, address_id, role, instruction_index, inner_instruction_index)
             VALUES (p_tx_id, v_program_id, 'program', v_instruction_index, v_inner_idx);
 
             SET @inner_accounts = JSON_EXTRACT(p_inner_instructions, CONCAT('$[', v_idx, '].instructions[', v_inner_idx, '].accounts'));
@@ -324,7 +324,7 @@ BEGIN
                         SET v_address_id = LAST_INSERT_ID();
                     END IF;
 
-                    INSERT IGNORE INTO transaction_participants (tx_id, address_id, role, instruction_index, inner_instruction_index)
+                    INSERT IGNORE INTO transaction_party (tx_id, address_id, role, instruction_index, inner_instruction_index)
                     VALUES (p_tx_id, v_address_id, 'other', v_instruction_index, v_inner_idx);
 
                     SET @acct_idx = @acct_idx + 1;

@@ -14,7 +14,7 @@ class Program
         {
             "https://mainnet.helius-rpc.com/?api-key=6960a1d3-7d1d-46ac-bae2-f015aa7ad922"
         };
-        var connectionString = "Server=localhost;Database=solana_events;User=root;Password=rootpassword;";
+        var connectionString = "Server=localhost;Database=t16o;User=root;Password=rootpassword;";
 
         // Test tokens - mix of Meteora LP tokens
         var testTokens = new[]

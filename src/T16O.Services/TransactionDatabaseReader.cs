@@ -44,7 +44,7 @@ internal class TransactionDatabaseReader
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new MySqlCommand(
-            "SELECT solana_events.fn_tx_get(@p_signature, @p_bitmask) AS transaction_json",
+            "SELECT t16o.fn_tx_get(@p_signature, @p_bitmask) AS transaction_json",
             connection);
 
         command.Parameters.AddWithValue("@p_signature", signature);
@@ -88,7 +88,7 @@ internal class TransactionDatabaseReader
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new MySqlCommand(
-            "SELECT EXISTS(SELECT 1 FROM solana_events.tx_payload WHERE signature = @p_signature)",
+            "SELECT EXISTS(SELECT 1 FROM t16o.transaction WHERE signature = @p_signature)",
             connection);
 
         command.Parameters.AddWithValue("@p_signature", signature);

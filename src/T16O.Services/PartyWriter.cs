@@ -35,7 +35,7 @@ internal class PartyWriter
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new MySqlCommand(
-            "SELECT solana_events.fn_signature_exists('party', @p_signature)",
+            "SELECT t16o.fn_signature_exists('participant', @p_signature)",
             connection);
 
         command.Parameters.AddWithValue("@p_signature", signature);
@@ -57,7 +57,7 @@ internal class PartyWriter
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("solana_events.usp_party_merge", connection)
+        await using var command = new MySqlCommand("t16o.usp_party_merge", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure,
             CommandTimeout = 60 // Party merge can take time for complex transactions

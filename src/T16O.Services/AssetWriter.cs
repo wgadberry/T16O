@@ -103,7 +103,7 @@ internal class AssetWriter
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new MySqlCommand("solana_events.usp_asset_merge", connection)
+        await using var command = new MySqlCommand("t16o.usp_address_mint_merge", connection)
         {
             CommandType = System.Data.CommandType.StoredProcedure
         };

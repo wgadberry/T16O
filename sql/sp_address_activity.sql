@@ -35,7 +35,7 @@ BEGIN
             COUNT(DISTINCT tp.tx_id) as tx_count,
             SUM(CASE WHEN tp.token_mint_id IS NULL THEN tp.amount ELSE 0 END) as sol_lamports,
             SUM(CASE WHEN tp.token_mint_id IS NOT NULL THEN tp.amount ELSE 0 END) as token_amount
-        FROM transaction_participants tp
+        FROM transaction_party tp
         WHERE tp.address_id = v_address_id
         GROUP BY tp.role
         ORDER BY tx_count DESC;
@@ -47,7 +47,7 @@ BEGIN
             SUM(CASE WHEN tp.role = 'sender' THEN tp.amount ELSE 0 END) as sent,
             SUM(CASE WHEN tp.role = 'receiver' THEN tp.amount ELSE 0 END) as received,
             COUNT(DISTINCT tp.tx_id) as tx_count
-        FROM transaction_participants tp
+        FROM transaction_party tp
         JOIN addresses mint ON tp.token_mint_id = mint.id
         WHERE tp.address_id = v_address_id
           AND tp.token_mint_id IS NOT NULL
@@ -69,7 +69,7 @@ BEGIN
             mint.address as mint_address,
             tp.instruction_index,
             tp.inner_instruction_index
-        FROM transaction_participants tp
+        FROM transaction_party tp
         JOIN transactions t ON tp.tx_id = t.id
         LEFT JOIN addresses mint ON tp.token_mint_id = mint.id
         WHERE tp.address_id = v_address_id
@@ -82,9 +82,9 @@ BEGIN
             COALESCE(other_addr.label, NULL) as label,
             COUNT(DISTINCT t.id) as shared_tx_count,
             GROUP_CONCAT(DISTINCT tp2.role ORDER BY tp2.role SEPARATOR ', ') as roles
-        FROM transaction_participants tp
+        FROM transaction_party tp
         JOIN transactions t ON tp.tx_id = t.id
-        JOIN transaction_participants tp2 ON tp2.tx_id = t.id AND tp2.address_id != tp.address_id
+        JOIN transaction_party tp2 ON tp2.tx_id = t.id AND tp2.address_id != tp.address_id
         JOIN addresses other_addr ON tp2.address_id = other_addr.id
         WHERE tp.address_id = v_address_id
           AND other_addr.address_type NOT IN ('program')
@@ -97,9 +97,9 @@ BEGIN
             prog.address,
             COALESCE(prog.label, NULL) as label,
             COUNT(DISTINCT t.id) as tx_count
-        FROM transaction_participants tp
+        FROM transaction_party tp
         JOIN transactions t ON tp.tx_id = t.id
-        JOIN transaction_participants tp2 ON tp2.tx_id = t.id AND tp2.role = 'program'
+        JOIN transaction_party tp2 ON tp2.tx_id = t.id AND tp2.role = 'program'
         JOIN addresses prog ON tp2.address_id = prog.id
         WHERE tp.address_id = v_address_id
         GROUP BY prog.id
