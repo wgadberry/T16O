@@ -55,8 +55,8 @@ public class RabbitMqTransactionDbWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 message at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 10);;
+        // Prefetch count for parallel message processing
+        RabbitMqConnection.SetPrefetchCount(_channel, 25);
     }
 
     /// <summary>

@@ -1,15 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir:*)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" diff --stat)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" log --oneline -3)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/ src/ .claude/settings.local.json)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" commit -m \"$(cat <<''EOF''\nAdd t16o_db schema, party table, and update procedures\n\n- Add complete database schema (schema.sql) with all table DDLs\n- Add party table for detailed balance change tracking with counterparties\n- Add sp_party_merge procedure to extract balance changes from transactions\n- Add fn_reconstruct_transaction and fn_tx_get functions\n- Add sp_address_ensure, sp_address_merge, sp_tx_merge procedures\n- Update sp_addresses_build and sp_address_activity to use transaction_party\n- Fix worker configs to use t16o virtual host and t16o_db database\n- Update service database references from solana_events to t16o_db\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
-      "Bash(ren \"C:\\Users\\wgadb\\source\\repos\\T16O\\sql\\usp_mint_get.sql\" sp_mint_get.sql)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" log --oneline -2)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/ .claude/settings.local.json)",
-      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" commit -m \"$(cat <<''EOF''\nAdd config procedures and default settings\n\n- Add sp_get_config, sp_get_configs_by_type, sp_get_config_changes, sp_set_config\n- Add config_defaults.sql with 80+ configuration settings\n- Rename usp_mint_get to sp_mint_get for consistent naming\n- Remove unused tx_party.sql\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
+      "Bash(1 <<'ENDSQL'\nDELETE FROM party WHERE tx_id = 18493;\nCALL sp_party_merge('5tv8GmprXYWVWrGJAapp91hk2zLsKGYws1VUkM9gpZm2EhzyFLNAypjxUh27QN8Nq9QKQgMBkWM6WUsFqqDpfBwB');\nSELECT COUNT(*) as party_count FROM party WHERE tx_id = 18493;\nSELECT id, owner_id, mint_id, amount_change, party_type, counterparty_id FROM party WHERE tx_id = 18493;\nENDSQL)",
+      "Bash(1 <<'ENDSQL'\nDELETE FROM party WHERE tx_id = 18493;\nCALL sp_party_merge('5tv8GmprXYWVWrGJAapp91hk2zLsKGYws1VUkM9gpZm2EhzyFLNAypjxUh27QN8Nq9QKQgMBkWM6WUsFqqDpfBwB');\nSELECT COUNT(*) as party_count FROM party WHERE tx_id = 18493;\nSELECT id, owner_id, mint_id, amount_change, party_type, counterparty_id, balance_type FROM party WHERE tx_id = 18493;\nENDSQL)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" diff sql/sp_party_merge.sql)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/sp_party_merge.sql sql/party.sql sql/fn_signature_exists.sql)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" commit -m \"$(cat <<''EOF''\nFix sp_party_merge to resolve token accounts from loadedAddresses\n\n- Add support for v0 transactions with address lookup tables\n- Resolve token accounts from account_keys, loadedAddresses.writable,\n  or loadedAddresses.readonly based on accountIndex\n- Add retry loop with deadlock/duplicate key handling\n- Pre-populate addresses table before inserting party records\n- Use CTEs instead of temp tables for MySQL compatibility\n- Add counterparty linking via party_type and counterparty_id columns\n- Add fn_signature_exists function for checking object existence\n- Update party table schema with account_index, party_type, balance_type\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add sql/party.sql sql/sp_party_merge.sql)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" commit -m \"$(cat <<''EOF''\nAdd action_type detection to party table\n\n- Add action_type ENUM column with 14 types: fee, rent, transfer,\n  transferChecked, burn, mint, swap, createAccount, closeAccount,\n  stake, unstake, reward, airdrop, unknown\n- Update sp_party_merge to detect action types from log_messages:\n  - fee: SOL decrease on account_index 0 with no counterparty\n  - burn/mint: Token changes with Burn/MintTo instructions\n  - swap: DEX operations (Jupiter, Raydium, Orca, Meteora)\n  - transfer/transferChecked: Token transfers with counterparty\n  - createAccount: SOL decrease with InitializeAccount\n  - closeAccount: SOL increase with CloseAccount\n  - stake/unstake: Stake program operations\n- Add idx_action_type index for efficient filtering\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(python -m json.tool:*)",
+      "Bash(git -C \"C:\\Users\\wgadb\\source\\repos\\T16O\" add -A)"
     ],
     "deny": [],
     "ask": []

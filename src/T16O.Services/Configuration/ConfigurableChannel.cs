@@ -44,7 +44,7 @@ public class ConfigurableChannel : IDisposable
         IModel channel,
         string queueName,
         ConfigurationService configService,
-        ushort initialPrefetch = 10)
+        ushort initialPrefetch = 50)
     {
         _channel = channel ?? throw new ArgumentNullException(nameof(channel));
         _queueName = queueName ?? throw new ArgumentNullException(nameof(queueName));

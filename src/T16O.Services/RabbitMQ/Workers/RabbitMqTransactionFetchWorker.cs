@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +15,7 @@ namespace T16O.Services.RabbitMQ.Workers;
 /// <summary>
 /// Transaction fetch worker - orchestrates distributed transaction fetching.
 /// Checks database cache first, fetches from blockchain if not found, saves to database, replies to caller.
+/// Uses batch collection to gather messages before processing sequentially for controlled RPC pacing.
 /// </summary>
 public class RabbitMqTransactionFetchWorker : IDisposable
 {
@@ -23,7 +26,13 @@ public class RabbitMqTransactionFetchWorker : IDisposable
     private readonly IConnection _connection;
     private readonly IModel _channel;
     private readonly bool _useSiteRpcQueue;
+    private readonly int _batchSize;
+    private readonly int _batchWaitMs;
     private bool _disposed;
+
+    // Batch collection
+    private readonly ConcurrentQueue<(BasicDeliverEventArgs Args, FetchTransactionRequest Request)> _pendingMessages = new();
+    private readonly SemaphoreSlim _batchSignal = new(0);
 
     /// <summary>
     /// Initialize the fetch worker - orchestrates distributed services
@@ -31,16 +40,22 @@ public class RabbitMqTransactionFetchWorker : IDisposable
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
     /// <param name="useSiteRpcQueue">If true, use dedicated site RPC queue for cache misses (isolated from batch traffic)</param>
+    /// <param name="batchSize">Number of messages to collect before processing (default 50)</param>
+    /// <param name="batchWaitMs">Max milliseconds to wait for batch to fill (default 100)</param>
     public RabbitMqTransactionFetchWorker(
         RabbitMqConfig config,
         string dbConnectionString,
-        bool useSiteRpcQueue = false)
+        bool useSiteRpcQueue = false,
+        int batchSize = 50,
+        int batchWaitMs = 100)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _dbReader = new TransactionDatabaseReader(dbConnectionString);
         _writer = new TransactionWriter(dbConnectionString);
         _rpcClient = new RabbitMqRpcClient(config);
         _useSiteRpcQueue = useSiteRpcQueue;
+        _batchSize = batchSize;
+        _batchWaitMs = batchWaitMs;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -48,8 +63,8 @@ public class RabbitMqTransactionFetchWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 message at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 10);
+        // Prefetch matches batch size for optimal throughput
+        RabbitMqConnection.SetPrefetchCount(_channel, (ushort)_batchSize);
     }
 
     /// <summary>
@@ -59,16 +74,46 @@ public class RabbitMqTransactionFetchWorker : IDisposable
     /// <param name="cancellationToken">Cancellation token</param>
     public async Task StartAsync(string queueName, CancellationToken cancellationToken = default)
     {
+        // Start batch processor task
+        var processorTask = Task.Run(() => BatchProcessorLoop(cancellationToken), cancellationToken);
+
         var consumer = new EventingBasicConsumer(_channel);
-        consumer.Received += async (model, ea) =>
+        consumer.Received += (model, ea) =>
         {
             try
             {
-                var response = await ProcessMessageAsync(ea, cancellationToken);
-                SendReply(ea, response);
+                var body = ea.Body.ToArray();
+                var json = Encoding.UTF8.GetString(body);
+                var request = JsonSerializer.Deserialize<FetchTransactionRequest>(json);
+
+                if (request != null && !string.IsNullOrWhiteSpace(request.Signature))
+                {
+                    _pendingMessages.Enqueue((ea, request));
+                    _batchSignal.Release();
+                }
+                else
+                {
+                    // Invalid request - send error reply and ack
+                    var errorResponse = new FetchTransactionResponse
+                    {
+                        Success = false,
+                        Error = "Invalid request: signature is required",
+                        Source = "error"
+                    };
+                    SendReply(ea, errorResponse);
+                    _channel.BasicAck(ea.DeliveryTag, multiple: false);
+                }
             }
-            finally
+            catch (Exception ex)
             {
+                // Parse error - send error reply and ack
+                var errorResponse = new FetchTransactionResponse
+                {
+                    Success = false,
+                    Error = $"Parse error: {ex.Message}",
+                    Source = "error"
+                };
+                SendReply(ea, errorResponse);
                 _channel.BasicAck(ea.DeliveryTag, multiple: false);
             }
         };
@@ -78,33 +123,95 @@ public class RabbitMqTransactionFetchWorker : IDisposable
             autoAck: false,
             consumer: consumer);
 
-        // Keep worker running until cancellation
-        await Task.Delay(Timeout.Infinite, cancellationToken);
+        // Wait for processor or cancellation
+        await processorTask;
+    }
+
+    /// <summary>
+    /// Batch processor loop - collects messages and processes them sequentially
+    /// </summary>
+    private async Task BatchProcessorLoop(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                // Wait for at least one message or timeout
+                var gotMessage = await _batchSignal.WaitAsync(_batchWaitMs, cancellationToken);
+
+                if (!gotMessage && _pendingMessages.IsEmpty)
+                    continue;
+
+                // Collect batch (up to batchSize or whatever is available)
+                var batch = new List<(BasicDeliverEventArgs Args, FetchTransactionRequest Request)>();
+                var deadline = DateTime.UtcNow.AddMilliseconds(_batchWaitMs);
+
+                while (batch.Count < _batchSize && DateTime.UtcNow < deadline)
+                {
+                    if (_pendingMessages.TryDequeue(out var item))
+                    {
+                        batch.Add(item);
+                    }
+                    else if (batch.Count > 0)
+                    {
+                        // Have some messages, wait briefly for more
+                        await _batchSignal.WaitAsync(10, cancellationToken);
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                if (batch.Count == 0)
+                    continue;
+
+                // Process batch sequentially - one RPC call at a time
+                foreach (var (args, request) in batch)
+                {
+                    try
+                    {
+                        var response = await ProcessMessageAsync(request, cancellationToken);
+                        SendReply(args, response);
+                    }
+                    catch (Exception ex)
+                    {
+                        var errorResponse = new FetchTransactionResponse
+                        {
+                            Signature = request.Signature,
+                            Success = false,
+                            Error = $"Processing error: {ex.Message}",
+                            Source = "error"
+                        };
+                        SendReply(args, errorResponse);
+                    }
+                    finally
+                    {
+                        _channel.BasicAck(args.DeliveryTag, multiple: false);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TxFetchWorker] Batch processor error: {ex.Message}");
+                await Task.Delay(100, cancellationToken);
+            }
+        }
     }
 
     /// <summary>
     /// Process incoming fetch request
     /// </summary>
     private async Task<FetchTransactionResponse> ProcessMessageAsync(
-        BasicDeliverEventArgs ea,
+        FetchTransactionRequest request,
         CancellationToken cancellationToken)
     {
         try
         {
-            var body = ea.Body.ToArray();
-            var json = Encoding.UTF8.GetString(body);
-            var request = JsonSerializer.Deserialize<FetchTransactionRequest>(json);
-
-            if (request == null || string.IsNullOrWhiteSpace(request.Signature))
-            {
-                return new FetchTransactionResponse
-                {
-                    Success = false,
-                    Error = "Invalid request: signature is required",
-                    Source = "error"
-                };
-            }
-
             // Step 1: Check database cache first
             var cached = await _dbReader.GetTransactionAsync(
                 request.Signature,
@@ -223,6 +330,7 @@ public class RabbitMqTransactionFetchWorker : IDisposable
         if (_disposed)
             return;
 
+        _batchSignal?.Dispose();
         _rpcClient?.Dispose();
         _channel?.Close();
         _channel?.Dispose();

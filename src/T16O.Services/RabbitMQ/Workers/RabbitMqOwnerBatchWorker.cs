@@ -44,7 +44,7 @@ public class RabbitMqOwnerBatchWorker : IDisposable
         RabbitMqConnection.SetupTaskInfrastructure(_channel, _config);
 
         // Limit prefetch to 1 batch at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 10);;
+        RabbitMqConnection.SetPrefetchCount(_channel, 25);;
     }
 
     /// <summary>

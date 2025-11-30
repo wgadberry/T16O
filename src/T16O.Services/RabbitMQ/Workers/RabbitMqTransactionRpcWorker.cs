@@ -62,7 +62,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
         // CRITICAL: Limit prefetch to 1 message at a time to avoid RPC rate limits
-        RabbitMqConnection.SetPrefetchCount(_channel, 10);;
+        RabbitMqConnection.SetPrefetchCount(_channel, 25);;
     }
 
     /// <summary>

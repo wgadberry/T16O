@@ -67,7 +67,7 @@ public class RabbitMqPartyWriteWorker : IDisposable
         else
         {
             // Fallback to static prefetch
-            RabbitMqConnection.SetPrefetchCount(_channel, 10);
+            RabbitMqConnection.SetPrefetchCount(_channel, 25);
         }
     }
 

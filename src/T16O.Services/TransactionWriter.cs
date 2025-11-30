@@ -91,7 +91,7 @@ public class TransactionWriter
         command.Parameters.AddWithValue("p_status", status);
         command.Parameters.AddWithValue("p_err", transaction.Error ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("p_block_time", transaction.BlockTime ?? (object)DBNull.Value);
-        command.Parameters.AddWithValue("p_block_time_formatted", blockTimeFormatted ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("p_block_time_utc", blockTimeFormatted ?? (object)DBNull.Value);
 
         // Extract fee from transaction data
         var fee = ExtractFee(transaction.TransactionData.Value);

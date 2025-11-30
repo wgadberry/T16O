@@ -291,8 +291,6 @@ BEGIN
             SET v_success = TRUE;
         END;
     END WHILE;
-
-    SELECT ROW_COUNT() AS rows_affected;
 END //
 
 DELIMITER ;
