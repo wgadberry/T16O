@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\T16O.Models\T16O.Models.csproj" />
+    <ProjectReference Include="..\T16O.Utilities\T16O.Utilities.csproj" />
+    <ProjectReference Include="..\..\Solnet\src\Solnet.Rpc\Solnet.Rpc.csproj" />
+    <ProjectReference Include="..\..\Solnet\src\Solnet.Programs\Solnet.Programs.csproj" />
+    <ProjectReference Include="..\..\Solnet\src\Solnet.Wallet\Solnet.Wallet.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MySql.Data" Version="9.5.0" />
+    <PackageReference Include="MySqlConnector" Version="2.5.0" />
+    <PackageReference Include="RabbitMQ.Client" Version="6.8.1" />
+    <PackageReference Include="System.Net.Http.Json" Version="10.0.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

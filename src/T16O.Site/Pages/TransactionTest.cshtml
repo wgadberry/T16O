@@ -1,0 +1,149 @@
+@page
+@model T16O.Site.Pages.TransactionTestModel
+@{
+    ViewData["Title"] = "Transaction Test";
+}
+
+<div class="container mt-5">
+    <h1 class="mb-4">T16O Transaction Tester</h1>
+
+    <div class="card">
+        <div class="card-body">
+            <form method="post">
+                <div class="mb-3">
+                    <label for="signature" class="form-label">Transaction Signature</label>
+                    <input type="text"
+                           class="form-control"
+                           id="signature"
+                           name="signature"
+                           value="@Model.Signature"
+                           placeholder="Enter Solana transaction signature"
+                           required>
+                    <div class="form-text">Enter a valid Solana transaction signature (base58 string)</div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="bitmaskPreset" class="form-label">Bitmask Preset</label>
+                    <select class="form-select"
+                            id="bitmaskPreset"
+                            name="bitmaskPreset"
+                            onchange="updateBitmask()">
+                        <option value="">-- Select Preset --</option>
+                        <option value="2">Log Messages (2)</option>
+                        <option value="4">Pre Balances (4)</option>
+                        <option value="8">Post Balances (8)</option>
+                        <option value="16">Pre Token Balances (16)</option>
+                        <option value="32">Inner Instructions (32)</option>
+                        <option value="64">Post Token Balances (64)</option>
+                        <option value="126">Meta (126)</option>
+                        <option value="256">Account Keys (256)</option>
+                        <option value="512">Instructions (512)</option>
+                        <option value="1024">Address Table Lookups (1024)</option>
+                        <option value="1792">Message/Transaction (1792)</option>
+                        <option value="1918">Entire Transaction (1918)</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label for="bitmask" class="form-label">Bitmask Value</label>
+                    <input type="number"
+                           class="form-control"
+                           id="bitmask"
+                           name="bitmask"
+                           value="@(Model.Bitmask ?? 1918)"
+                           min="0"
+                           max="2047">
+                    <div class="form-text">Or enter a custom bitmask value (0-2047)</div>
+                </div>
+
+                <div class="mb-3">
+                    <div class="form-check">
+                        <input type="checkbox"
+                               class="form-check-input"
+                               id="forceOverwrite"
+                               name="forceOverwrite"
+                               value="true"
+                               @(Model.ForceOverwrite ? "checked" : "")>
+                        <label class="form-check-label" for="forceOverwrite">
+                            Force Overwrite (delete existing tx_party and tx_payload records)
+                        </label>
+                    </div>
+                    <div class="form-text text-warning">
+                        Use this to reprocess a transaction when asset info has been updated.
+                        Deletes existing records so they can be recreated with correct symbol information.
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Fetch Transaction</button>
+            </form>
+        </div>
+    </div>
+
+    @if (Model.Response != null)
+    {
+        <div class="card mt-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Response</h5>
+                <span class="badge @(Model.Response.Success ? "bg-success" : "bg-danger")">
+                    @(Model.Response.Success ? "Success" : "Failed")
+                </span>
+            </div>
+            <div class="card-body">
+                @if (!string.IsNullOrEmpty(Model.InfoMessage))
+                {
+                    <div class="alert alert-info" role="alert">
+                        <strong>Info:</strong> @Model.InfoMessage
+                    </div>
+                }
+                @if (!string.IsNullOrEmpty(Model.ErrorMessage))
+                {
+                    <div class="alert alert-danger" role="alert">
+                        <strong>Error:</strong> @Model.ErrorMessage
+                    </div>
+                }
+
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <strong>Source:</strong> @Model.Response.Source
+                    </div>
+                    <div class="col-md-3">
+                        <strong>Slot:</strong> @(Model.Response.Slot?.ToString() ?? "N/A")
+                    </div>
+                    <div class="col-md-3">
+                        <strong>Block Time:</strong> @(Model.Response.BlockTime?.ToString() ?? "N/A")
+                    </div>
+                    <div class="col-md-3">
+                        <strong>Processing Time:</strong> @Model.ProcessingTime.TotalSeconds.ToString("F2")s
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrEmpty(Model.Response.Error))
+                {
+                    <div class="alert alert-warning">
+                        <strong>Response Error:</strong> @Model.Response.Error
+                    </div>
+                }
+
+                @if (Model.Response.Transaction.HasValue)
+                {
+                    <h6>Transaction Data:</h6>
+                    <pre class="bg-light p-3 rounded" style="max-height: 600px; overflow-y: auto;"><code>@Model.PrettifiedJson</code></pre>
+                    <div class="mt-2">
+                        <small class="text-muted">Size: @Model.Response.Transaction.Value.GetRawText().Length bytes</small>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@section Scripts {
+    <script>
+        function updateBitmask() {
+            var preset = document.getElementById('bitmaskPreset').value;
+            if (preset) {
+                document.getElementById('bitmask').value = preset;
+            }
+        }
+    </script>
+}
