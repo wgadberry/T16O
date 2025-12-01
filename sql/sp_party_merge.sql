@@ -3,7 +3,7 @@ DROP PROCEDURE IF EXISTS sp_party_merge;
 DELIMITER //
 
 CREATE PROCEDURE sp_party_merge(IN p_signature VARCHAR(88))
-BEGIN
+proc_body: BEGIN
     DECLARE v_tx_id BIGINT UNSIGNED;
     DECLARE v_log_messages MEDIUMTEXT;
     DECLARE v_programs JSON;
@@ -26,6 +26,12 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Transaction not found';
     END IF;
 
+    -- Check if party records already exist for this tx - skip if so (idempotent)
+    -- This prevents deadlocks when multiple workers try to process the same tx
+    IF EXISTS (SELECT 1 FROM party WHERE tx_id = v_tx_id LIMIT 1) THEN
+        LEAVE proc_body;
+    END IF;
+
     -- Pre-analyze logs once (avoid repeated LIKE in every row)
     SET v_has_swap = (v_log_messages LIKE '%Instruction: Swap%'
                       OR v_log_messages LIKE '%Instruction: Route%'
@@ -42,8 +48,8 @@ BEGIN
     SET v_has_init_account = (v_log_messages LIKE '%Instruction: InitializeAccount%');
     SET v_has_stake_program = (v_programs LIKE '%Stake11111111111111111111111111111111111111%');
 
-    -- Delete existing party records for this tx (INSERT-only pattern, no updates)
-    DELETE FROM party WHERE tx_id = v_tx_id;
+    -- No DELETE needed - we check for existence above and skip if records exist
+    -- This eliminates deadlocks from concurrent DELETE+INSERT on same tx_id
 
     -- Create temp table for balance changes
     DROP TEMPORARY TABLE IF EXISTS tmp_balances;
