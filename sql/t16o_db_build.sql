@@ -1,7 +1,7 @@
 -- ============================================================================
 -- T16O DATABASE BUILD SCRIPT
 -- Complete database schema, procedures, functions, and seed data
--- Generated: 2024-11-30
+-- Generated: 2024-12-01
 -- ============================================================================
 
 -- ============================================================================
@@ -111,37 +111,56 @@ CREATE TABLE IF NOT EXISTS `transactions` (
 -- party table - Detailed balance changes with counterparty linking
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `party` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `tx_id` bigint unsigned NOT NULL,
-  `owner_id` int unsigned NOT NULL,
-  `token_account_id` int unsigned DEFAULT NULL,
-  `mint_id` int unsigned NOT NULL,
-  `account_index` smallint unsigned DEFAULT NULL COMMENT 'Index in account_keys array',
-  `party_type` enum('party','counterparty') NOT NULL DEFAULT 'party',
-  `balance_type` enum('SOL','TOKEN') NOT NULL DEFAULT 'TOKEN',
-  `action_type` enum('fee','rent','transfer','transferChecked','burn','mint','swap','createAccount','closeAccount','stake','unstake','reward','airdrop','unknown') DEFAULT NULL COMMENT 'Type of action that caused this balance change',
-  `counterparty_id` bigint unsigned DEFAULT NULL COMMENT 'Links to the counterparty party record',
-  `pre_amount` bigint DEFAULT NULL,
-  `post_amount` bigint DEFAULT NULL,
-  `amount_change` bigint DEFAULT NULL,
-  `decimals` tinyint unsigned DEFAULT NULL,
-  `pre_ui_amount` decimal(30,9) DEFAULT NULL,
-  `post_ui_amount` decimal(30,9) DEFAULT NULL,
-  `ui_amount_change` decimal(30,9) DEFAULT NULL,
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `tx_id` BIGINT UNSIGNED NOT NULL,
+  `owner_id` INT UNSIGNED NOT NULL,
+  `token_account_id` INT UNSIGNED DEFAULT NULL,
+  `mint_id` INT UNSIGNED NOT NULL,
+  `account_index` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Index in account_keys array',
+  `party_type` ENUM('party', 'counterparty') NOT NULL DEFAULT 'party',
+  `balance_type` ENUM('SOL', 'TOKEN') NOT NULL DEFAULT 'TOKEN',
+  `action_type` ENUM(
+    'fee',              -- Transaction fee paid
+    'rent',             -- Account rent payment
+    'transfer',         -- SPL Token Transfer instruction
+    'transferChecked',  -- SPL Token TransferChecked instruction
+    'burn',             -- Token burn (Burn or BurnChecked)
+    'mint',             -- Token mint (MintTo or MintToChecked)
+    'swap',             -- DEX swap operation
+    'createAccount',    -- Account creation (InitializeAccount)
+    'closeAccount',     -- Account closure (CloseAccount)
+    'stake',            -- Stake delegation
+    'unstake',          -- Stake withdrawal
+    'reward',           -- Staking/validator reward
+    'airdrop',          -- Airdrop distribution
+    'unknown'           -- Unable to determine action type
+  ) DEFAULT NULL COMMENT 'Type of action that caused this balance change',
+  `counterparty_owner_id` INT UNSIGNED DEFAULT NULL COMMENT 'Links to the counterparty owner address',
+  `pre_amount` BIGINT DEFAULT NULL,
+  `post_amount` BIGINT DEFAULT NULL,
+  `amount_change` BIGINT DEFAULT NULL,
+  `decimals` TINYINT UNSIGNED DEFAULT NULL,
+  `pre_ui_amount` DECIMAL(30,9) DEFAULT NULL,
+  `post_ui_amount` DECIMAL(30,9) DEFAULT NULL,
+  `ui_amount_change` DECIMAL(30,9) DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tx_owner_mint_acct` (`tx_id`,`owner_id`,`mint_id`,`account_index`),
+  UNIQUE KEY `uk_tx_owner_mint_acct` (`tx_id`, `owner_id`, `mint_id`, `account_index`),
+  KEY `idx_owner` (`owner_id`),
   KEY `idx_mint` (`mint_id`),
   KEY `idx_token_account` (`token_account_id`),
-  KEY `idx_owner_mint` (`owner_id`,`mint_id`),
-  KEY `idx_counterparty` (`counterparty_id`),
-  KEY `idx_action_type` (`tx_id`,`action_type`),
+  KEY `idx_owner_mint` (`owner_id`, `mint_id`),
+  KEY `idx_amount_change` (`amount_change`),
+  KEY `idx_party_type` (`party_type`),
+  KEY `idx_counterparty` (`counterparty_owner_id`),
+  KEY `idx_balance_type` (`balance_type`),
+  KEY `idx_action_type` (`action_type`),
   CONSTRAINT `party_ibfk_1` FOREIGN KEY (`tx_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
   CONSTRAINT `party_ibfk_2` FOREIGN KEY (`owner_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
   CONSTRAINT `party_ibfk_3` FOREIGN KEY (`token_account_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
   CONSTRAINT `party_ibfk_4` FOREIGN KEY (`mint_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
-  CONSTRAINT `party_ibfk_5` FOREIGN KEY (`counterparty_id`) REFERENCES `party` (`id`) ON DELETE SET NULL
+  CONSTRAINT `party_ibfk_5` FOREIGN KEY (`counterparty_owner_id`) REFERENCES `addresses` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
@@ -503,265 +522,280 @@ DELIMITER ;
 -- ----------------------------------------------------------------------------
 -- sp_party_merge - Create party records from transaction balance changes
 -- Extracts SOL and TOKEN balance changes, links counterparties, detects action types
+-- Uses temp tables and check-then-insert pattern to avoid deadlocks
 -- ----------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_party_merge;
 DELIMITER //
 CREATE PROCEDURE sp_party_merge(IN p_signature VARCHAR(88))
-main: BEGIN
+proc_body: BEGIN
     DECLARE v_tx_id BIGINT UNSIGNED;
-    DECLARE v_retry_count INT DEFAULT 0;
-    DECLARE v_max_retries INT DEFAULT 3;
-    DECLARE v_success BOOLEAN DEFAULT FALSE;
+    DECLARE v_log_messages MEDIUMTEXT;
+    DECLARE v_programs JSON;
+    DECLARE v_has_swap BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_burn BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_mint_to BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_transfer BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_transfer_checked BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_close_account BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_init_account BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_stake_program BOOLEAN DEFAULT FALSE;
 
-    SELECT id INTO v_tx_id FROM transactions WHERE signature = p_signature;
+    -- Get tx_id and cache log analysis
+    SELECT id, log_messages, programs
+    INTO v_tx_id, v_log_messages, v_programs
+    FROM transactions
+    WHERE signature = p_signature;
 
     IF v_tx_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Transaction not found';
     END IF;
 
-    retry_loop: WHILE v_retry_count < v_max_retries AND NOT v_success DO
-        BEGIN
-            DECLARE EXIT HANDLER FOR 1213, 1062
-            BEGIN
-                SET v_retry_count = v_retry_count + 1;
-                IF v_retry_count >= v_max_retries THEN
-                    RESIGNAL;
-                END IF;
-            END;
+    -- Check if party records already exist for this tx - skip if so (idempotent)
+    -- This prevents deadlocks when multiple workers try to process the same tx
+    IF EXISTS (SELECT 1 FROM party WHERE tx_id = v_tx_id LIMIT 1) THEN
+        LEAVE proc_body;
+    END IF;
 
-            -- Ensure all addresses exist
-            INSERT INTO addresses (address, address_type)
-            WITH all_addresses AS (
-                -- Mints from pre token balances
-                SELECT CAST(tb.mint AS CHAR(44) CHARACTER SET utf8mb4) AS address,
-                       CAST('mint' AS CHAR(10) CHARACTER SET utf8mb4) AS address_type
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (mint VARCHAR(44) PATH '$.mint')) AS tb
-                WHERE t.id = v_tx_id AND tb.mint IS NOT NULL
-                UNION
-                -- Mints from post token balances
-                SELECT CAST(tb.mint AS CHAR(44) CHARACTER SET utf8mb4),
-                       CAST('mint' AS CHAR(10) CHARACTER SET utf8mb4)
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.post_token_balances, '$[*]' COLUMNS (mint VARCHAR(44) PATH '$.mint')) AS tb
-                WHERE t.id = v_tx_id AND tb.mint IS NOT NULL
-                UNION
-                -- Owners from pre token balances
-                SELECT CAST(tb.owner AS CHAR(44) CHARACTER SET utf8mb4),
-                       CAST('wallet' AS CHAR(10) CHARACTER SET utf8mb4)
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (owner VARCHAR(44) PATH '$.owner')) AS tb
-                WHERE t.id = v_tx_id AND tb.owner IS NOT NULL
-                UNION
-                -- Owners from post token balances
-                SELECT CAST(tb.owner AS CHAR(44) CHARACTER SET utf8mb4),
-                       CAST('wallet' AS CHAR(10) CHARACTER SET utf8mb4)
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.post_token_balances, '$[*]' COLUMNS (owner VARCHAR(44) PATH '$.owner')) AS tb
-                WHERE t.id = v_tx_id AND tb.owner IS NOT NULL
-                UNION
-                -- Token accounts (resolve from account_keys or loadedAddresses)
-                SELECT CAST(
-                    CASE
-                        WHEN tb.accountIndex < JSON_LENGTH(t.account_keys) THEN
-                            JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', tb.accountIndex, ']')))
-                        WHEN tb.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0)) THEN
-                            JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.writable[', tb.accountIndex - JSON_LENGTH(t.account_keys), ']')))
-                        ELSE
-                            JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.readonly[', tb.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0), ']')))
-                    END
-                AS CHAR(44) CHARACTER SET utf8mb4), CAST('ata' AS CHAR(10) CHARACTER SET utf8mb4)
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (accountIndex INT PATH '$.accountIndex')) AS tb
-                WHERE t.id = v_tx_id
-                UNION
-                -- All account_keys for SOL balances
-                SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', idx.i - 1, ']'))) AS CHAR(44) CHARACTER SET utf8mb4),
-                       CAST('wallet' AS CHAR(10) CHARACTER SET utf8mb4)
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.account_keys, '$[*]' COLUMNS (i FOR ORDINALITY)) AS idx
-                WHERE t.id = v_tx_id
-                UNION
-                -- Wrapped SOL mint
-                SELECT CAST('So11111111111111111111111111111111111111112' AS CHAR(44) CHARACTER SET utf8mb4),
-                       CAST('mint' AS CHAR(10) CHARACTER SET utf8mb4)
-            )
-            SELECT address, address_type FROM all_addresses WHERE address IS NOT NULL
-            ON DUPLICATE KEY UPDATE address_type = COALESCE(addresses.address_type, VALUES(address_type));
+    -- Pre-analyze logs once (avoid repeated LIKE in every row)
+    SET v_has_swap = (v_log_messages LIKE '%Instruction: Swap%'
+                      OR v_log_messages LIKE '%Instruction: Route%'
+                      OR v_programs LIKE '%JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4%'
+                      OR v_programs LIKE '%whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc%'
+                      OR v_programs LIKE '%675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8%'
+                      OR v_programs LIKE '%CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK%'
+                      OR v_programs LIKE '%LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo%');
+    SET v_has_burn = (v_log_messages LIKE '%Instruction: Burn%' OR v_log_messages LIKE '%Instruction: BurnChecked%');
+    SET v_has_mint_to = (v_log_messages LIKE '%Instruction: MintTo%' OR v_log_messages LIKE '%Instruction: MintToChecked%');
+    SET v_has_transfer = (v_log_messages LIKE '%Instruction: Transfer%');
+    SET v_has_transfer_checked = (v_log_messages LIKE '%Instruction: TransferChecked%');
+    SET v_has_close_account = (v_log_messages LIKE '%Instruction: CloseAccount%');
+    SET v_has_init_account = (v_log_messages LIKE '%Instruction: InitializeAccount%');
+    SET v_has_stake_program = (v_programs LIKE '%Stake11111111111111111111111111111111111111%');
 
-            -- Insert party records
-            INSERT INTO party (
-                tx_id, owner_id, token_account_id, mint_id, account_index,
-                party_type, balance_type, counterparty_id,
-                pre_amount, post_amount, amount_change, decimals,
-                pre_ui_amount, post_ui_amount, ui_amount_change
-            )
-            WITH token_balances AS (
-                -- TOKEN balances
-                SELECT
-                    t.id AS tx_id,
-                    pre.accountIndex AS account_index,
-                    CAST(pre.mint AS CHAR(44) CHARACTER SET utf8mb4) AS mint,
-                    CAST(pre.owner AS CHAR(44) CHARACTER SET utf8mb4) AS owner,
-                    CAST(
-                        CASE
-                            WHEN pre.accountIndex < JSON_LENGTH(t.account_keys) THEN
-                                JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', pre.accountIndex, ']')))
-                            WHEN pre.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0)) THEN
-                                JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.writable[', pre.accountIndex - JSON_LENGTH(t.account_keys), ']')))
-                            ELSE
-                                JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.readonly[', pre.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0), ']')))
-                        END
-                    AS CHAR(44) CHARACTER SET utf8mb4) AS token_account,
-                    pre.decimals,
-                    CAST(pre.amount AS SIGNED) AS pre_amount,
-                    CAST(COALESCE(post.amount, 0) AS SIGNED) AS post_amount,
-                    CAST(COALESCE(post.amount, 0) AS SIGNED) - CAST(pre.amount AS SIGNED) AS balance_change,
-                    pre.uiAmount AS pre_ui_amount,
-                    post.uiAmount AS post_ui_amount,
-                    COALESCE(post.uiAmount, 0) - COALESCE(pre.uiAmount, 0) AS ui_balance_change,
-                    CAST('TOKEN' AS CHAR(10) CHARACTER SET utf8mb4) AS balance_type
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (
-                    accountIndex INT PATH '$.accountIndex',
-                    mint VARCHAR(44) PATH '$.mint',
-                    owner VARCHAR(44) PATH '$.owner',
-                    decimals INT PATH '$.uiTokenAmount.decimals',
-                    uiAmount DECIMAL(30,9) PATH '$.uiTokenAmount.uiAmount',
-                    amount VARCHAR(100) PATH '$.uiTokenAmount.amount'
-                )) AS pre
-                LEFT JOIN JSON_TABLE(t.post_token_balances, '$[*]' COLUMNS (
-                    accountIndex INT PATH '$.accountIndex',
-                    mint VARCHAR(44) PATH '$.mint',
-                    uiAmount DECIMAL(30,9) PATH '$.uiTokenAmount.uiAmount',
-                    amount VARCHAR(100) PATH '$.uiTokenAmount.amount'
-                )) AS post ON pre.accountIndex = post.accountIndex AND pre.mint = post.mint
-                WHERE t.id = v_tx_id
+    -- Create temp table for balance changes
+    DROP TEMPORARY TABLE IF EXISTS tmp_balances;
+    CREATE TEMPORARY TABLE tmp_balances (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        account_index INT,
+        mint VARCHAR(44),
+        owner VARCHAR(44),
+        token_account VARCHAR(44),
+        decimals INT,
+        pre_amount BIGINT,
+        post_amount BIGINT,
+        balance_change BIGINT,
+        pre_ui_amount DECIMAL(30,9),
+        post_ui_amount DECIMAL(30,9),
+        ui_balance_change DECIMAL(30,9),
+        balance_type VARCHAR(10),
+        owner_id INT UNSIGNED,
+        token_account_id INT UNSIGNED,
+        mint_id INT UNSIGNED,
+        counterparty_owner_id INT UNSIGNED,
+        has_counterparty BOOLEAN DEFAULT FALSE,
+        action_type VARCHAR(20),
+        KEY idx_mint (mint),
+        KEY idx_owner (owner)
+    ) ENGINE=MEMORY;
 
-                UNION ALL
+    -- Populate temp table with TOKEN balances
+    INSERT INTO tmp_balances (account_index, mint, owner, token_account, decimals,
+                              pre_amount, post_amount, balance_change,
+                              pre_ui_amount, post_ui_amount, ui_balance_change, balance_type)
+    SELECT
+        pre.accountIndex,
+        CAST(pre.mint AS CHAR(44)),
+        CAST(pre.owner AS CHAR(44)),
+        CAST(
+            CASE
+                WHEN pre.accountIndex < JSON_LENGTH(t.account_keys) THEN
+                    JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', pre.accountIndex, ']')))
+                WHEN pre.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0)) THEN
+                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.writable[', pre.accountIndex - JSON_LENGTH(t.account_keys), ']')))
+                ELSE
+                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.readonly[', pre.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0), ']')))
+            END
+        AS CHAR(44)),
+        pre.decimals,
+        CAST(pre.amount AS SIGNED),
+        CAST(COALESCE(post.amount, 0) AS SIGNED),
+        CAST(COALESCE(post.amount, 0) AS SIGNED) - CAST(pre.amount AS SIGNED),
+        pre.uiAmount,
+        post.uiAmount,
+        COALESCE(post.uiAmount, 0) - COALESCE(pre.uiAmount, 0),
+        'TOKEN'
+    FROM transactions t
+    CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (
+        accountIndex INT PATH '$.accountIndex',
+        mint VARCHAR(44) PATH '$.mint',
+        owner VARCHAR(44) PATH '$.owner',
+        decimals INT PATH '$.uiTokenAmount.decimals',
+        uiAmount DECIMAL(30,9) PATH '$.uiTokenAmount.uiAmount',
+        amount VARCHAR(100) PATH '$.uiTokenAmount.amount'
+    )) AS pre
+    LEFT JOIN JSON_TABLE(t.post_token_balances, '$[*]' COLUMNS (
+        accountIndex INT PATH '$.accountIndex',
+        mint VARCHAR(44) PATH '$.mint',
+        uiAmount DECIMAL(30,9) PATH '$.uiTokenAmount.uiAmount',
+        amount VARCHAR(100) PATH '$.uiTokenAmount.amount'
+    )) AS post ON pre.accountIndex = post.accountIndex AND pre.mint = post.mint
+    WHERE t.id = v_tx_id;
 
-                -- SOL balances
-                SELECT
-                    t.id,
-                    idx.i - 1,
-                    CAST('So11111111111111111111111111111111111111112' AS CHAR(44) CHARACTER SET utf8mb4),
-                    CAST(JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', idx.i - 1, ']'))) AS CHAR(44) CHARACTER SET utf8mb4),
-                    CAST(JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', idx.i - 1, ']'))) AS CHAR(44) CHARACTER SET utf8mb4),
-                    9,
-                    pre_bal.balance,
-                    post_bal.balance,
-                    COALESCE(post_bal.balance, 0) - COALESCE(pre_bal.balance, 0),
-                    pre_bal.balance / 1000000000.0,
-                    post_bal.balance / 1000000000.0,
-                    (COALESCE(post_bal.balance, 0) - COALESCE(pre_bal.balance, 0)) / 1000000000.0,
-                    CAST('SOL' AS CHAR(10) CHARACTER SET utf8mb4)
-                FROM transactions t
-                CROSS JOIN JSON_TABLE(t.account_keys, '$[*]' COLUMNS (i FOR ORDINALITY)) AS idx
-                LEFT JOIN JSON_TABLE(t.pre_balances, '$[*]' COLUMNS (j FOR ORDINALITY, balance BIGINT PATH '$')) AS pre_bal ON idx.i = pre_bal.j
-                LEFT JOIN JSON_TABLE(t.post_balances, '$[*]' COLUMNS (k FOR ORDINALITY, balance BIGINT PATH '$')) AS post_bal ON idx.i = post_bal.k
-                WHERE t.id = v_tx_id
-            )
-            SELECT
-                tb.tx_id,
-                owner_addr.id,
-                token_acct_addr.id,
-                mint_addr.id,
-                tb.account_index,
-                'party',
-                tb.balance_type,
-                NULL,
-                tb.pre_amount,
-                tb.post_amount,
-                tb.balance_change,
-                tb.decimals,
-                tb.pre_ui_amount,
-                tb.post_ui_amount,
-                tb.ui_balance_change
-            FROM token_balances tb
-            JOIN addresses owner_addr ON owner_addr.address = tb.owner
-            LEFT JOIN addresses token_acct_addr ON token_acct_addr.address = tb.token_account
-            JOIN addresses mint_addr ON mint_addr.address = tb.mint
-            WHERE tb.balance_change != 0
-            ON DUPLICATE KEY UPDATE
-                pre_amount = VALUES(pre_amount),
-                post_amount = VALUES(post_amount),
-                amount_change = VALUES(amount_change),
-                pre_ui_amount = VALUES(pre_ui_amount),
-                post_ui_amount = VALUES(post_ui_amount),
-                ui_amount_change = VALUES(ui_amount_change),
-                balance_type = VALUES(balance_type),
-                updated_at = NOW();
+    -- Add SOL balances
+    INSERT INTO tmp_balances (account_index, mint, owner, token_account, decimals,
+                              pre_amount, post_amount, balance_change,
+                              pre_ui_amount, post_ui_amount, ui_balance_change, balance_type)
+    SELECT
+        idx.i - 1,
+        'So11111111111111111111111111111111111111112',
+        CAST(JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', idx.i - 1, ']'))) AS CHAR(44)),
+        CAST(JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', idx.i - 1, ']'))) AS CHAR(44)),
+        9,
+        pre_bal.balance,
+        post_bal.balance,
+        COALESCE(post_bal.balance, 0) - COALESCE(pre_bal.balance, 0),
+        pre_bal.balance / 1000000000.0,
+        post_bal.balance / 1000000000.0,
+        (COALESCE(post_bal.balance, 0) - COALESCE(pre_bal.balance, 0)) / 1000000000.0,
+        'SOL'
+    FROM transactions t
+    CROSS JOIN JSON_TABLE(t.account_keys, '$[*]' COLUMNS (i FOR ORDINALITY)) AS idx
+    LEFT JOIN JSON_TABLE(t.pre_balances, '$[*]' COLUMNS (j FOR ORDINALITY, balance BIGINT PATH '$')) AS pre_bal ON idx.i = pre_bal.j
+    LEFT JOIN JSON_TABLE(t.post_balances, '$[*]' COLUMNS (k FOR ORDINALITY, balance BIGINT PATH '$')) AS post_bal ON idx.i = post_bal.k
+    WHERE t.id = v_tx_id;
 
-            -- Link counterparties
-            UPDATE party p1
-            JOIN party p2 ON
-                p1.tx_id = p2.tx_id
-                AND p1.mint_id = p2.mint_id
-                AND p1.id != p2.id
-                AND SIGN(p1.amount_change) = -SIGN(p2.amount_change)
-            SET
-                p1.counterparty_id = p2.id,
-                p1.party_type = CASE WHEN p1.amount_change > 0 THEN 'party' ELSE 'counterparty' END
-            WHERE p1.tx_id = v_tx_id
-              AND p1.counterparty_id IS NULL;
+    -- Remove zero balance changes
+    DELETE FROM tmp_balances WHERE balance_change = 0;
 
-            -- Detect action types
-            UPDATE party p
-            JOIN transactions t ON p.tx_id = t.id
-            SET p.action_type = (
-                CASE
-                    WHEN p.balance_type = 'SOL' AND p.account_index = 0 AND p.amount_change < 0
-                         AND p.counterparty_id IS NULL AND ABS(p.amount_change) <= 10000000
-                    THEN 'fee'
-                    WHEN p.balance_type = 'SOL' AND p.amount_change < 0 AND p.counterparty_id IS NULL
-                         AND ABS(p.amount_change) BETWEEN 890880 AND 2100000
-                         AND t.log_messages LIKE '%InitializeAccount%'
-                    THEN 'rent'
-                    WHEN p.balance_type = 'TOKEN' AND p.amount_change < 0
-                         AND (t.log_messages LIKE '%Instruction: Burn%' OR t.log_messages LIKE '%Instruction: BurnChecked%')
-                    THEN 'burn'
-                    WHEN p.balance_type = 'TOKEN' AND p.amount_change > 0
-                         AND (t.log_messages LIKE '%Instruction: MintTo%' OR t.log_messages LIKE '%Instruction: MintToChecked%')
-                    THEN 'mint'
-                    WHEN p.balance_type = 'SOL' AND p.amount_change > 0
-                         AND t.log_messages LIKE '%Instruction: CloseAccount%'
-                    THEN 'closeAccount'
-                    WHEN t.log_messages LIKE '%Instruction: InitializeAccount%'
-                         AND p.balance_type = 'SOL' AND p.amount_change < 0
-                    THEN 'createAccount'
-                    WHEN (t.log_messages LIKE '%Instruction: Swap%' OR t.log_messages LIKE '%Instruction: Route%'
-                          OR t.programs LIKE '%JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4%'
-                          OR t.programs LIKE '%whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc%'
-                          OR t.programs LIKE '%675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8%'
-                          OR t.programs LIKE '%CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK%'
-                          OR t.programs LIKE '%LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo%')
-                         AND p.balance_type = 'TOKEN' AND p.counterparty_id IS NOT NULL
-                    THEN 'swap'
-                    WHEN p.balance_type = 'TOKEN' AND t.log_messages LIKE '%Instruction: TransferChecked%'
-                         AND p.counterparty_id IS NOT NULL
-                    THEN 'transferChecked'
-                    WHEN p.balance_type = 'TOKEN' AND t.log_messages LIKE '%Instruction: Transfer%'
-                         AND p.counterparty_id IS NOT NULL
-                    THEN 'transfer'
-                    WHEN p.balance_type = 'SOL' AND p.counterparty_id IS NOT NULL
-                    THEN 'transfer'
-                    WHEN t.programs LIKE '%Stake11111111111111111111111111111111111111%' AND p.amount_change < 0
-                    THEN 'stake'
-                    WHEN t.programs LIKE '%Stake11111111111111111111111111111111111111%' AND p.amount_change > 0
-                    THEN 'unstake'
-                    ELSE 'unknown'
-                END
-            )
-            WHERE p.tx_id = v_tx_id AND p.action_type IS NULL;
+    -- Collect unique addresses into a separate temp table first
+    DROP TEMPORARY TABLE IF EXISTS tmp_addresses;
+    CREATE TEMPORARY TABLE tmp_addresses (
+        address VARCHAR(44) PRIMARY KEY,
+        address_type VARCHAR(10)
+    ) ENGINE=MEMORY;
 
-            SET v_success = TRUE;
-        END;
-    END WHILE;
+    INSERT IGNORE INTO tmp_addresses (address, address_type)
+    SELECT mint, 'mint' FROM tmp_balances WHERE mint IS NOT NULL;
+
+    INSERT IGNORE INTO tmp_addresses (address, address_type)
+    SELECT owner, 'wallet' FROM tmp_balances WHERE owner IS NOT NULL;
+
+    INSERT IGNORE INTO tmp_addresses (address, address_type)
+    SELECT token_account, 'ata' FROM tmp_balances WHERE token_account IS NOT NULL AND token_account != owner;
+
+    -- Remove addresses that already exist (avoid INSERT IGNORE gap locks)
+    DELETE ta FROM tmp_addresses ta
+    WHERE EXISTS (SELECT 1 FROM addresses a WHERE a.address = ta.address);
+
+    -- Only insert truly new addresses (no gap locks if empty)
+    INSERT INTO addresses (address, address_type)
+    SELECT address, address_type FROM tmp_addresses;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addresses;
+
+    -- Resolve address IDs using JOINs (not correlated subqueries)
+    UPDATE tmp_balances tb
+    JOIN addresses a_owner ON a_owner.address = tb.owner
+    SET tb.owner_id = a_owner.id;
+
+    UPDATE tmp_balances tb
+    JOIN addresses a_token ON a_token.address = tb.token_account
+    SET tb.token_account_id = a_token.id;
+
+    UPDATE tmp_balances tb
+    JOIN addresses a_mint ON a_mint.address = tb.mint
+    SET tb.mint_id = a_mint.id;
+
+    -- Create a second temp table for counterparty lookup (MySQL can't self-join temp tables)
+    DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
+    CREATE TEMPORARY TABLE tmp_counterparties (
+        mint VARCHAR(44),
+        owner VARCHAR(44),
+        owner_id INT UNSIGNED,
+        balance_sign TINYINT,
+        KEY idx_lookup (mint, balance_sign)
+    ) ENGINE=MEMORY;
+
+    INSERT INTO tmp_counterparties (mint, owner, owner_id, balance_sign)
+    SELECT mint, owner, owner_id, SIGN(balance_change)
+    FROM tmp_balances;
+
+    -- Update counterparty info using the second temp table
+    UPDATE tmp_balances tb
+    LEFT JOIN tmp_counterparties tc ON tc.mint = tb.mint
+                                    AND tc.owner != tb.owner
+                                    AND tc.balance_sign = -SIGN(tb.balance_change)
+    SET tb.counterparty_owner_id = tc.owner_id,
+        tb.has_counterparty = (tc.owner_id IS NOT NULL);
+
+    -- Set action_type based on pre-analyzed flags
+    UPDATE tmp_balances tb
+    SET tb.action_type = CASE
+        WHEN tb.balance_type = 'SOL' AND tb.account_index = 0 AND tb.balance_change < 0
+             AND ABS(tb.balance_change) <= 10000000 AND NOT tb.has_counterparty
+        THEN 'fee'
+        WHEN tb.balance_type = 'SOL' AND tb.balance_change < 0
+             AND ABS(tb.balance_change) BETWEEN 890880 AND 2100000 AND v_has_init_account
+        THEN 'rent'
+        WHEN tb.balance_type = 'TOKEN' AND tb.balance_change < 0 AND v_has_burn
+        THEN 'burn'
+        WHEN tb.balance_type = 'TOKEN' AND tb.balance_change > 0 AND v_has_mint_to
+        THEN 'mint'
+        WHEN tb.balance_type = 'SOL' AND tb.balance_change > 0 AND v_has_close_account
+        THEN 'closeAccount'
+        WHEN tb.balance_type = 'SOL' AND tb.balance_change < 0 AND v_has_init_account
+        THEN 'createAccount'
+        WHEN v_has_swap AND tb.balance_type = 'TOKEN' AND tb.has_counterparty
+        THEN 'swap'
+        WHEN tb.balance_type = 'TOKEN' AND v_has_transfer_checked AND tb.has_counterparty
+        THEN 'transferChecked'
+        WHEN tb.balance_type = 'TOKEN' AND v_has_transfer AND tb.has_counterparty
+        THEN 'transfer'
+        WHEN tb.balance_type = 'SOL' AND tb.has_counterparty
+        THEN 'transfer'
+        WHEN v_has_stake_program AND tb.balance_change < 0
+        THEN 'stake'
+        WHEN v_has_stake_program AND tb.balance_change > 0
+        THEN 'unstake'
+        ELSE 'unknown'
+    END;
+
+    -- Insert party records (single INSERT, no updates needed)
+    INSERT INTO party (
+        tx_id, owner_id, token_account_id, mint_id, account_index,
+        party_type, balance_type, counterparty_owner_id, action_type,
+        pre_amount, post_amount, amount_change, decimals,
+        pre_ui_amount, post_ui_amount, ui_amount_change
+    )
+    SELECT
+        v_tx_id,
+        tb.owner_id,
+        tb.token_account_id,
+        tb.mint_id,
+        tb.account_index,
+        CASE WHEN tb.balance_change > 0 THEN 'party' ELSE 'counterparty' END,
+        tb.balance_type,
+        tb.counterparty_owner_id,
+        tb.action_type,
+        tb.pre_amount,
+        tb.post_amount,
+        tb.balance_change,
+        tb.decimals,
+        tb.pre_ui_amount,
+        tb.post_ui_amount,
+        tb.ui_balance_change
+    FROM tmp_balances tb
+    WHERE tb.owner_id IS NOT NULL AND tb.mint_id IS NOT NULL;
+
+    -- Cleanup
+    DROP TEMPORARY TABLE IF EXISTS tmp_balances;
+    DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
 END //
 DELIMITER ;
 
 -- ----------------------------------------------------------------------------
 -- sp_address_activity - Get address activity summary as JSON
+-- Uses counterparty_owner_id instead of counterparty_id
 -- ----------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_address_activity;
 DELIMITER //
@@ -1138,6 +1172,71 @@ BEGIN
         FROM addresses a
         WHERE a.address_type = 'mint';
     END IF;
+END //
+DELIMITER ;
+
+-- ----------------------------------------------------------------------------
+-- sp_mint_merge - Insert or update mint/asset data
+-- Called by AssetWriter when fetching asset metadata from RPC
+-- ----------------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_mint_merge;
+DELIMITER //
+CREATE PROCEDURE sp_mint_merge(
+    IN p_mint_address CHAR(44),
+    IN p_interface VARCHAR(32),
+    IN p_name VARCHAR(255),
+    IN p_symbol VARCHAR(32),
+    IN p_authority VARCHAR(44),
+    IN p_collection_address VARCHAR(44),
+    IN p_last_indexed_slot BIGINT UNSIGNED,
+    IN p_asset_json JSON
+)
+BEGIN
+    DECLARE v_address_id INT UNSIGNED;
+    DECLARE v_authority_id INT UNSIGNED;
+    DECLARE v_collection_id INT UNSIGNED;
+
+    -- Ensure mint address exists
+    SELECT id INTO v_address_id FROM addresses WHERE address = p_mint_address;
+    IF v_address_id IS NULL THEN
+        INSERT INTO addresses (address, address_type, label)
+        VALUES (p_mint_address, 'mint', COALESCE(p_symbol, p_name));
+        SET v_address_id = LAST_INSERT_ID();
+    ELSE
+        -- Update type and label if not already set
+        UPDATE addresses
+        SET address_type = COALESCE(address_type, 'mint'),
+            label = COALESCE(label, p_symbol, p_name)
+        WHERE id = v_address_id;
+    END IF;
+
+    -- Ensure authority address exists (if provided)
+    IF p_authority IS NOT NULL AND p_authority != '' THEN
+        SELECT id INTO v_authority_id FROM addresses WHERE address = p_authority;
+        IF v_authority_id IS NULL THEN
+            INSERT IGNORE INTO addresses (address, address_type) VALUES (p_authority, 'wallet');
+            SELECT id INTO v_authority_id FROM addresses WHERE address = p_authority;
+        END IF;
+    END IF;
+
+    -- Ensure collection address exists (if provided)
+    IF p_collection_address IS NOT NULL AND p_collection_address != '' THEN
+        SELECT id INTO v_collection_id FROM addresses WHERE address = p_collection_address;
+        IF v_collection_id IS NULL THEN
+            INSERT IGNORE INTO addresses (address, address_type) VALUES (p_collection_address, 'mint');
+            SELECT id INTO v_collection_id FROM addresses WHERE address = p_collection_address;
+        END IF;
+
+        -- Link mint to collection
+        UPDATE addresses SET parent_id = v_collection_id WHERE id = v_address_id AND parent_id IS NULL;
+    END IF;
+
+    -- Update the address with label
+    UPDATE addresses
+    SET label = COALESCE(label, p_symbol, p_name)
+    WHERE id = v_address_id;
+
+    SELECT v_address_id AS id;
 END //
 DELIMITER ;
 
