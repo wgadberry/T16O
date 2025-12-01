@@ -30,19 +30,19 @@ BEGIN
     DECLARE v_inner_instructions JSON;
     DECLARE v_account_keys JSON;
     DECLARE v_instructions JSON;
-    DECLARE v_address_table_lookups JSON;
+    DECLARE v_loaded_addresses JSON;
 
     -- Fetch from transactions table
     SELECT
         slot, block_time, status, err, fee_lamports, compute_units_consumed,
         version, recent_blockhash, rewards, log_messages, pre_balances,
         post_balances, pre_token_balances, post_token_balances,
-        inner_instructions, account_keys, instructions, address_table_lookups
+        inner_instructions, account_keys, instructions, loaded_addresses
     INTO
         v_slot, v_block_time, v_status, v_err, v_fee_lamports, v_compute_units_consumed,
         v_version, v_recent_blockhash, v_rewards, v_log_messages, v_pre_balances,
         v_post_balances, v_pre_token_balances, v_post_token_balances,
-        v_inner_instructions, v_account_keys, v_instructions, v_address_table_lookups
+        v_inner_instructions, v_account_keys, v_instructions, v_loaded_addresses
     FROM transactions
     WHERE signature = p_signature;
 
@@ -67,7 +67,7 @@ BEGIN
     -- 64   = postTokenBalances
     -- 256  = accountKeys
     -- 512  = instructions
-    -- 1024 = addressTableLookups
+    -- 1024 = loadedAddresses
 
     IF (p_bitmask & 2) = 2 THEN
         SET v_meta = JSON_SET(v_meta, '$.logMessages',
@@ -111,7 +111,7 @@ BEGIN
     END IF;
 
     IF (p_bitmask & 1024) = 1024 THEN
-        SET v_message = JSON_SET(v_message, '$.addressTableLookups', COALESCE(v_address_table_lookups, JSON_ARRAY()));
+        SET v_meta = JSON_SET(v_meta, '$.loadedAddresses', COALESCE(v_loaded_addresses, JSON_OBJECT('writable', JSON_ARRAY(), 'readonly', JSON_ARRAY())));
     END IF;
 
     -- Build transaction wrapper
