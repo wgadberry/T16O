@@ -31,7 +31,7 @@ BEGIN
     DECLARE v_post_token_balances JSON;
     DECLARE v_inner_instructions JSON;
     DECLARE v_account_keys JSON;
-    DECLARE v_address_table_lookups JSON;
+    DECLARE v_loaded_addresses JSON;
     DECLARE v_compute_units_consumed INT UNSIGNED;
     DECLARE v_version CHAR(16);
     DECLARE v_recent_blockhash CHAR(88);
@@ -48,7 +48,7 @@ BEGIN
         SET v_post_token_balances = JSON_EXTRACT(p_transaction_json, '$.meta.postTokenBalances');
         SET v_inner_instructions = JSON_EXTRACT(p_transaction_json, '$.meta.innerInstructions');
         SET v_account_keys = JSON_EXTRACT(p_transaction_json, '$.transaction.message.accountKeys');
-        SET v_address_table_lookups = JSON_EXTRACT(p_transaction_json, '$.transaction.message.addressTableLookups');
+        SET v_loaded_addresses = JSON_EXTRACT(p_transaction_json, '$.meta.loadedAddresses');
         SET v_compute_units_consumed = JSON_EXTRACT(p_transaction_json, '$.meta.computeUnitsConsumed');
         SET v_version = JSON_UNQUOTE(JSON_EXTRACT(p_transaction_json, '$.version'));
         SET v_recent_blockhash = JSON_UNQUOTE(JSON_EXTRACT(p_transaction_json, '$.transaction.message.recentBlockhash'));
@@ -102,7 +102,7 @@ BEGIN
         pre_token_balances,
         post_token_balances,
         inner_instructions,
-        address_table_lookups,
+        loaded_addresses,
         rewards,
         extended_attributes
     ) VALUES (
@@ -132,7 +132,7 @@ BEGIN
         v_pre_token_balances,
         v_post_token_balances,
         v_inner_instructions,
-        v_address_table_lookups,
+        v_loaded_addresses,
         v_rewards,
         v_extended_attributes
     )
@@ -162,7 +162,7 @@ BEGIN
         pre_token_balances = VALUES(pre_token_balances),
         post_token_balances = VALUES(post_token_balances),
         inner_instructions = VALUES(inner_instructions),
-        address_table_lookups = VALUES(address_table_lookups),
+        loaded_addresses = VALUES(loaded_addresses),
         rewards = VALUES(rewards),
         extended_attributes = VALUES(extended_attributes);
 END //

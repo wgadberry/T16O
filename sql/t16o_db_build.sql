@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   `pre_token_balances` json DEFAULT NULL,
   `post_token_balances` json DEFAULT NULL,
   `inner_instructions` json DEFAULT NULL,
-  `address_table_lookups` json DEFAULT NULL,
+  `loaded_addresses` json DEFAULT NULL COMMENT 'From meta.loadedAddresses: {writable:[], readonly:[]}',
   `rewards` json DEFAULT NULL,
   `extended_attributes` json DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
@@ -211,18 +211,18 @@ BEGIN
     DECLARE v_inner_instructions JSON;
     DECLARE v_account_keys JSON;
     DECLARE v_instructions JSON;
-    DECLARE v_address_table_lookups JSON;
+    DECLARE v_loaded_addresses JSON;
 
     SELECT
         slot, block_time, status, err, fee_lamports, compute_units_consumed,
         version, recent_blockhash, rewards, log_messages, pre_balances,
         post_balances, pre_token_balances, post_token_balances,
-        inner_instructions, account_keys, instructions, address_table_lookups
+        inner_instructions, account_keys, instructions, loaded_addresses
     INTO
         v_slot, v_block_time, v_status, v_err, v_fee_lamports, v_compute_units_consumed,
         v_version, v_recent_blockhash, v_rewards, v_log_messages, v_pre_balances,
         v_post_balances, v_pre_token_balances, v_post_token_balances,
-        v_inner_instructions, v_account_keys, v_instructions, v_address_table_lookups
+        v_inner_instructions, v_account_keys, v_instructions, v_loaded_addresses
     FROM transactions
     WHERE signature = p_signature;
 
@@ -278,7 +278,7 @@ BEGIN
     END IF;
 
     IF (p_bitmask & 1024) = 1024 THEN
-        SET v_message = JSON_SET(v_message, '$.addressTableLookups', COALESCE(v_address_table_lookups, JSON_ARRAY()));
+        SET v_meta = JSON_SET(v_meta, '$.loadedAddresses', COALESCE(v_loaded_addresses, JSON_OBJECT('writable', JSON_ARRAY(), 'readonly', JSON_ARRAY())));
     END IF;
 
     SET v_transaction = JSON_OBJECT('message', v_message);
@@ -430,7 +430,7 @@ BEGIN
     DECLARE v_post_token_balances JSON;
     DECLARE v_inner_instructions JSON;
     DECLARE v_account_keys JSON;
-    DECLARE v_address_table_lookups JSON;
+    DECLARE v_loaded_addresses JSON;
     DECLARE v_compute_units_consumed INT UNSIGNED;
     DECLARE v_version CHAR(16);
     DECLARE v_recent_blockhash CHAR(88);
@@ -447,7 +447,7 @@ BEGIN
         SET v_post_token_balances = JSON_EXTRACT(p_transaction_json, '$.meta.postTokenBalances');
         SET v_inner_instructions = JSON_EXTRACT(p_transaction_json, '$.meta.innerInstructions');
         SET v_account_keys = JSON_EXTRACT(p_transaction_json, '$.transaction.message.accountKeys');
-        SET v_address_table_lookups = JSON_EXTRACT(p_transaction_json, '$.transaction.message.addressTableLookups');
+        SET v_loaded_addresses = JSON_EXTRACT(p_transaction_json, '$.meta.loadedAddresses');
         SET v_compute_units_consumed = JSON_EXTRACT(p_transaction_json, '$.meta.computeUnitsConsumed');
         SET v_version = JSON_UNQUOTE(JSON_EXTRACT(p_transaction_json, '$.version'));
         SET v_recent_blockhash = JSON_UNQUOTE(JSON_EXTRACT(p_transaction_json, '$.transaction.message.recentBlockhash'));
@@ -476,7 +476,7 @@ BEGIN
         version, recent_blockhash, transaction_json, transaction_bin,
         compression_type, original_size, programs, instructions, account_keys,
         log_messages, pre_balances, post_balances, pre_token_balances,
-        post_token_balances, inner_instructions, address_table_lookups,
+        post_token_balances, inner_instructions, loaded_addresses,
         rewards, extended_attributes
     ) VALUES (
         p_signature, p_slot, p_block_time, p_block_time_utc, p_status, v_success, p_err,
@@ -484,7 +484,7 @@ BEGIN
         v_version, v_recent_blockhash, p_transaction_json, p_transaction_bin,
         p_compression_type, p_original_size, p_programs, p_instructions, v_account_keys,
         v_log_messages, v_pre_balances, v_post_balances, v_pre_token_balances,
-        v_post_token_balances, v_inner_instructions, v_address_table_lookups,
+        v_post_token_balances, v_inner_instructions, v_loaded_addresses,
         v_rewards, v_extended_attributes
     )
     ON DUPLICATE KEY UPDATE
@@ -513,7 +513,7 @@ BEGIN
         pre_token_balances = VALUES(pre_token_balances),
         post_token_balances = VALUES(post_token_balances),
         inner_instructions = VALUES(inner_instructions),
-        address_table_lookups = VALUES(address_table_lookups),
+        loaded_addresses = VALUES(loaded_addresses),
         rewards = VALUES(rewards),
         extended_attributes = VALUES(extended_attributes);
 END //
@@ -610,10 +610,10 @@ proc_body: BEGIN
             CASE
                 WHEN pre.accountIndex < JSON_LENGTH(t.account_keys) THEN
                     JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', pre.accountIndex, ']')))
-                WHEN pre.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0)) THEN
-                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.writable[', pre.accountIndex - JSON_LENGTH(t.account_keys), ']')))
+                WHEN pre.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.loaded_addresses, '$.writable')), 0)) THEN
+                    JSON_UNQUOTE(JSON_EXTRACT(t.loaded_addresses, CONCAT('$.writable[', pre.accountIndex - JSON_LENGTH(t.account_keys), ']')))
                 ELSE
-                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.readonly[', pre.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0), ']')))
+                    JSON_UNQUOTE(JSON_EXTRACT(t.loaded_addresses, CONCAT('$.readonly[', pre.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.loaded_addresses, '$.writable')), 0), ']')))
             END
         AS CHAR(44)),
         pre.decimals,

@@ -89,10 +89,10 @@ proc_body: BEGIN
             CASE
                 WHEN pre.accountIndex < JSON_LENGTH(t.account_keys) THEN
                     JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', pre.accountIndex, ']')))
-                WHEN pre.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0)) THEN
-                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.writable[', pre.accountIndex - JSON_LENGTH(t.account_keys), ']')))
+                WHEN pre.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.loaded_addresses, '$.writable')), 0)) THEN
+                    JSON_UNQUOTE(JSON_EXTRACT(t.loaded_addresses, CONCAT('$.writable[', pre.accountIndex - JSON_LENGTH(t.account_keys), ']')))
                 ELSE
-                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.readonly[', pre.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0), ']')))
+                    JSON_UNQUOTE(JSON_EXTRACT(t.loaded_addresses, CONCAT('$.readonly[', pre.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.loaded_addresses, '$.writable')), 0), ']')))
             END
         AS CHAR(44)),
         pre.decimals,
