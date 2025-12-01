@@ -273,11 +273,13 @@ public class RabbitMqTransactionDbWorker : IDisposable
                     AddToKnownMintsCache(mint);
                 }
                 Console.WriteLine($"[TxDbWorker] {signature}: {unknownCount}/{mints.Count} unknown mints queued");
+                // AssetRpcWorker will publish to party.write when all mints are fetched
             }
-
-            // Always publish to party.write immediately
-            // Null symbols will be updated by periodic background process
-            PublishPartyWriteRequest(signature, priority);
+            else
+            {
+                // No unknown mints - publish to party.write immediately
+                PublishPartyWriteRequest(signature, priority);
+            }
         }
         catch (Exception ex)
         {
