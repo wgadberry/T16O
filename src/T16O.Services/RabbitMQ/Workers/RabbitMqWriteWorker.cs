@@ -41,7 +41,7 @@ public class RabbitMqWriteWorker : IDisposable
         RabbitMqConnection.SetupTaskInfrastructure(_channel, _config);
 
         // Limit prefetch to 1 message at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 25);;
+        RabbitMqConnection.SetPrefetchCount(_channel, 15);
     }
 
     /// <summary>

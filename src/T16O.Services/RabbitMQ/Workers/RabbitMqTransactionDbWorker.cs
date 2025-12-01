@@ -56,7 +56,7 @@ public class RabbitMqTransactionDbWorker : IDisposable
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
         // Prefetch count for parallel message processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 25);
+        RabbitMqConnection.SetPrefetchCount(_channel, 15);
     }
 
     /// <summary>

@@ -6,7 +6,6 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 -- Delete party records (links to transactions)
 TRUNCATE TABLE party;
-TRUNCATE TABLE transaction_party;
 
 -- Delete transaction_party records if exists
 -- TRUNCATE TABLE transaction_party;
