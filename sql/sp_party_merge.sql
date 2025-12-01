@@ -45,61 +45,10 @@ BEGIN
     -- Delete existing party records for this tx (INSERT-only pattern, no updates)
     DELETE FROM party WHERE tx_id = v_tx_id;
 
-    -- Ensure addresses exist (INSERT IGNORE - no updates needed)
-    INSERT IGNORE INTO addresses (address, address_type)
-    WITH all_addresses AS (
-        -- Mints from token balances
-        SELECT DISTINCT CAST(tb.mint AS CHAR(44)) AS address, 'mint' AS address_type
-        FROM transactions t
-        CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (mint VARCHAR(44) PATH '$.mint')) AS tb
-        WHERE t.id = v_tx_id AND tb.mint IS NOT NULL
-        UNION
-        SELECT DISTINCT CAST(tb.mint AS CHAR(44)), 'mint'
-        FROM transactions t
-        CROSS JOIN JSON_TABLE(t.post_token_balances, '$[*]' COLUMNS (mint VARCHAR(44) PATH '$.mint')) AS tb
-        WHERE t.id = v_tx_id AND tb.mint IS NOT NULL
-        UNION
-        -- Owners from token balances
-        SELECT DISTINCT CAST(tb.owner AS CHAR(44)), 'wallet'
-        FROM transactions t
-        CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (owner VARCHAR(44) PATH '$.owner')) AS tb
-        WHERE t.id = v_tx_id AND tb.owner IS NOT NULL
-        UNION
-        SELECT DISTINCT CAST(tb.owner AS CHAR(44)), 'wallet'
-        FROM transactions t
-        CROSS JOIN JSON_TABLE(t.post_token_balances, '$[*]' COLUMNS (owner VARCHAR(44) PATH '$.owner')) AS tb
-        WHERE t.id = v_tx_id AND tb.owner IS NOT NULL
-        UNION
-        -- Token accounts from accountIndex
-        SELECT DISTINCT CAST(
-            CASE
-                WHEN tb.accountIndex < JSON_LENGTH(t.account_keys) THEN
-                    JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', tb.accountIndex, ']')))
-                WHEN tb.accountIndex < (JSON_LENGTH(t.account_keys) + COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0)) THEN
-                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.writable[', tb.accountIndex - JSON_LENGTH(t.account_keys), ']')))
-                ELSE
-                    JSON_UNQUOTE(JSON_EXTRACT(t.transaction_json, CONCAT('$.loadedAddresses.readonly[', tb.accountIndex - JSON_LENGTH(t.account_keys) - COALESCE(JSON_LENGTH(JSON_EXTRACT(t.transaction_json, '$.loadedAddresses.writable')), 0), ']')))
-            END
-        AS CHAR(44)), 'ata'
-        FROM transactions t
-        CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (accountIndex INT PATH '$.accountIndex')) AS tb
-        WHERE t.id = v_tx_id
-        UNION
-        -- All account_keys for SOL balances
-        SELECT DISTINCT CAST(JSON_UNQUOTE(JSON_EXTRACT(t.account_keys, CONCAT('$[', idx.i - 1, ']'))) AS CHAR(44)), 'wallet'
-        FROM transactions t
-        CROSS JOIN JSON_TABLE(t.account_keys, '$[*]' COLUMNS (i FOR ORDINALITY)) AS idx
-        WHERE t.id = v_tx_id
-        UNION
-        -- Wrapped SOL mint
-        SELECT 'So11111111111111111111111111111111111111112', 'mint'
-    )
-    SELECT address, address_type FROM all_addresses WHERE address IS NOT NULL;
-
-    -- Insert party records with counterparty and action_type computed inline
-    -- Use a temp table to first collect all balance changes, then self-join for counterparty
+    -- Create temp table for balance changes
     DROP TEMPORARY TABLE IF EXISTS tmp_balances;
     CREATE TEMPORARY TABLE tmp_balances (
+        id INT AUTO_INCREMENT PRIMARY KEY,
         account_index INT,
         mint VARCHAR(44),
         owner VARCHAR(44),
@@ -115,11 +64,17 @@ BEGIN
         owner_id INT UNSIGNED,
         token_account_id INT UNSIGNED,
         mint_id INT UNSIGNED,
-        KEY idx_mint_change (mint, balance_change)
-    );
+        counterparty_owner_id INT UNSIGNED,
+        has_counterparty BOOLEAN DEFAULT FALSE,
+        action_type VARCHAR(20),
+        KEY idx_mint (mint),
+        KEY idx_owner (owner)
+    ) ENGINE=MEMORY;
 
     -- Populate temp table with TOKEN balances
-    INSERT INTO tmp_balances
+    INSERT INTO tmp_balances (account_index, mint, owner, token_account, decimals,
+                              pre_amount, post_amount, balance_change,
+                              pre_ui_amount, post_ui_amount, ui_balance_change, balance_type)
     SELECT
         pre.accountIndex,
         CAST(pre.mint AS CHAR(44)),
@@ -141,8 +96,7 @@ BEGIN
         pre.uiAmount,
         post.uiAmount,
         COALESCE(post.uiAmount, 0) - COALESCE(pre.uiAmount, 0),
-        'TOKEN',
-        NULL, NULL, NULL
+        'TOKEN'
     FROM transactions t
     CROSS JOIN JSON_TABLE(t.pre_token_balances, '$[*]' COLUMNS (
         accountIndex INT PATH '$.accountIndex',
@@ -161,7 +115,9 @@ BEGIN
     WHERE t.id = v_tx_id;
 
     -- Add SOL balances
-    INSERT INTO tmp_balances
+    INSERT INTO tmp_balances (account_index, mint, owner, token_account, decimals,
+                              pre_amount, post_amount, balance_change,
+                              pre_ui_amount, post_ui_amount, ui_balance_change, balance_type)
     SELECT
         idx.i - 1,
         'So11111111111111111111111111111111111111112',
@@ -174,32 +130,122 @@ BEGIN
         pre_bal.balance / 1000000000.0,
         post_bal.balance / 1000000000.0,
         (COALESCE(post_bal.balance, 0) - COALESCE(pre_bal.balance, 0)) / 1000000000.0,
-        'SOL',
-        NULL, NULL, NULL
+        'SOL'
     FROM transactions t
     CROSS JOIN JSON_TABLE(t.account_keys, '$[*]' COLUMNS (i FOR ORDINALITY)) AS idx
     LEFT JOIN JSON_TABLE(t.pre_balances, '$[*]' COLUMNS (j FOR ORDINALITY, balance BIGINT PATH '$')) AS pre_bal ON idx.i = pre_bal.j
     LEFT JOIN JSON_TABLE(t.post_balances, '$[*]' COLUMNS (k FOR ORDINALITY, balance BIGINT PATH '$')) AS post_bal ON idx.i = post_bal.k
     WHERE t.id = v_tx_id;
 
-    -- Resolve address IDs
-    UPDATE tmp_balances tb
-    JOIN addresses a ON a.address = tb.owner
-    SET tb.owner_id = a.id;
-
-    UPDATE tmp_balances tb
-    JOIN addresses a ON a.address = tb.token_account
-    SET tb.token_account_id = a.id;
-
-    UPDATE tmp_balances tb
-    JOIN addresses a ON a.address = tb.mint
-    SET tb.mint_id = a.id;
-
     -- Remove zero balance changes
     DELETE FROM tmp_balances WHERE balance_change = 0;
 
-    -- Insert party records with counterparty computed via self-join
-    -- action_type computed inline using pre-analyzed flags
+    -- Ensure addresses exist (INSERT IGNORE - no updates, no locks)
+    INSERT IGNORE INTO addresses (address, address_type)
+    SELECT DISTINCT mint, 'mint' FROM tmp_balances WHERE mint IS NOT NULL
+    UNION
+    SELECT DISTINCT owner, 'wallet' FROM tmp_balances WHERE owner IS NOT NULL
+    UNION
+    SELECT DISTINCT token_account, 'ata' FROM tmp_balances WHERE token_account IS NOT NULL AND token_account != owner;
+
+    -- Resolve address IDs (updates to temp table are session-local, no locks)
+    UPDATE tmp_balances tb
+    SET tb.owner_id = (SELECT id FROM addresses WHERE address = tb.owner),
+        tb.token_account_id = (SELECT id FROM addresses WHERE address = tb.token_account),
+        tb.mint_id = (SELECT id FROM addresses WHERE address = tb.mint);
+
+    -- Create a second temp table for counterparty lookup (MySQL can't self-join temp tables)
+    DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
+    CREATE TEMPORARY TABLE tmp_counterparties (
+        mint VARCHAR(44),
+        owner VARCHAR(44),
+        owner_id INT UNSIGNED,
+        balance_sign TINYINT,
+        KEY idx_lookup (mint, balance_sign)
+    ) ENGINE=MEMORY;
+
+    INSERT INTO tmp_counterparties (mint, owner, owner_id, balance_sign)
+    SELECT mint, owner, owner_id, SIGN(balance_change)
+    FROM tmp_balances;
+
+    -- Update counterparty info using the second temp table
+    UPDATE tmp_balances tb
+    SET tb.counterparty_owner_id = (
+        SELECT MIN(tc.owner_id)
+        FROM tmp_counterparties tc
+        WHERE tc.mint = tb.mint
+          AND tc.owner != tb.owner
+          AND tc.balance_sign = -SIGN(tb.balance_change)
+    ),
+    tb.has_counterparty = EXISTS (
+        SELECT 1 FROM tmp_counterparties tc
+        WHERE tc.mint = tb.mint
+          AND tc.owner != tb.owner
+          AND tc.balance_sign = -SIGN(tb.balance_change)
+    );
+
+    -- Set action_type based on pre-analyzed flags
+    UPDATE tmp_balances tb
+    SET tb.action_type = CASE
+        -- Fee: SOL decrease on fee payer (account_index 0) with small amount, no counterparty
+        WHEN tb.balance_type = 'SOL'
+             AND tb.account_index = 0
+             AND tb.balance_change < 0
+             AND ABS(tb.balance_change) <= 10000000
+             AND NOT tb.has_counterparty
+        THEN 'fee'
+
+        -- Rent: SOL decrease for account creation
+        WHEN tb.balance_type = 'SOL'
+             AND tb.balance_change < 0
+             AND ABS(tb.balance_change) BETWEEN 890880 AND 2100000
+             AND v_has_init_account
+        THEN 'rent'
+
+        -- Burn
+        WHEN tb.balance_type = 'TOKEN' AND tb.balance_change < 0 AND v_has_burn
+        THEN 'burn'
+
+        -- Mint
+        WHEN tb.balance_type = 'TOKEN' AND tb.balance_change > 0 AND v_has_mint_to
+        THEN 'mint'
+
+        -- CloseAccount
+        WHEN tb.balance_type = 'SOL' AND tb.balance_change > 0 AND v_has_close_account
+        THEN 'closeAccount'
+
+        -- CreateAccount
+        WHEN tb.balance_type = 'SOL' AND tb.balance_change < 0 AND v_has_init_account
+        THEN 'createAccount'
+
+        -- Swap
+        WHEN v_has_swap AND tb.balance_type = 'TOKEN' AND tb.has_counterparty
+        THEN 'swap'
+
+        -- TransferChecked
+        WHEN tb.balance_type = 'TOKEN' AND v_has_transfer_checked AND tb.has_counterparty
+        THEN 'transferChecked'
+
+        -- Transfer (token)
+        WHEN tb.balance_type = 'TOKEN' AND v_has_transfer AND tb.has_counterparty
+        THEN 'transfer'
+
+        -- SOL Transfer
+        WHEN tb.balance_type = 'SOL' AND tb.has_counterparty
+        THEN 'transfer'
+
+        -- Stake
+        WHEN v_has_stake_program AND tb.balance_change < 0
+        THEN 'stake'
+
+        -- Unstake
+        WHEN v_has_stake_program AND tb.balance_change > 0
+        THEN 'unstake'
+
+        ELSE 'unknown'
+    END;
+
+    -- Insert party records (single INSERT, no updates needed)
     INSERT INTO party (
         tx_id, owner_id, token_account_id, mint_id, account_index,
         party_type, balance_type, counterparty_id, action_type,
@@ -214,90 +260,8 @@ BEGIN
         tb.account_index,
         CASE WHEN tb.balance_change > 0 THEN 'party' ELSE 'counterparty' END,
         tb.balance_type,
-        -- Counterparty: find opposite balance change in same mint
-        (SELECT MIN(tb2.owner_id)
-         FROM tmp_balances tb2
-         WHERE tb2.mint = tb.mint
-           AND tb2.owner != tb.owner
-           AND SIGN(tb2.balance_change) = -SIGN(tb.balance_change)),
-        -- Action type computed inline
-        CASE
-            -- Fee: SOL decrease on fee payer (account_index 0) with small amount
-            WHEN tb.balance_type = 'SOL'
-                 AND tb.account_index = 0
-                 AND tb.balance_change < 0
-                 AND ABS(tb.balance_change) <= 10000000
-                 AND NOT EXISTS (SELECT 1 FROM tmp_balances tb2
-                                WHERE tb2.mint = tb.mint
-                                  AND tb2.owner != tb.owner
-                                  AND SIGN(tb2.balance_change) = -SIGN(tb.balance_change))
-            THEN 'fee'
-
-            -- Rent: SOL decrease for account creation
-            WHEN tb.balance_type = 'SOL'
-                 AND tb.balance_change < 0
-                 AND ABS(tb.balance_change) BETWEEN 890880 AND 2100000
-                 AND v_has_init_account
-            THEN 'rent'
-
-            -- Burn
-            WHEN tb.balance_type = 'TOKEN' AND tb.balance_change < 0 AND v_has_burn
-            THEN 'burn'
-
-            -- Mint
-            WHEN tb.balance_type = 'TOKEN' AND tb.balance_change > 0 AND v_has_mint_to
-            THEN 'mint'
-
-            -- CloseAccount
-            WHEN tb.balance_type = 'SOL' AND tb.balance_change > 0 AND v_has_close_account
-            THEN 'closeAccount'
-
-            -- CreateAccount
-            WHEN tb.balance_type = 'SOL' AND tb.balance_change < 0 AND v_has_init_account
-            THEN 'createAccount'
-
-            -- Swap (check counterparty exists)
-            WHEN v_has_swap AND tb.balance_type = 'TOKEN'
-                 AND EXISTS (SELECT 1 FROM tmp_balances tb2
-                            WHERE tb2.mint = tb.mint
-                              AND tb2.owner != tb.owner
-                              AND SIGN(tb2.balance_change) = -SIGN(tb.balance_change))
-            THEN 'swap'
-
-            -- TransferChecked
-            WHEN tb.balance_type = 'TOKEN' AND v_has_transfer_checked
-                 AND EXISTS (SELECT 1 FROM tmp_balances tb2
-                            WHERE tb2.mint = tb.mint
-                              AND tb2.owner != tb.owner
-                              AND SIGN(tb2.balance_change) = -SIGN(tb.balance_change))
-            THEN 'transferChecked'
-
-            -- Transfer (token)
-            WHEN tb.balance_type = 'TOKEN' AND v_has_transfer
-                 AND EXISTS (SELECT 1 FROM tmp_balances tb2
-                            WHERE tb2.mint = tb.mint
-                              AND tb2.owner != tb.owner
-                              AND SIGN(tb2.balance_change) = -SIGN(tb.balance_change))
-            THEN 'transfer'
-
-            -- SOL Transfer
-            WHEN tb.balance_type = 'SOL'
-                 AND EXISTS (SELECT 1 FROM tmp_balances tb2
-                            WHERE tb2.mint = tb.mint
-                              AND tb2.owner != tb.owner
-                              AND SIGN(tb2.balance_change) = -SIGN(tb.balance_change))
-            THEN 'transfer'
-
-            -- Stake
-            WHEN v_has_stake_program AND tb.balance_change < 0
-            THEN 'stake'
-
-            -- Unstake
-            WHEN v_has_stake_program AND tb.balance_change > 0
-            THEN 'unstake'
-
-            ELSE 'unknown'
-        END,
+        tb.counterparty_owner_id,
+        tb.action_type,
         tb.pre_amount,
         tb.post_amount,
         tb.balance_change,
@@ -310,6 +274,7 @@ BEGIN
 
     -- Cleanup
     DROP TEMPORARY TABLE IF EXISTS tmp_balances;
+    DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
 END //
 
 DELIMITER ;
