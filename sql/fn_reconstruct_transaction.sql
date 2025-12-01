@@ -31,18 +31,21 @@ BEGIN
     DECLARE v_account_keys JSON;
     DECLARE v_instructions JSON;
     DECLARE v_loaded_addresses JSON;
+    DECLARE v_signatures JSON;
 
     -- Fetch from transactions table
     SELECT
         slot, block_time, status, err, fee_lamports, compute_units_consumed,
         version, recent_blockhash, rewards, log_messages, pre_balances,
         post_balances, pre_token_balances, post_token_balances,
-        inner_instructions, account_keys, instructions, loaded_addresses
+        inner_instructions, account_keys, instructions, loaded_addresses,
+        COALESCE(JSON_EXTRACT(transaction_json, '$.transaction.signatures'), JSON_ARRAY(signature))
     INTO
         v_slot, v_block_time, v_status, v_err, v_fee_lamports, v_compute_units_consumed,
         v_version, v_recent_blockhash, v_rewards, v_log_messages, v_pre_balances,
         v_post_balances, v_pre_token_balances, v_post_token_balances,
-        v_inner_instructions, v_account_keys, v_instructions, v_loaded_addresses
+        v_inner_instructions, v_account_keys, v_instructions, v_loaded_addresses,
+        v_signatures
     FROM transactions
     WHERE signature = p_signature;
 
@@ -114,8 +117,11 @@ BEGIN
         SET v_meta = JSON_SET(v_meta, '$.loadedAddresses', COALESCE(v_loaded_addresses, JSON_OBJECT('writable', JSON_ARRAY(), 'readonly', JSON_ARRAY())));
     END IF;
 
-    -- Build transaction wrapper
-    SET v_transaction = JSON_OBJECT('message', v_message);
+    -- Build transaction wrapper with signatures and message
+    SET v_transaction = JSON_OBJECT(
+        'signatures', v_signatures,
+        'message', v_message
+    );
 
     -- Build final result
     SET v_result = JSON_OBJECT(
