@@ -162,8 +162,12 @@ proc_body: BEGIN
     INSERT IGNORE INTO tmp_addresses (address, address_type)
     SELECT token_account, 'ata' FROM tmp_balances WHERE token_account IS NOT NULL AND token_account != owner;
 
-    -- Ensure addresses exist (INSERT IGNORE - no updates, no locks)
-    INSERT IGNORE INTO addresses (address, address_type)
+    -- Remove addresses that already exist (avoid INSERT IGNORE gap locks)
+    DELETE ta FROM tmp_addresses ta
+    WHERE EXISTS (SELECT 1 FROM addresses a WHERE a.address = ta.address);
+
+    -- Only insert truly new addresses (no gap locks if empty)
+    INSERT INTO addresses (address, address_type)
     SELECT address, address_type FROM tmp_addresses;
 
     DROP TEMPORARY TABLE IF EXISTS tmp_addresses;
