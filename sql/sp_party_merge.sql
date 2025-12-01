@@ -186,26 +186,36 @@ proc_body: BEGIN
     SET tb.mint_id = a_mint.id;
 
     -- Create a second temp table for counterparty lookup (MySQL can't self-join temp tables)
+    -- Include balance_change for matching by largest counterparty
     DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
     CREATE TEMPORARY TABLE tmp_counterparties (
         mint VARCHAR(44),
         owner VARCHAR(44),
         owner_id INT UNSIGNED,
         balance_sign TINYINT,
+        abs_balance BIGINT UNSIGNED,
+        account_index INT,
         KEY idx_lookup (mint, balance_sign)
     ) ENGINE=MEMORY;
 
-    INSERT INTO tmp_counterparties (mint, owner, owner_id, balance_sign)
-    SELECT mint, owner, owner_id, SIGN(balance_change)
+    INSERT INTO tmp_counterparties (mint, owner, owner_id, balance_sign, abs_balance, account_index)
+    SELECT mint, owner, owner_id, SIGN(balance_change), ABS(balance_change), account_index
     FROM tmp_balances;
 
     -- Update counterparty info using the second temp table
+    -- Match with the largest counterparty (by absolute balance change), excluding fee payer for SOL
     UPDATE tmp_balances tb
-    LEFT JOIN tmp_counterparties tc ON tc.mint = tb.mint
-                                    AND tc.owner != tb.owner
-                                    AND tc.balance_sign = -SIGN(tb.balance_change)
+    LEFT JOIN (
+        SELECT mint, balance_sign, owner_id, abs_balance,
+               ROW_NUMBER() OVER (PARTITION BY mint, balance_sign ORDER BY abs_balance DESC) as rn
+        FROM tmp_counterparties
+        WHERE NOT (account_index = 0 AND balance_sign = -1)  -- Exclude fee payer as counterparty source
+    ) tc ON tc.mint = tb.mint
+         AND tc.balance_sign = -SIGN(tb.balance_change)
+         AND tc.rn = 1
     SET tb.counterparty_owner_id = tc.owner_id,
-        tb.has_counterparty = (tc.owner_id IS NOT NULL);
+        tb.has_counterparty = (tc.owner_id IS NOT NULL)
+    WHERE tb.owner_id != tc.owner_id OR tc.owner_id IS NULL;
 
     -- Set action_type based on pre-analyzed flags
     UPDATE tmp_balances tb
