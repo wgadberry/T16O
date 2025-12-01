@@ -186,38 +186,6 @@ public class TransactionWriter
                 .ToList();
         }
 
-        // Extract loaded addresses for versioned transactions (v0)
-        var loadedWritable = new List<string>();
-        var loadedReadonly = new List<string>();
-
-        if (TryGetProperty(originalData, "Meta", "meta", out var meta) &&
-            TryGetProperty(meta, "LoadedAddresses", "loadedAddresses", out var loadedAddresses))
-        {
-            // Extract writable addresses (check both PascalCase and camelCase)
-            if (TryGetProperty(loadedAddresses, "Writable", "writable", out var writable) &&
-                writable.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var addr in writable.EnumerateArray())
-                {
-                    var address = addr.GetString();
-                    if (!string.IsNullOrEmpty(address))
-                        loadedWritable.Add(address);
-                }
-            }
-
-            // Extract readonly addresses (check both PascalCase and camelCase)
-            if (TryGetProperty(loadedAddresses, "Readonly", "readonly", out var readonlyAddrs) &&
-                readonlyAddrs.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var addr in readonlyAddrs.EnumerateArray())
-                {
-                    var address = addr.GetString();
-                    if (!string.IsNullOrEmpty(address))
-                        loadedReadonly.Add(address);
-                }
-            }
-        }
-
         var result = new
         {
             slot = TryGetProperty(originalData, "Slot", "slot", out var slot) ? GetLongValue(slot) : (long?)null,
@@ -238,12 +206,6 @@ public class TransactionWriter
                 }
             },
             meta = ExtractMeta(originalData),
-            // Include loaded addresses at top level for easy access by stored procedure
-            loadedAddresses = new
-            {
-                Writable = loadedWritable,
-                Readonly = loadedReadonly
-            },
             version = TryGetProperty(originalData, "Version", "version", out var version) ? GetIntValue(version) : (int?)null
         };
 
