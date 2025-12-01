@@ -140,19 +140,40 @@ BEGIN
     -- Remove zero balance changes
     DELETE FROM tmp_balances WHERE balance_change = 0;
 
+    -- Collect unique addresses into a separate temp table first
+    DROP TEMPORARY TABLE IF EXISTS tmp_addresses;
+    CREATE TEMPORARY TABLE tmp_addresses (
+        address VARCHAR(44) PRIMARY KEY,
+        address_type VARCHAR(10)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_addresses (address, address_type)
+    SELECT mint, 'mint' FROM tmp_balances WHERE mint IS NOT NULL;
+
+    INSERT IGNORE INTO tmp_addresses (address, address_type)
+    SELECT owner, 'wallet' FROM tmp_balances WHERE owner IS NOT NULL;
+
+    INSERT IGNORE INTO tmp_addresses (address, address_type)
+    SELECT token_account, 'ata' FROM tmp_balances WHERE token_account IS NOT NULL AND token_account != owner;
+
     -- Ensure addresses exist (INSERT IGNORE - no updates, no locks)
     INSERT IGNORE INTO addresses (address, address_type)
-    SELECT DISTINCT mint, 'mint' FROM tmp_balances WHERE mint IS NOT NULL
-    UNION
-    SELECT DISTINCT owner, 'wallet' FROM tmp_balances WHERE owner IS NOT NULL
-    UNION
-    SELECT DISTINCT token_account, 'ata' FROM tmp_balances WHERE token_account IS NOT NULL AND token_account != owner;
+    SELECT address, address_type FROM tmp_addresses;
 
-    -- Resolve address IDs (updates to temp table are session-local, no locks)
+    DROP TEMPORARY TABLE IF EXISTS tmp_addresses;
+
+    -- Resolve address IDs using JOINs (not correlated subqueries)
     UPDATE tmp_balances tb
-    SET tb.owner_id = (SELECT id FROM addresses WHERE address = tb.owner),
-        tb.token_account_id = (SELECT id FROM addresses WHERE address = tb.token_account),
-        tb.mint_id = (SELECT id FROM addresses WHERE address = tb.mint);
+    JOIN addresses a_owner ON a_owner.address = tb.owner
+    SET tb.owner_id = a_owner.id;
+
+    UPDATE tmp_balances tb
+    JOIN addresses a_token ON a_token.address = tb.token_account
+    SET tb.token_account_id = a_token.id;
+
+    UPDATE tmp_balances tb
+    JOIN addresses a_mint ON a_mint.address = tb.mint
+    SET tb.mint_id = a_mint.id;
 
     -- Create a second temp table for counterparty lookup (MySQL can't self-join temp tables)
     DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
@@ -170,19 +191,11 @@ BEGIN
 
     -- Update counterparty info using the second temp table
     UPDATE tmp_balances tb
-    SET tb.counterparty_owner_id = (
-        SELECT MIN(tc.owner_id)
-        FROM tmp_counterparties tc
-        WHERE tc.mint = tb.mint
-          AND tc.owner != tb.owner
-          AND tc.balance_sign = -SIGN(tb.balance_change)
-    ),
-    tb.has_counterparty = EXISTS (
-        SELECT 1 FROM tmp_counterparties tc
-        WHERE tc.mint = tb.mint
-          AND tc.owner != tb.owner
-          AND tc.balance_sign = -SIGN(tb.balance_change)
-    );
+    LEFT JOIN tmp_counterparties tc ON tc.mint = tb.mint
+                                    AND tc.owner != tb.owner
+                                    AND tc.balance_sign = -SIGN(tb.balance_change)
+    SET tb.counterparty_owner_id = tc.owner_id,
+        tb.has_counterparty = (tc.owner_id IS NOT NULL);
 
     -- Set action_type based on pre-analyzed flags
     UPDATE tmp_balances tb
