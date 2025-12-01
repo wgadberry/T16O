@@ -261,7 +261,7 @@ BEGIN
     -- Insert party records (single INSERT, no updates needed)
     INSERT INTO party (
         tx_id, owner_id, token_account_id, mint_id, account_index,
-        party_type, balance_type, counterparty_id, action_type,
+        party_type, balance_type, counterparty_owner_id, action_type,
         pre_amount, post_amount, amount_change, decimals,
         pre_ui_amount, post_ui_amount, ui_amount_change
     )

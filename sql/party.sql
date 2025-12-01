@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS `party` (
     'airdrop',          -- Airdrop distribution
     'unknown'           -- Unable to determine action type
   ) DEFAULT NULL COMMENT 'Type of action that caused this balance change',
-  `counterparty_id` BIGINT UNSIGNED DEFAULT NULL COMMENT 'Links to the counterparty party record',
+  `counterparty_owner_id` INT UNSIGNED DEFAULT NULL COMMENT 'Links to the counterparty owner address',
   `pre_amount` BIGINT DEFAULT NULL,
   `post_amount` BIGINT DEFAULT NULL,
   `amount_change` BIGINT DEFAULT NULL,
@@ -43,14 +43,14 @@ CREATE TABLE IF NOT EXISTS `party` (
   KEY `idx_owner_mint` (`owner_id`, `mint_id`),
   KEY `idx_amount_change` (`amount_change`),
   KEY `idx_party_type` (`party_type`),
-  KEY `idx_counterparty` (`counterparty_id`),
+  KEY `idx_counterparty` (`counterparty_owner_id`),
   KEY `idx_balance_type` (`balance_type`),
   KEY `idx_action_type` (`action_type`),
   CONSTRAINT `party_ibfk_1` FOREIGN KEY (`tx_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
   CONSTRAINT `party_ibfk_2` FOREIGN KEY (`owner_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
   CONSTRAINT `party_ibfk_3` FOREIGN KEY (`token_account_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
   CONSTRAINT `party_ibfk_4` FOREIGN KEY (`mint_id`) REFERENCES `addresses` (`id`) ON DELETE RESTRICT,
-  CONSTRAINT `party_ibfk_5` FOREIGN KEY (`counterparty_id`) REFERENCES `party` (`id`) ON DELETE SET NULL
+  CONSTRAINT `party_ibfk_5` FOREIGN KEY (`counterparty_owner_id`) REFERENCES `addresses` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Migration script to add action_type column to existing table
