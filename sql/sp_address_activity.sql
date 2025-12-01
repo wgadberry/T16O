@@ -1,8 +1,7 @@
 DROP PROCEDURE IF EXISTS sp_address_activity;
 
-DELIMITER //
-
-CREATE PROCEDURE sp_address_activity(
+DELIMITER $$
+CREATE DEFINER=`root`@`%` PROCEDURE `sp_address_activity`(
     IN p_address CHAR(44)
 )
 BEGIN
@@ -15,7 +14,7 @@ BEGIN
     DECLARE v_programs JSON;
     DECLARE v_totals JSON;
 
-    -- Get address ID
+    
     SELECT id INTO v_address_id FROM addresses WHERE address = p_address;
 
     IF v_address_id IS NULL THEN
@@ -25,7 +24,7 @@ BEGIN
             'address', p_address
         ) as result;
     ELSE
-        -- Build address info
+        
         SELECT JSON_OBJECT(
             'id', a.id,
             'address', a.address,
@@ -45,7 +44,7 @@ BEGIN
         LEFT JOIN addresses prog ON a.program_id = prog.id
         WHERE a.id = v_address_id;
 
-        -- Build totals (high-level summary)
+        
         SELECT JSON_OBJECT(
             'total_transactions', COUNT(DISTINCT tx_id),
             'sol_received', SUM(CASE WHEN balance_type = 'SOL' AND amount_change > 0 THEN amount_change ELSE 0 END),
@@ -54,12 +53,12 @@ BEGIN
             'token_transfers_in', SUM(CASE WHEN balance_type = 'TOKEN' AND amount_change > 0 THEN 1 ELSE 0 END),
             'token_transfers_out', SUM(CASE WHEN balance_type = 'TOKEN' AND amount_change < 0 THEN 1 ELSE 0 END),
             'unique_tokens', (SELECT COUNT(DISTINCT mint_id) FROM party WHERE owner_id = v_address_id AND balance_type = 'TOKEN'),
-            'unique_counterparties', (SELECT COUNT(DISTINCT cp.owner_id) FROM party p JOIN party cp ON p.counterparty_id = cp.id WHERE p.owner_id = v_address_id)
+            'unique_counterparties', (SELECT COUNT(DISTINCT cp.owner_id) FROM party p JOIN party cp ON p.counterparty_owner_id = cp.id WHERE p.owner_id = v_address_id)
         ) INTO v_totals
         FROM party
         WHERE owner_id = v_address_id;
 
-        -- Build activity summary - one row per balance change with signature
+        
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
                 'signature', signature,
@@ -92,14 +91,14 @@ BEGIN
             FROM party p
             JOIN transactions t ON p.tx_id = t.id
             JOIN addresses mint ON p.mint_id = mint.id
-            LEFT JOIN party cp ON p.counterparty_id = cp.id
+            LEFT JOIN party cp ON p.counterparty_owner_id = cp.id
             LEFT JOIN addresses cp_owner ON cp.owner_id = cp_owner.id
             WHERE p.owner_id = v_address_id
             ORDER BY t.block_time DESC, t.id, p.account_index
-            LIMIT 200
+            -- LIMIT 200
         ) AS activity;
 
-        -- Build token summary
+        
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
                 'symbol', token_symbol,
@@ -125,10 +124,10 @@ BEGIN
             WHERE p.owner_id = v_address_id
             GROUP BY mint.id
             ORDER BY tx_count DESC
-            LIMIT 50
+            -- LIMIT 50
         ) AS tokens;
 
-        -- Build recent transactions
+        
         SELECT JSON_ARRAYAGG(tx_obj) INTO v_transactions
         FROM (
             SELECT JSON_OBJECT(
@@ -149,14 +148,14 @@ BEGIN
             FROM party p
             JOIN transactions t ON p.tx_id = t.id
             JOIN addresses mint ON p.mint_id = mint.id
-            LEFT JOIN party cp ON p.counterparty_id = cp.id
+            LEFT JOIN party cp ON p.counterparty_owner_id = cp.id
             LEFT JOIN addresses cp_owner ON cp.owner_id = cp_owner.id
             WHERE p.owner_id = v_address_id
             ORDER BY t.block_time DESC, t.id, p.account_index
-            LIMIT 100
+            -- LIMIT 100
         ) AS txs;
 
-        -- Build counterparties
+        
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
                 'address', address,
@@ -174,16 +173,16 @@ BEGIN
                 COUNT(DISTINCT p.tx_id) as shared_tx_count,
                 GROUP_CONCAT(DISTINCT p.action_type ORDER BY p.action_type SEPARATOR ', ') as action_types
             FROM party p
-            JOIN party cp ON p.counterparty_id = cp.id
+            JOIN party cp ON p.counterparty_owner_id = cp.id
             JOIN addresses cp_owner ON cp.owner_id = cp_owner.id
             WHERE p.owner_id = v_address_id
               AND cp_owner.address_type NOT IN ('program')
             GROUP BY cp_owner.id
             ORDER BY shared_tx_count DESC
-            LIMIT 25
+            -- LIMIT 25
         ) AS cps;
 
-        -- Build programs used
+        
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
                 'address', address,
@@ -203,10 +202,10 @@ BEGIN
             WHERE p.owner_id = v_address_id
             GROUP BY prog.id
             ORDER BY tx_count DESC
-            LIMIT 15
+            -- LIMIT 15
         ) AS progs;
 
-        -- Return combined JSON document
+        
         SELECT JSON_OBJECT(
             'success', TRUE,
             'generated_at', DATE_FORMAT(NOW(), '%Y-%m-%dT%H:%i:%sZ'),
@@ -219,6 +218,5 @@ BEGIN
             'programs_used', COALESCE(v_programs, JSON_ARRAY())
         ) as result;
     END IF;
-END //
-
+END$$
 DELIMITER ;
