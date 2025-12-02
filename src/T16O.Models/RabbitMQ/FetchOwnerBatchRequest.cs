@@ -39,4 +39,12 @@ public class FetchOwnerBatchRequest
     /// </summary>
     [JsonPropertyName("priority")]
     public byte Priority { get; set; } = 1;
+
+    /// <summary>
+    /// Optional API key for request tracking.
+    /// When present, follows the request/queue flow with state management.
+    /// When absent, uses standard fire-and-forget processing.
+    /// </summary>
+    [JsonPropertyName("api_key")]
+    public string? ApiKey { get; set; }
 }
