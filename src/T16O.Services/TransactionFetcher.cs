@@ -22,6 +22,7 @@ namespace T16O.Services;
 public class TransactionFetcher
 {
     private readonly (IRpcClient client, string url)[] _rpcClients;
+    private readonly Dictionary<string, HttpClient> _httpClients;
     private readonly TransactionFetcherOptions _options;
     private readonly ILogger? _logger;
 
@@ -37,8 +38,9 @@ public class TransactionFetcher
             throw new ArgumentException("At least one RPC URL must be provided", nameof(rpcUrls));
 
         _logger = logger;
+        _httpClients = rpcUrls.ToDictionary(url => url, url => CreateConfiguredHttpClient(url));
         _rpcClients = rpcUrls.Select(url => (
-            client: ClientFactory.GetClient(url, logger: null, CreateConfiguredHttpClient(url), rateLimiter: null),
+            client: ClientFactory.GetClient(url, logger: null, _httpClients[url], rateLimiter: null),
             url: url
         )).ToArray();
         _options = options ?? new TransactionFetcherOptions();
@@ -555,7 +557,8 @@ public class TransactionFetcher
         }
 
         // All RPCs failed or returned null
-        _logger?.LogWarning("[TransactionFetcher] All RPCs failed for {Signature}", signature);
+        _logger?.LogWarning("[TransactionFetcher] All RPCs failed for {Signature}: {Error}",
+            signature, lastResult?.Error ?? "Unknown error");
         return lastResult ?? new TransactionFetchResult
         {
             Signature = signature,
@@ -574,7 +577,8 @@ public class TransactionFetcher
     {
         try
         {
-            using var httpClient = CreateConfiguredHttpClient(rpcUrl);
+            // Reuse shared HttpClient for connection pooling
+            var httpClient = _httpClients[rpcUrl];
 
             var request = new
             {
@@ -598,6 +602,32 @@ public class TransactionFetcher
 
             // BaseAddress is already set in CreateConfiguredHttpClient, so use empty string
             var response = await httpClient.PostAsync(string.Empty, content, cancellationToken);
+
+            var rpcName = GetRpcName(rpcUrl);
+
+            // Check HTTP status for rate limiting
+            if ((int)response.StatusCode == 429)
+            {
+                _logger?.LogWarning("[TransactionFetcher] Rate limited (429) [{RpcName}] for {Signature}", rpcName, signature);
+                return new TransactionFetchResult
+                {
+                    Signature = signature,
+                    IsRelevant = false,
+                    Error = $"Rate limited (429) [{rpcName}]"
+                };
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger?.LogWarning("[TransactionFetcher] HTTP {StatusCode} [{RpcName}] for {Signature}", (int)response.StatusCode, rpcName, signature);
+                return new TransactionFetchResult
+                {
+                    Signature = signature,
+                    IsRelevant = false,
+                    Error = $"HTTP {(int)response.StatusCode} [{rpcName}]"
+                };
+            }
+
             var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
 
             using var doc = JsonDocument.Parse(responseJson);
@@ -607,11 +637,12 @@ public class TransactionFetcher
             if (root.TryGetProperty("error", out var error))
             {
                 var errorMsg = error.TryGetProperty("message", out var msg) ? msg.GetString() : "Unknown RPC error";
+                _logger?.LogWarning("[TransactionFetcher] RPC error [{RpcName}] for {Signature}: {Error}", rpcName, signature, errorMsg);
                 return new TransactionFetchResult
                 {
                     Signature = signature,
                     IsRelevant = false,
-                    Error = errorMsg
+                    Error = $"{errorMsg} [{rpcName}]"
                 };
             }
 
@@ -642,11 +673,13 @@ public class TransactionFetcher
         }
         catch (Exception ex)
         {
+            var rpcName = GetRpcName(rpcUrl);
+            _logger?.LogWarning("[TransactionFetcher] Exception [{RpcName}] for {Signature}: {Error}", rpcName, signature, ex.Message);
             return new TransactionFetchResult
             {
                 Signature = signature,
                 IsRelevant = false,
-                Error = ex.Message
+                Error = $"{ex.Message} [{rpcName}]"
             };
         }
     }

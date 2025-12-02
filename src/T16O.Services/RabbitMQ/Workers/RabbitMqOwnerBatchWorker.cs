@@ -75,9 +75,10 @@ public class RabbitMqOwnerBatchWorker : IDisposable
         _logger = logger;
 
         // Initialize RequestOrchestrator if RPC URLs are provided
+        // Pass RabbitMQ config to enable usage logging
         if (rpcUrls != null && rpcUrls.Length > 0)
         {
-            _requestOrchestrator = new RequestOrchestrator(dbConnectionString, rpcUrls, null, logger);
+            _requestOrchestrator = new RequestOrchestrator(dbConnectionString, rpcUrls, config, null, logger);
         }
 
         _connection = RabbitMqConnection.CreateConnection(_config);
@@ -87,8 +88,8 @@ public class RabbitMqOwnerBatchWorker : IDisposable
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
         RabbitMqConnection.SetupTaskInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 batch at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 20);
+        // Limit prefetch to 1 batch at a time for controlled RPC rate limiting
+        RabbitMqConnection.SetPrefetchCount(_channel, 1);
     }
 
     /// <summary>
@@ -101,12 +102,20 @@ public class RabbitMqOwnerBatchWorker : IDisposable
         var consumer = new EventingBasicConsumer(_channel);
         consumer.Received += async (model, ea) =>
         {
-            await ProcessMessageAsync(ea, cancellationToken);
+            try
+            {
+                await ProcessMessageAsync(ea, cancellationToken);
+            }
+            finally
+            {
+                // Manual ack after processing completes - ensures only 1 message at a time with prefetch=1
+                _channel.BasicAck(ea.DeliveryTag, multiple: false);
+            }
         };
 
         _channel.BasicConsume(
             queue: queueName,
-            autoAck: true,
+            autoAck: false,  // Manual ack to respect prefetch count
             consumer: consumer);
 
         // Keep worker running until cancellation
