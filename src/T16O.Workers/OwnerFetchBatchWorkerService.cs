@@ -8,6 +8,7 @@ namespace T16O.Workers;
 /// <summary>
 /// Owner batch worker service for processing owner signatures.
 /// Routes signatures to tx.fetch.db (cached) or tx.fetch.rpc (uncached).
+/// When api_key is present in request, uses RequestOrchestrator for tracked processing.
 /// </summary>
 public class OwnerFetchBatchWorkerService : BackgroundService
 {
@@ -15,13 +16,29 @@ public class OwnerFetchBatchWorkerService : BackgroundService
     private readonly string _queueName;
     private readonly ILogger<OwnerFetchBatchWorkerService> _logger;
 
+    /// <summary>
+    /// Constructor without RPC URLs (api-key flow disabled)
+    /// </summary>
     public OwnerFetchBatchWorkerService(
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
         ILogger<OwnerFetchBatchWorkerService> logger)
+        : this(config, dbConnectionString, null, queueName, logger)
     {
-        _worker = new RabbitMqOwnerBatchWorker(config, dbConnectionString);
+    }
+
+    /// <summary>
+    /// Constructor with RPC URLs (api-key flow enabled)
+    /// </summary>
+    public OwnerFetchBatchWorkerService(
+        RabbitMqConfig config,
+        string dbConnectionString,
+        string[]? rpcUrls,
+        string queueName,
+        ILogger<OwnerFetchBatchWorkerService> logger)
+    {
+        _worker = new RabbitMqOwnerBatchWorker(config, dbConnectionString, rpcUrls, logger);
         _queueName = queueName;
         _logger = logger;
     }

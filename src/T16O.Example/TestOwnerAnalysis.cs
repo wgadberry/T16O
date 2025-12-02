@@ -23,7 +23,7 @@ public static class TestOwnerAnalysis
         "https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb"
     };
 
-    public static async Task Run(string? ownerAddress = null, int maxSignatures = 1000, int depth = 0, byte priority = RabbitMqConfig.Priority.Batch)
+    public static async Task Run(string? ownerAddress = null, int maxSignatures = 1000, int depth = 0, byte priority = RabbitMqConfig.Priority.Batch, string? apiKey = null)
     {
         Console.WriteLine("=== Owner Address Analysis ===\n");
 
@@ -52,6 +52,10 @@ public static class TestOwnerAnalysis
         Console.WriteLine($"Max Signatures: {maxSignatures}");
         Console.WriteLine($"Depth: {depth}");
         Console.WriteLine($"Priority: {priorityName}");
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            Console.WriteLine($"API Key: {apiKey} (request tracking enabled)");
+        }
         Console.WriteLine();
 
         // Configure RabbitMQ
@@ -130,7 +134,8 @@ public static class TestOwnerAnalysis
                         Signatures = signatureList,
                         Depth = depth,
                         CurrentDepth = 0,
-                        Priority = priority
+                        Priority = priority,
+                        ApiKey = apiKey
                     };
 
                     // Serialize and publish

@@ -33,15 +33,17 @@ class Program
         }
 
         // Run owner analysis
-        // Usage: owner <address> <maxSigs> <depth> <priority>
+        // Usage: owner <address> <maxSigs> <depth> <priority> [api-key]
         // Priority: 10=realtime, 5=normal, 1=batch (default)
+        // api-key: Optional API key for request tracking flow
         if (args.Length > 0 && args[0] == "owner")
         {
             var ownerAddress = args.Length > 1 ? args[1] : null;
             var maxSigs = args.Length > 2 && int.TryParse(args[2], out var m) ? m : 1000;
             var depth = args.Length > 3 && int.TryParse(args[3], out var d) ? d : 0;
             var priority = args.Length > 4 && byte.TryParse(args[4], out var p) ? p : RabbitMqConfig.Priority.Batch;
-            await TestOwnerAnalysis.Run(ownerAddress, maxSigs, depth, priority);
+            var apiKey = args.Length > 5 ? args[5] : null;
+            await TestOwnerAnalysis.Run(ownerAddress, maxSigs, depth, priority, apiKey);
             return;
         }
 
@@ -71,7 +73,7 @@ class Program
         // Run pool sync
         if (args.Length > 0 && args[0] == "pool-sync")
         {
-            var connectionString = "Server=localhost;Database=t16o;User=root;Password=rootpassword;Allow User Variables=True;";
+            var connectionString = "Server=localhost;Database=t16o_db;User=root;Password=rootpassword;Allow User Variables=True;Min Pool Size=10;Max Pool Size=50;Default Command Timeout=120";
             var poolFetcher = new PoolFetcher(connectionString);
 
             Console.WriteLine("Starting pool sync from all DEXes...\n");

@@ -207,6 +207,7 @@ if (builder.Configuration.GetValue<bool>("Workers:AssetFetchRpc:Enabled"))
 // === OWNER WORKERS ===
 
 // Owner Fetch Batch worker - processes owner signatures
+// When api_key is present in request, uses RequestOrchestrator for tracked processing
 if (builder.Configuration.GetValue<bool>("Workers:OwnerFetchBatch:Enabled"))
 {
     var queueName = builder.Configuration["Workers:OwnerFetchBatch:QueueName"]
@@ -215,6 +216,7 @@ if (builder.Configuration.GetValue<bool>("Workers:OwnerFetchBatch:Enabled"))
         new OwnerFetchBatchWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
+            sp.GetRequiredService<SolanaConfig>().TransactionRpcUrls,  // Enable api-key flow
             queueName,
             sp.GetRequiredService<ILogger<OwnerFetchBatchWorkerService>>()
         ));
