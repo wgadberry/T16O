@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -20,6 +21,7 @@ public class RabbitMqWriteWorker : IDisposable
     private readonly TransactionWriter _writer;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private bool _disposed;
 
     /// <summary>
@@ -27,12 +29,15 @@ public class RabbitMqWriteWorker : IDisposable
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqWriteWorker(
         RabbitMqConfig config,
-        string dbConnectionString)
+        string dbConnectionString,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _writer = new TransactionWriter(dbConnectionString);
+        _logger = logger;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -88,13 +93,13 @@ public class RabbitMqWriteWorker : IDisposable
 
             if (request == null || string.IsNullOrWhiteSpace(request.Signature))
             {
-                Console.WriteLine("Invalid write request: signature is required");
+                _logger?.LogWarning("[WriteWorker] Invalid write request: signature is required");
                 return;
             }
 
             if (!request.TransactionData.HasValue)
             {
-                Console.WriteLine($"Invalid write request: transaction data is required for {request.Signature}");
+                _logger?.LogWarning("[WriteWorker] Invalid write request: transaction data is required for {Signature}", request.Signature);
                 return;
             }
 
@@ -111,11 +116,11 @@ public class RabbitMqWriteWorker : IDisposable
             // Write to database
             await _writer.UpsertTransactionAsync(txResult, cancellationToken);
 
-            Console.WriteLine($"[WriteWorker] Wrote transaction {request.Signature} to database (Slot: {request.Slot})");
+            _logger?.LogInformation("[WriteWorker] Wrote transaction {Signature} to database (Slot: {Slot})", request.Signature, request.Slot);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[WriteWorker] Error writing transaction: {ex.Message}");
+            _logger?.LogError("[WriteWorker] Error writing transaction: {Message}", ex.Message);
         }
     }
 

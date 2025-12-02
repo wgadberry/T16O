@@ -7,6 +7,7 @@ using System.Security.Authentication;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using T16O.Models;
 using Solnet.Rpc;
 using Solnet.Rpc.Models;
@@ -22,17 +23,20 @@ public class TransactionFetcher
 {
     private readonly (IRpcClient client, string url)[] _rpcClients;
     private readonly TransactionFetcherOptions _options;
+    private readonly ILogger? _logger;
 
     /// <summary>
     /// Initialize the TransactionFetcher with RPC endpoints
     /// </summary>
     /// <param name="rpcUrls">Array of RPC endpoint URLs (will round-robin across them)</param>
     /// <param name="options">Optional configuration options</param>
-    public TransactionFetcher(string[] rpcUrls, TransactionFetcherOptions? options = null)
+    /// <param name="logger">Optional logger</param>
+    public TransactionFetcher(string[] rpcUrls, TransactionFetcherOptions? options = null, ILogger? logger = null)
     {
         if (rpcUrls == null || rpcUrls.Length == 0)
             throw new ArgumentException("At least one RPC URL must be provided", nameof(rpcUrls));
 
+        _logger = logger;
         _rpcClients = rpcUrls.Select(url => (
             client: ClientFactory.GetClient(url, logger: null, CreateConfiguredHttpClient(url), rateLimiter: null),
             url: url
@@ -40,10 +44,10 @@ public class TransactionFetcher
         _options = options ?? new TransactionFetcherOptions();
 
         // Log the RPCs being used
-        Console.WriteLine($"[TransactionFetcher] Initialized with {_rpcClients.Length} RPC(s):");
+        _logger?.LogInformation("[TransactionFetcher] Initialized with {Count} RPC(s):", _rpcClients.Length);
         foreach (var rpc in _rpcClients)
         {
-            Console.WriteLine($"  - {GetRpcName(rpc.url)}");
+            _logger?.LogInformation("  - {RpcName}", GetRpcName(rpc.url));
         }
     }
 
@@ -65,9 +69,6 @@ public class TransactionFetcher
                 // This allows self-signed certs in development but validates standard certs
                 if (sslPolicyErrors == SslPolicyErrors.None)
                     return true;
-
-                // Log the SSL error for debugging
-                Console.WriteLine($"SSL Policy Error: {sslPolicyErrors}");
 
                 // For now, accept certificates (adjust based on your security requirements)
                 return sslPolicyErrors == SslPolicyErrors.RemoteCertificateNameMismatch ||
@@ -154,7 +155,7 @@ public class TransactionFetcher
             // Use the same RPC client (first one) for all pages to avoid cross-RPC issues
             var (rpcClient, rpcUrl) = _rpcClients[0];
 
-            Console.WriteLine($"[CollectSignatures] Page {pageNumber + 1}: Requesting {limit} signatures, before={before ?? "null"}...");
+            _logger?.LogDebug("[CollectSignatures] Page {PageNumber}: Requesting {Limit} signatures, before={Before}...", pageNumber + 1, limit, before ?? "null");
 
             var result = await rpcClient.GetSignaturesForAddressAsync(
                 accountAddress,
@@ -164,22 +165,17 @@ public class TransactionFetcher
 
             if (result.Result == null || !result.WasSuccessful)
             {
-                Console.WriteLine($"[CollectSignatures] RPC call failed or returned null.");
-                Console.WriteLine($"[CollectSignatures] WasSuccessful={result.WasSuccessful}, Result==null={result.Result == null}");
-                if (result.Reason != null)
-                    Console.WriteLine($"[CollectSignatures] Reason: {result.Reason}");
-                if (result.ServerErrorCode != 0)
-                    Console.WriteLine($"[CollectSignatures] ServerErrorCode: {result.ServerErrorCode}");
-                Console.WriteLine($"[CollectSignatures] Breaking.");
+                _logger?.LogWarning("[CollectSignatures] RPC call failed. WasSuccessful={WasSuccessful}, Reason={Reason}, ServerErrorCode={ServerErrorCode}",
+                    result.WasSuccessful, result.Reason, result.ServerErrorCode);
                 break;
             }
 
             var resultArray = result.Result;
-            Console.WriteLine($"[CollectSignatures] Received {resultArray.Count} signatures from RPC");
+            _logger?.LogDebug("[CollectSignatures] Received {Count} signatures from RPC", resultArray.Count);
 
             if (resultArray.Count == 0)
             {
-                Console.WriteLine($"[CollectSignatures] No more signatures available. Breaking.");
+                _logger?.LogDebug("[CollectSignatures] No more signatures available. Breaking.");
                 break;
             }
 
@@ -208,7 +204,7 @@ public class TransactionFetcher
             // Stream the batch immediately to the callback
             if (batch.Count > 0)
             {
-                Console.WriteLine($"[CollectSignatures] Streaming batch of {batch.Count} signatures to callback...");
+                _logger?.LogDebug("[CollectSignatures] Streaming batch of {Count} signatures to callback...", batch.Count);
                 await onBatchReceived(batch);
             }
 
@@ -229,7 +225,7 @@ public class TransactionFetcher
             // The RPC may return fewer than requested even when more data exists
         }
 
-        Console.WriteLine($"[CollectSignatures] Loop ended. Total fetched: {totalFetched}, Total filtered: {totalFiltered}, Pages: {pageNumber}");
+        _logger?.LogDebug("[CollectSignatures] Loop ended. Total fetched: {TotalFetched}, Total filtered: {TotalFiltered}, Pages: {PageNumber}", totalFetched, totalFiltered, pageNumber);
         return totalFiltered;
     }
 
@@ -307,7 +303,7 @@ public class TransactionFetcher
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[TransactionFetcher] Error fetching {signature}: {ex.Message}");
+                    _logger?.LogError("[TransactionFetcher] Error fetching {Signature}: {Message}", signature, ex.Message);
                     return new TransactionFetchResult
                     {
                         Signature = signature,
@@ -415,11 +411,11 @@ public class TransactionFetcher
                 var innerMsg = ex.InnerException?.Message ?? ex.Message;
                 if (attempt > _options.MaxRetryAttempts)
                 {
-                    Console.WriteLine($"[TransactionFetcher] TIMEOUT FAILED{rpcInfo} for {context} after {attempt} attempts: {innerMsg}");
+                    _logger?.LogWarning("[TransactionFetcher] TIMEOUT FAILED{RpcInfo} for {Context} after {Attempt} attempts: {Message}", rpcInfo, context, attempt, innerMsg);
                     return null;
                 }
 
-                Console.WriteLine($"[TransactionFetcher] TIMEOUT{rpcInfo} for {context}: {innerMsg}, retry {attempt}/{_options.MaxRetryAttempts} in {delayMs}ms");
+                _logger?.LogDebug("[TransactionFetcher] TIMEOUT{RpcInfo} for {Context}: {Message}, retry {Attempt}/{MaxRetry} in {DelayMs}ms", rpcInfo, context, innerMsg, attempt, _options.MaxRetryAttempts, delayMs);
                 await Task.Delay(delayMs, cancellationToken);
                 delayMs *= 2; // Exponential backoff
             }
@@ -430,11 +426,11 @@ public class TransactionFetcher
                 var statusCode = ex.StatusCode.HasValue ? $" (HTTP {(int)ex.StatusCode})" : "";
                 if (attempt > _options.MaxRetryAttempts)
                 {
-                    Console.WriteLine($"[TransactionFetcher] HTTP ERROR{rpcInfo}{statusCode} for {context} after {attempt} attempts: {ex.Message}");
+                    _logger?.LogWarning("[TransactionFetcher] HTTP ERROR{RpcInfo}{StatusCode} for {Context} after {Attempt} attempts: {Message}", rpcInfo, statusCode, context, attempt, ex.Message);
                     return null;
                 }
 
-                Console.WriteLine($"[TransactionFetcher] HTTP ERROR{rpcInfo}{statusCode} for {context}: {ex.Message}, retry {attempt}/{_options.MaxRetryAttempts} in {delayMs}ms");
+                _logger?.LogDebug("[TransactionFetcher] HTTP ERROR{RpcInfo}{StatusCode} for {Context}: {Message}, retry {Attempt}/{MaxRetry} in {DelayMs}ms", rpcInfo, statusCode, context, ex.Message, attempt, _options.MaxRetryAttempts, delayMs);
                 await Task.Delay(delayMs, cancellationToken);
                 delayMs *= 2;
             }
@@ -449,11 +445,11 @@ public class TransactionFetcher
                 attempt++;
                 if (attempt > _options.MaxRetryAttempts)
                 {
-                    Console.WriteLine($"[TransactionFetcher] ERROR{rpcInfo} for {context} after {attempt} attempts: [{ex.GetType().Name}] {ex.Message}");
+                    _logger?.LogWarning("[TransactionFetcher] ERROR{RpcInfo} for {Context} after {Attempt} attempts: [{ExType}] {Message}", rpcInfo, context, attempt, ex.GetType().Name, ex.Message);
                     return null;
                 }
 
-                Console.WriteLine($"[TransactionFetcher] ERROR{rpcInfo} for {context}: [{ex.GetType().Name}] {ex.Message}, retry {attempt}/{_options.MaxRetryAttempts} in {delayMs}ms");
+                _logger?.LogDebug("[TransactionFetcher] ERROR{RpcInfo} for {Context}: [{ExType}] {Message}, retry {Attempt}/{MaxRetry} in {DelayMs}ms", rpcInfo, context, ex.GetType().Name, ex.Message, attempt, _options.MaxRetryAttempts, delayMs);
                 await Task.Delay(delayMs, cancellationToken);
                 delayMs *= 2;
             }
@@ -540,7 +536,7 @@ public class TransactionFetcher
             {
                 if (i > 0)
                 {
-                    Console.WriteLine($"[TransactionFetcher] Fallback SUCCESS [RPC: {GetRpcName(rpcUrl)}] for {signature}");
+                    _logger?.LogDebug("[TransactionFetcher] Fallback SUCCESS [RPC: {RpcName}] for {Signature}", GetRpcName(rpcUrl), signature);
                 }
                 return result;
             }
@@ -548,18 +544,18 @@ public class TransactionFetcher
             // If it's a "not found" error (null result), try next RPC
             if (result.Error == "Transaction not found")
             {
-                Console.WriteLine($"[TransactionFetcher] NULL result [RPC: {GetRpcName(rpcUrl)}] for {signature}, trying fallback...");
+                _logger?.LogDebug("[TransactionFetcher] NULL result [RPC: {RpcName}] for {Signature}, trying fallback...", GetRpcName(rpcUrl), signature);
                 lastResult = result;
                 continue;
             }
 
             // For other errors (rate limit, network, etc.), also try fallback
-            Console.WriteLine($"[TransactionFetcher] Error [RPC: {GetRpcName(rpcUrl)}] for {signature}: {result.Error}, trying fallback...");
+            _logger?.LogDebug("[TransactionFetcher] Error [RPC: {RpcName}] for {Signature}: {Error}, trying fallback...", GetRpcName(rpcUrl), signature, result.Error);
             lastResult = result;
         }
 
         // All RPCs failed or returned null
-        Console.WriteLine($"[TransactionFetcher] All RPCs failed for {signature}");
+        _logger?.LogWarning("[TransactionFetcher] All RPCs failed for {Signature}", signature);
         return lastResult ?? new TransactionFetchResult
         {
             Signature = signature,

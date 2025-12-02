@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models;
@@ -25,6 +26,7 @@ public class RabbitMqAssetFetchWorker : IDisposable
     private readonly RabbitMqAssetRpcClient _rpcClient;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private bool _disposed;
 
     /// <summary>
@@ -32,14 +34,17 @@ public class RabbitMqAssetFetchWorker : IDisposable
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqAssetFetchWorker(
         RabbitMqConfig config,
-        string dbConnectionString)
+        string dbConnectionString,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _dbReader = new AssetDatabaseReader(dbConnectionString);
         _writer = new AssetWriter(dbConnectionString);
         _rpcClient = new RabbitMqAssetRpcClient(config);
+        _logger = logger;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -172,7 +177,7 @@ public class RabbitMqAssetFetchWorker : IDisposable
             catch (Exception dbEx)
             {
                 // Log but don't fail - we still have the data from RPC
-                Console.WriteLine($"[AssetDbFirstWorker] Warning: Failed to save asset to database: {dbEx.Message}");
+                _logger?.LogWarning("[AssetDbFirstWorker] Failed to save asset to database: {Message}", dbEx.Message);
             }
 
             // Step 4: Return the fresh data from RPC

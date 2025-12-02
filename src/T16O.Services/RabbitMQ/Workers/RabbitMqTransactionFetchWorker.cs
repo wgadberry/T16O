@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -25,6 +26,7 @@ public class RabbitMqTransactionFetchWorker : IDisposable
     private readonly RabbitMqRpcClient _rpcClient;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private readonly bool _useSiteRpcQueue;
     private readonly int _batchSize;
     private readonly int _batchWaitMs;
@@ -42,12 +44,14 @@ public class RabbitMqTransactionFetchWorker : IDisposable
     /// <param name="useSiteRpcQueue">If true, use dedicated site RPC queue for cache misses (isolated from batch traffic)</param>
     /// <param name="batchSize">Number of messages to collect before processing (default 50)</param>
     /// <param name="batchWaitMs">Max milliseconds to wait for batch to fill (default 100)</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqTransactionFetchWorker(
         RabbitMqConfig config,
         string dbConnectionString,
         bool useSiteRpcQueue = false,
         int batchSize = 50,
-        int batchWaitMs = 100)
+        int batchWaitMs = 100,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _dbReader = new TransactionDatabaseReader(dbConnectionString);
@@ -56,6 +60,7 @@ public class RabbitMqTransactionFetchWorker : IDisposable
         _useSiteRpcQueue = useSiteRpcQueue;
         _batchSize = batchSize;
         _batchWaitMs = batchWaitMs;
+        _logger = logger;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -197,7 +202,7 @@ public class RabbitMqTransactionFetchWorker : IDisposable
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TxFetchWorker] Batch processor error: {ex.Message}");
+                _logger?.LogError("[TxFetchWorker] Batch processor error: {Message}", ex.Message);
                 await Task.Delay(100, cancellationToken);
             }
         }
@@ -273,7 +278,7 @@ public class RabbitMqTransactionFetchWorker : IDisposable
             catch (Exception dbEx)
             {
                 // Log but don't fail - we still have the data from RPC
-                Console.WriteLine($"[DbFirstWorker] Warning: Failed to save transaction to database: {dbEx.Message}");
+                _logger?.LogWarning("[DbFirstWorker] Failed to save transaction to database: {Message}", dbEx.Message);
             }
 
             // Step 4: Read back from database with bitmask applied via fn_tx_get

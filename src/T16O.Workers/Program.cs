@@ -5,6 +5,7 @@ using T16O.Services.RabbitMQ;
 using T16O.Workers;
 using Serilog;
 
+var noLog = args.Contains("--no-log");
 var builder = Host.CreateApplicationBuilder(args);
 
 // Add configuration
@@ -15,15 +16,23 @@ builder.Configuration
     .AddEnvironmentVariables();
 
 // Configure Serilog for file logging
-builder.Services.AddSerilog((services, lc) => lc
-    .ReadFrom.Configuration(builder.Configuration)
-    .Enrich.FromLogContext()
-    .WriteTo.Console()
-    .WriteTo.File(
-        path: "logs/razorback-site-queue-.log",
-        rollingInterval: Serilog.RollingInterval.Day,
-        retainedFileCountLimit: 7,
-        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}"));
+if (noLog)
+{
+    builder.Services.AddSerilog((services, lc) => lc
+        .MinimumLevel.Fatal());
+}
+else
+{
+    builder.Services.AddSerilog((services, lc) => lc
+        .ReadFrom.Configuration(builder.Configuration)
+        .Enrich.FromLogContext()
+        .WriteTo.Console()
+        .WriteTo.File(
+            path: "logs/razorback-site-queue-.log",
+            rollingInterval: Serilog.RollingInterval.Day,
+            retainedFileCountLimit: 7,
+            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}"));
+}
 
 // Configure RabbitMQ
 var rabbitMqConfig = new RabbitMqConfig
@@ -249,10 +258,13 @@ if (builder.Configuration.GetValue<bool>("Workers:MissingSymbol:Enabled"))
 
 var host = builder.Build();
 
-Console.WriteLine("=== T16O RabbitMQ Workers ===");
-Console.WriteLine($"RabbitMQ Host: {rabbitMqConfig.Host}:{rabbitMqConfig.Port}");
-Console.WriteLine($"Virtual Host: {rabbitMqConfig.VirtualHost}");
-Console.WriteLine($"Database: {dbConnectionString.Split(';')[1].Split('=')[1]}");
-Console.WriteLine("Starting workers...");
+if (!noLog)
+{
+    Console.WriteLine("=== T16O RabbitMQ Workers ===");
+    Console.WriteLine($"RabbitMQ Host: {rabbitMqConfig.Host}:{rabbitMqConfig.Port}");
+    Console.WriteLine($"Virtual Host: {rabbitMqConfig.VirtualHost}");
+    Console.WriteLine($"Database: {dbConnectionString.Split(';')[1].Split('=')[1]}");
+    Console.WriteLine("Starting workers...");
+}
 
 host.Run();

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using MySqlConnector;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
@@ -22,6 +23,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
     private readonly string? _dbConnectionString;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private readonly bool _writeToDb;
     private bool _disposed;
 
@@ -33,16 +35,19 @@ public class RabbitMqAssetRpcWorker : IDisposable
     /// <param name="fetcherOptions">Optional AssetFetcher options (concurrency, rate limiting)</param>
     /// <param name="dbConnectionString">Optional database connection string for write mode</param>
     /// <param name="writeToDb">If true, writes fetched assets to database</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqAssetRpcWorker(
         RabbitMqConfig config,
         string[] rpcUrls,
         AssetFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
-        bool writeToDb = false)
+        bool writeToDb = false,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _writeToDb = writeToDb;
         _dbConnectionString = dbConnectionString;
+        _logger = logger;
         _fetcher = new AssetFetcher(rpcUrls, fetcherOptions ?? new AssetFetcherOptions
         {
             MaxConcurrentRequests = 10,
@@ -124,7 +129,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
                 var exists = await CheckAssetExistsInDbAsync(request.MintAddress, cancellationToken);
                 if (exists)
                 {
-                    Console.WriteLine($"[AssetRpcWorker] Asset {request.MintAddress} already in DB, skipping RPC");
+                    _logger?.LogDebug("[AssetRpcWorker] Asset {MintAddress} already in DB, skipping RPC", request.MintAddress);
 
                     // Still need to handle pending counter and party.write
                     if (!string.IsNullOrWhiteSpace(request.Signature))
@@ -137,7 +142,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
                         if (shouldTriggerPartyWrite)
                         {
                             PublishPartyWriteRequest(request.Signature, request.Priority);
-                            Console.WriteLine($"[AssetRpcWorker] All mints ready for {request.Signature}, forwarding to party.write");
+                            _logger?.LogInformation("[AssetRpcWorker] All mints ready for {Signature}, forwarding to party.write", request.Signature);
                         }
                     }
 
@@ -172,7 +177,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
                 try
                 {
                     await _writer.UpsertAssetAsync(result, cancellationToken);
-                    Console.WriteLine($"[AssetRpcWorker] Wrote asset {request.MintAddress} to database");
+                    _logger?.LogInformation("[AssetRpcWorker] Wrote asset {MintAddress} to database", request.MintAddress);
 
                     // Decrement pending counter and trigger party.write only when all mints are fetched
                     if (!string.IsNullOrWhiteSpace(request.Signature) && !string.IsNullOrEmpty(_dbConnectionString))
@@ -185,17 +190,17 @@ public class RabbitMqAssetRpcWorker : IDisposable
                         if (shouldTriggerPartyWrite)
                         {
                             PublishPartyWriteRequest(request.Signature, request.Priority);
-                            Console.WriteLine($"[AssetRpcWorker] All mints fetched for {request.Signature}, forwarding to party.write");
+                            _logger?.LogInformation("[AssetRpcWorker] All mints fetched for {Signature}, forwarding to party.write", request.Signature);
                         }
                         else
                         {
-                            Console.WriteLine($"[AssetRpcWorker] Mint {request.MintAddress} done, waiting for remaining mints before party.write");
+                            _logger?.LogDebug("[AssetRpcWorker] Mint {MintAddress} done, waiting for remaining mints before party.write", request.MintAddress);
                         }
                     }
                 }
                 catch (Exception writeEx)
                 {
-                    Console.WriteLine($"[AssetRpcWorker] Error writing asset {request.MintAddress}: {writeEx.Message}");
+                    _logger?.LogError("[AssetRpcWorker] Error writing asset {MintAddress}: {Message}", request.MintAddress, writeEx.Message);
                     // Continue to return success for the RPC fetch itself
                 }
             }

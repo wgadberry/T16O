@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -22,6 +23,7 @@ public class RabbitMqTransactionDbWorker : IDisposable
     private readonly AssetDatabaseReader? _assetReader;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private readonly bool _assessMints;
     private bool _disposed;
 
@@ -35,14 +37,17 @@ public class RabbitMqTransactionDbWorker : IDisposable
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
     /// <param name="assessMints">If true, extracts mints from transactions and triggers asset fetch for unknown mints</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqTransactionDbWorker(
         RabbitMqConfig config,
         string dbConnectionString,
-        bool assessMints = false)
+        bool assessMints = false,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _dbReader = new TransactionDatabaseReader(dbConnectionString);
         _assessMints = assessMints;
+        _logger = logger;
 
         if (_assessMints)
         {
@@ -102,7 +107,7 @@ public class RabbitMqTransactionDbWorker : IDisposable
     {
         try
         {
-            Console.WriteLine("[TxDbWorker] Loading known mints cache from database...");
+            _logger?.LogInformation("[TxDbWorker] Loading known mints cache from database...");
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
             var mints = await _assetReader!.GetAllMintAddressesAsync(cancellationToken);
@@ -113,12 +118,11 @@ public class RabbitMqTransactionDbWorker : IDisposable
             }
 
             sw.Stop();
-            Console.WriteLine($"[TxDbWorker] Loaded {mints.Count:N0} known mints into cache in {sw.ElapsedMilliseconds}ms");
+            _logger?.LogInformation("[TxDbWorker] Loaded {Count:N0} known mints into cache in {ElapsedMs}ms", mints.Count, sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[TxDbWorker] Warning: Failed to load mints cache: {ex.Message}");
-            Console.WriteLine("[TxDbWorker] Will fall back to individual DB queries");
+            _logger?.LogWarning("[TxDbWorker] Failed to load mints cache: {Message}. Will fall back to individual DB queries", ex.Message);
         }
     }
 
@@ -272,7 +276,7 @@ public class RabbitMqTransactionDbWorker : IDisposable
                     // Proactively add to cache to prevent duplicate fetch requests
                     AddToKnownMintsCache(mint);
                 }
-                Console.WriteLine($"[TxDbWorker] {signature}: {unknownCount}/{mints.Count} unknown mints queued");
+                _logger?.LogInformation("[TxDbWorker] {Signature}: {UnknownCount}/{TotalCount} unknown mints queued", signature, unknownCount, mints.Count);
                 // AssetRpcWorker will publish to party.write when all mints are fetched
             }
             else
@@ -283,7 +287,7 @@ public class RabbitMqTransactionDbWorker : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[TxDbWorker] Error assessing mints for {signature}: {ex.Message}");
+            _logger?.LogError("[TxDbWorker] Error assessing mints for {Signature}: {Message}", signature, ex.Message);
         }
     }
 

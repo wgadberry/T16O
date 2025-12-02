@@ -24,7 +24,7 @@ public class TransactionFetchRpcWorkerService : BackgroundService
         string? dbConnectionString = null,
         bool writeAndForward = false)
     {
-        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, null, dbConnectionString, writeAndForward);
+        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, null, dbConnectionString, writeAndForward, logger);
         _queueName = queueName;
         _logger = logger;
     }

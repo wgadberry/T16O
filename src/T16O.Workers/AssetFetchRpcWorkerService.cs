@@ -24,7 +24,7 @@ public class AssetFetchRpcWorkerService : BackgroundService
         string? dbConnectionString = null,
         bool writeToDb = false)
     {
-        _worker = new RabbitMqAssetRpcWorker(config, rpcUrls, null, dbConnectionString, writeToDb);
+        _worker = new RabbitMqAssetRpcWorker(config, rpcUrls, null, dbConnectionString, writeToDb, logger);
         _queueName = queueName;
         _logger = logger;
     }

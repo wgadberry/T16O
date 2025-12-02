@@ -23,7 +23,7 @@ public class TransactionFetchDbWorkerService : BackgroundService
         ILogger<TransactionFetchDbWorkerService> logger,
         bool assessMints = false)
     {
-        _worker = new RabbitMqTransactionDbWorker(config, dbConnectionString, assessMints);
+        _worker = new RabbitMqTransactionDbWorker(config, dbConnectionString, assessMints, logger);
         _queueName = queueName;
         _logger = logger;
     }

@@ -21,7 +21,7 @@ public class PartyWriteWorkerService : BackgroundService
         string queueName,
         ILogger<PartyWriteWorkerService> logger)
     {
-        _worker = new RabbitMqPartyWriteWorker(config, dbConnectionString);
+        _worker = new RabbitMqPartyWriteWorker(config, dbConnectionString, null, queueName, logger);
         _queueName = queueName;
         _logger = logger;
     }

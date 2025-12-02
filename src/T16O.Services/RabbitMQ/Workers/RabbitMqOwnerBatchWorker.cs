@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -22,6 +23,7 @@ public class RabbitMqOwnerBatchWorker : IDisposable
     private readonly TransactionDatabaseReader _dbReader;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private bool _disposed;
 
     /// <summary>
@@ -29,12 +31,15 @@ public class RabbitMqOwnerBatchWorker : IDisposable
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqOwnerBatchWorker(
         RabbitMqConfig config,
-        string dbConnectionString)
+        string dbConnectionString,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _dbReader = new TransactionDatabaseReader(dbConnectionString);
+        _logger = logger;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -84,17 +89,17 @@ public class RabbitMqOwnerBatchWorker : IDisposable
 
             if (request == null || string.IsNullOrWhiteSpace(request.OwnerAddress))
             {
-                Console.WriteLine("[OwnerBatchWorker] Invalid request: owner address is required");
+                _logger?.LogWarning("[OwnerBatchWorker] Invalid request: owner address is required");
                 return;
             }
 
             if (request.Signatures == null || request.Signatures.Count == 0)
             {
-                Console.WriteLine($"[OwnerBatchWorker] No signatures to process for owner {request.OwnerAddress}");
+                _logger?.LogDebug("[OwnerBatchWorker] No signatures to process for owner {OwnerAddress}", request.OwnerAddress);
                 return;
             }
 
-            Console.WriteLine($"[OwnerBatchWorker] Processing {request.Signatures.Count} signatures for owner {request.OwnerAddress} (depth: {request.Depth})");
+            _logger?.LogInformation("[OwnerBatchWorker] Processing {Count} signatures for owner {OwnerAddress} (depth: {Depth})", request.Signatures.Count, request.OwnerAddress, request.Depth);
 
             int cachedCount = 0;
             int queuedForRpcCount = 0;
@@ -142,16 +147,16 @@ public class RabbitMqOwnerBatchWorker : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[OwnerBatchWorker] Error processing signature {signature}: {ex.Message}");
+                    _logger?.LogError("[OwnerBatchWorker] Error processing signature {Signature}: {Message}", signature, ex.Message);
                 }
             }
 
-            Console.WriteLine($"[OwnerBatchWorker] Completed batch for {request.OwnerAddress}: " +
-                $"{cachedCount} cached, {queuedForRpcCount} queued for RPC, {queuedForDbCount} queued for DB");
+            _logger?.LogInformation("[OwnerBatchWorker] Completed batch for {OwnerAddress}: {CachedCount} cached, {RpcCount} queued for RPC, {DbCount} queued for DB",
+                request.OwnerAddress, cachedCount, queuedForRpcCount, queuedForDbCount);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[OwnerBatchWorker] Error processing batch: {ex.Message}");
+            _logger?.LogError("[OwnerBatchWorker] Error processing batch: {Message}", ex.Message);
         }
     }
 

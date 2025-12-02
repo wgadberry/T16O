@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -22,6 +23,7 @@ public class RabbitMqPartyWriteWorker : IDisposable
     private readonly PartyWriter _writer;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private readonly ConfigurableChannel? _configurableChannel;
     private bool _disposed;
 
@@ -33,7 +35,7 @@ public class RabbitMqPartyWriteWorker : IDisposable
     public RabbitMqPartyWriteWorker(
         RabbitMqConfig config,
         string dbConnectionString)
-        : this(config, dbConnectionString, null, RabbitMqConfig.TaskQueues.PartyWrite)
+        : this(config, dbConnectionString, null, RabbitMqConfig.TaskQueues.PartyWrite, null)
     {
     }
 
@@ -44,14 +46,17 @@ public class RabbitMqPartyWriteWorker : IDisposable
     /// <param name="dbConnectionString">MySQL connection string</param>
     /// <param name="configService">Optional configuration service for dynamic prefetch</param>
     /// <param name="queueName">Queue name for config lookup</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqPartyWriteWorker(
         RabbitMqConfig config,
         string dbConnectionString,
         ConfigurationService? configService,
-        string queueName)
+        string queueName,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _writer = new PartyWriter(dbConnectionString);
+        _logger = logger;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -115,7 +120,7 @@ public class RabbitMqPartyWriteWorker : IDisposable
 
             if (request == null || string.IsNullOrWhiteSpace(request.Signature))
             {
-                Console.WriteLine("[PartyWriteWorker] Invalid request: signature is required");
+                _logger?.LogWarning("[PartyWriteWorker] Invalid request: signature is required");
                 return;
             }
 
@@ -124,16 +129,16 @@ public class RabbitMqPartyWriteWorker : IDisposable
 
             if (created)
             {
-                Console.WriteLine($"[PartyWriteWorker] Created party records for {request.Signature}");
+                _logger?.LogInformation("[PartyWriteWorker] Created party records for {Signature}", request.Signature);
             }
             else
             {
-                Console.WriteLine($"[PartyWriteWorker] Party already exists for {request.Signature}");
+                _logger?.LogDebug("[PartyWriteWorker] Party already exists for {Signature}", request.Signature);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PartyWriteWorker] Error processing request: {ex.Message}");
+            _logger?.LogError("[PartyWriteWorker] Error processing request: {Message}", ex.Message);
         }
     }
 

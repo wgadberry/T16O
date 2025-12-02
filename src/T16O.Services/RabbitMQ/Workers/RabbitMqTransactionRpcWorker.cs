@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -22,6 +23,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
     private readonly TransactionWriter? _writer;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private readonly bool _writeAndForward;
     private bool _disposed;
 
@@ -33,22 +35,25 @@ public class RabbitMqTransactionRpcWorker : IDisposable
     /// <param name="fetcherOptions">Optional TransactionFetcher options (concurrency, rate limiting)</param>
     /// <param name="dbConnectionString">Optional database connection string for write-and-forward mode</param>
     /// <param name="writeAndForward">If true, writes to DB and forwards to tx.fetch.db after RPC fetch</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqTransactionRpcWorker(
         RabbitMqConfig config,
         string[] rpcUrls,
         TransactionFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
-        bool writeAndForward = false)
+        bool writeAndForward = false,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _writeAndForward = writeAndForward;
+        _logger = logger;
         _fetcher = new TransactionFetcher(rpcUrls, fetcherOptions ?? new TransactionFetcherOptions
         {
             MaxConcurrentRequests = 1,  // Serial requests to avoid rate limits
             RateLimitMs = 500,  // 500ms = ~2 RPS to stay safe under rate limits
             MaxRetryAttempts = 3,
             InitialRetryDelayMs = 1000
-        });
+        }, logger);
 
         if (_writeAndForward && !string.IsNullOrEmpty(dbConnectionString))
         {
@@ -131,7 +136,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
                 var errorMsg = transactions.Count == 0
                     ? "No results returned from RPC"
                     : transactions[0].Error ?? "Transaction data is null";
-                Console.WriteLine($"[TxRpcWorker] Failed to fetch {request.Signature}: {errorMsg}");
+                _logger?.LogWarning("[TxRpcWorker] Failed to fetch {Signature}: {Error}", request.Signature, errorMsg);
                 return new FetchTransactionResponse
                 {
                     Signature = request.Signature,
@@ -150,7 +155,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
                 {
                     // Write to database
                     await _writer.UpsertTransactionAsync(txResult, cancellationToken);
-                    Console.WriteLine($"[TxRpcWorker] Wrote transaction {request.Signature} to database");
+                    _logger?.LogInformation("[TxRpcWorker] Wrote transaction {Signature} to database", request.Signature);
 
                     // Forward to tx.fetch.db for mint assessment (fire-and-forget)
                     ForwardToDbQueue(new FetchTransactionRequest
@@ -159,11 +164,11 @@ public class RabbitMqTransactionRpcWorker : IDisposable
                         Bitmask = request.Bitmask,
                         Priority = request.Priority
                     }, request.Priority);
-                    Console.WriteLine($"[TxRpcWorker] Forwarded {request.Signature} to tx.fetch.db for mint assessment");
+                    _logger?.LogInformation("[TxRpcWorker] Forwarded {Signature} to tx.fetch.db for mint assessment", request.Signature);
                 }
                 catch (Exception writeEx)
                 {
-                    Console.WriteLine($"[TxRpcWorker] Error writing/forwarding {request.Signature}: {writeEx.Message}");
+                    _logger?.LogError("[TxRpcWorker] Error writing/forwarding {Signature}: {Message}", request.Signature, writeEx.Message);
                     // Continue to return success for the RPC fetch itself
                 }
             }
