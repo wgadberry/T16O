@@ -35,6 +35,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
     /// <param name="fetcherOptions">Optional AssetFetcher options (concurrency, rate limiting)</param>
     /// <param name="dbConnectionString">Optional database connection string for write mode</param>
     /// <param name="writeToDb">If true, writes fetched assets to database</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 1)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqAssetRpcWorker(
         RabbitMqConfig config,
@@ -42,6 +43,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
         AssetFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
         bool writeToDb = false,
+        ushort prefetch = 1,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -66,8 +68,7 @@ public class RabbitMqAssetRpcWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // CRITICAL: Limit prefetch to 1 message at a time to avoid RPC rate limits
-        RabbitMqConnection.SetPrefetchCount(_channel, 1);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>

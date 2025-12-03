@@ -22,9 +22,10 @@ public class AssetFetchRpcWorkerService : BackgroundService
         string queueName,
         ILogger<AssetFetchRpcWorkerService> logger,
         string? dbConnectionString = null,
-        bool writeToDb = false)
+        bool writeToDb = false,
+        ushort prefetch = 1)
     {
-        _worker = new RabbitMqAssetRpcWorker(config, rpcUrls, null, dbConnectionString, writeToDb, logger);
+        _worker = new RabbitMqAssetRpcWorker(config, rpcUrls, null, dbConnectionString, writeToDb, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }

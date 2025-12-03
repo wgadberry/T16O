@@ -28,6 +28,7 @@ public class RabbitMqUsageLogWorker : IDisposable
     public RabbitMqUsageLogWorker(
         RabbitMqConfig config,
         string dbConnectionString,
+        ushort prefetch = 100,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -54,8 +55,7 @@ public class RabbitMqUsageLogWorker : IDisposable
             exchange: _config.TaskExchange,
             routingKey: RabbitMqConfig.RoutingKeys.UsageLog);
 
-        // Higher prefetch for batch processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 100);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     public async Task StartAsync(string queueName, CancellationToken cancellationToken = default)

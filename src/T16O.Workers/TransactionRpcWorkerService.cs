@@ -22,9 +22,10 @@ public class TransactionFetchRpcWorkerService : BackgroundService
         string queueName,
         ILogger<TransactionFetchRpcWorkerService> logger,
         string? dbConnectionString = null,
-        bool writeAndForward = false)
+        bool writeAndForward = false,
+        ushort prefetch = 5)
     {
-        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, null, dbConnectionString, writeAndForward, logger);
+        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, null, dbConnectionString, writeAndForward, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }

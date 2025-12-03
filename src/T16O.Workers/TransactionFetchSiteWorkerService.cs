@@ -20,11 +20,12 @@ public class TransactionFetchSiteWorkerService : BackgroundService
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
-        ILogger<TransactionFetchSiteWorkerService> logger)
+        ILogger<TransactionFetchSiteWorkerService> logger,
+        ushort prefetch = 1)
     {
         // Site worker: Uses fetch pattern (db → rpc → write) for efficient caching
         // Uses dedicated site RPC queue to bypass saturated shared RPC queue
-        _worker = new RabbitMqTransactionFetchWorker(config, dbConnectionString, useSiteRpcQueue: true);
+        _worker = new RabbitMqTransactionFetchWorker(config, dbConnectionString, useSiteRpcQueue: true, batchSize: prefetch, logger: logger);
         _queueName = queueName;
         _logger = logger;
     }

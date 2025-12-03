@@ -21,9 +21,10 @@ public class TransactionFetchDbWorkerService : BackgroundService
         string dbConnectionString,
         string queueName,
         ILogger<TransactionFetchDbWorkerService> logger,
-        bool assessMints = false)
+        bool assessMints = false,
+        ushort prefetch = 20)
     {
-        _worker = new RabbitMqTransactionDbWorker(config, dbConnectionString, assessMints, logger);
+        _worker = new RabbitMqTransactionDbWorker(config, dbConnectionString, assessMints, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }

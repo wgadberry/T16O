@@ -23,8 +23,9 @@ public class OwnerFetchBatchWorkerService : BackgroundService
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
-        ILogger<OwnerFetchBatchWorkerService> logger)
-        : this(config, dbConnectionString, null, queueName, logger)
+        ILogger<OwnerFetchBatchWorkerService> logger,
+        ushort prefetch = 1)
+        : this(config, dbConnectionString, null, queueName, logger, prefetch)
     {
     }
 
@@ -36,9 +37,10 @@ public class OwnerFetchBatchWorkerService : BackgroundService
         string dbConnectionString,
         string[]? rpcUrls,
         string queueName,
-        ILogger<OwnerFetchBatchWorkerService> logger)
+        ILogger<OwnerFetchBatchWorkerService> logger,
+        ushort prefetch = 1)
     {
-        _worker = new RabbitMqOwnerBatchWorker(config, dbConnectionString, rpcUrls, logger);
+        _worker = new RabbitMqOwnerBatchWorker(config, dbConnectionString, rpcUrls, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }

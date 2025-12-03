@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
@@ -19,6 +20,7 @@ public class RabbitMqAssetDbWorker : IDisposable
     private readonly AssetDatabaseReader _dbReader;
     private readonly IConnection _connection;
     private readonly IModel _channel;
+    private readonly ILogger? _logger;
     private bool _disposed;
 
     /// <summary>
@@ -26,12 +28,17 @@ public class RabbitMqAssetDbWorker : IDisposable
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 1)</param>
+    /// <param name="logger">Optional logger</param>
     public RabbitMqAssetDbWorker(
         RabbitMqConfig config,
-        string dbConnectionString)
+        string dbConnectionString,
+        ushort prefetch = 1,
+        ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _dbReader = new AssetDatabaseReader(dbConnectionString);
+        _logger = logger;
 
         _connection = RabbitMqConnection.CreateConnection(_config);
         _channel = _connection.CreateModel();
@@ -39,8 +46,7 @@ public class RabbitMqAssetDbWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 message at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 15);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>

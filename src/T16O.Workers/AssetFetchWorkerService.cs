@@ -19,9 +19,10 @@ public class AssetFetchWorkerService : BackgroundService
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
-        ILogger<AssetFetchWorkerService> logger)
+        ILogger<AssetFetchWorkerService> logger,
+        ushort prefetch = 1)
     {
-        _worker = new RabbitMqAssetFetchWorker(config, dbConnectionString);
+        _worker = new RabbitMqAssetFetchWorker(config, dbConnectionString, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }

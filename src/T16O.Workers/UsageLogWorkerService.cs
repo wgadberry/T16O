@@ -6,30 +6,30 @@ using T16O.Services.RabbitMQ.Workers;
 namespace T16O.Workers;
 
 /// <summary>
-/// Party write worker service for creating party records.
-/// Checks if party exists and creates if not using usp_party_merge.
+/// Usage log worker service for async usage tracking.
+/// Writes usage records to the usage_log table.
 /// </summary>
-public class PartyWriteWorkerService : BackgroundService
+public class UsageLogWorkerService : BackgroundService
 {
-    private readonly RabbitMqPartyWriteWorker _worker;
+    private readonly RabbitMqUsageLogWorker _worker;
     private readonly string _queueName;
-    private readonly ILogger<PartyWriteWorkerService> _logger;
+    private readonly ILogger<UsageLogWorkerService> _logger;
 
-    public PartyWriteWorkerService(
+    public UsageLogWorkerService(
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
-        ILogger<PartyWriteWorkerService> logger,
-        ushort prefetch = 50)
+        ILogger<UsageLogWorkerService> logger,
+        ushort prefetch = 100)
     {
-        _worker = new RabbitMqPartyWriteWorker(config, dbConnectionString, prefetch, logger);
+        _worker = new RabbitMqUsageLogWorker(config, dbConnectionString, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Starting PartyWrite worker on queue: {QueueName}", _queueName);
+        _logger.LogInformation("Starting UsageLog worker on queue: {QueueName}", _queueName);
 
         try
         {
@@ -37,11 +37,11 @@ public class PartyWriteWorkerService : BackgroundService
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("Worker stopped gracefully");
+            _logger.LogInformation("UsageLog worker stopped gracefully");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Worker failed with error");
+            _logger.LogError(ex, "UsageLog worker failed with error");
             throw;
         }
     }

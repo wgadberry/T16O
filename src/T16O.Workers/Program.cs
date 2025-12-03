@@ -66,12 +66,15 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetch:Enabled"))
 {
     var queueName = builder.Configuration["Workers:TransactionFetch:QueueName"]
         ?? "razorback.tx.fetch";
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionFetch:Prefetch");
+    if (prefetch == 0) prefetch = 50;
     builder.Services.AddHostedService(sp =>
         new TransactionFetchWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
-            sp.GetRequiredService<ILogger<TransactionFetchWorkerService>>()
+            sp.GetRequiredService<ILogger<TransactionFetchWorkerService>>(),
+            prefetch
         ));
 }
 
@@ -80,12 +83,15 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchSite:Enabled")
 {
     var queueName = builder.Configuration["Workers:TransactionFetchSite:QueueName"]
         ?? RabbitMqConfig.RpcQueues.TxFetchSite;
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionFetchSite:Prefetch");
+    if (prefetch == 0) prefetch = 1;
     builder.Services.AddHostedService(sp =>
         new TransactionFetchSiteWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
-            sp.GetRequiredService<ILogger<TransactionFetchSiteWorkerService>>()
+            sp.GetRequiredService<ILogger<TransactionFetchSiteWorkerService>>(),
+            prefetch
         ));
 }
 
@@ -96,13 +102,16 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchDb:Enabled"))
     var queueName = builder.Configuration["Workers:TransactionFetchDb:QueueName"]
         ?? "razorback.tx.fetch.db";
     var assessMints = builder.Configuration.GetValue<bool>("Workers:TransactionFetchDb:AssessMints");
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionFetchDb:Prefetch");
+    if (prefetch == 0) prefetch = 20;
     builder.Services.AddHostedService(sp =>
         new TransactionFetchDbWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
             sp.GetRequiredService<ILogger<TransactionFetchDbWorkerService>>(),
-            assessMints
+            assessMints,
+            prefetch
         ));
 }
 
@@ -113,6 +122,8 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:Enabled"))
     var queueName = builder.Configuration["Workers:TransactionFetchRpc:QueueName"]
         ?? "razorback.tx.fetch.rpc";
     var writeAndForward = builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:WriteAndForward");
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionFetchRpc:Prefetch");
+    if (prefetch == 0) prefetch = 5;
     builder.Services.AddHostedService(sp =>
         new TransactionFetchRpcWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
@@ -120,7 +131,8 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:Enabled"))
             queueName,
             sp.GetRequiredService<ILogger<TransactionFetchRpcWorkerService>>(),
             writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
-            writeAndForward
+            writeAndForward,
+            prefetch
         ));
 }
 
@@ -131,6 +143,8 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpcSite:Enable
     var queueName = builder.Configuration["Workers:TransactionFetchRpcSite:QueueName"]
         ?? RabbitMqConfig.RpcQueues.TxFetchRpcSite;
     var writeAndForward = builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpcSite:WriteAndForward");
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionFetchRpcSite:Prefetch");
+    if (prefetch == 0) prefetch = 1;
     builder.Services.AddHostedService(sp =>
         new TransactionFetchRpcSiteWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
@@ -138,7 +152,8 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpcSite:Enable
             queueName,
             sp.GetRequiredService<ILogger<TransactionFetchRpcSiteWorkerService>>(),
             writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
-            writeAndForward
+            writeAndForward,
+            prefetch
         ));
 }
 
@@ -147,12 +162,15 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionWrite:Enabled"))
 {
     var queueName = builder.Configuration["Workers:TransactionWrite:QueueName"]
         ?? "razorback.tasks.tx.write.db";
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionWrite:Prefetch");
+    if (prefetch == 0) prefetch = 20;
     builder.Services.AddHostedService(sp =>
         new TransactionWriteWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
-            sp.GetRequiredService<ILogger<TransactionWriteWorkerService>>()
+            sp.GetRequiredService<ILogger<TransactionWriteWorkerService>>(),
+            prefetch
         ));
 }
 
@@ -163,12 +181,15 @@ if (builder.Configuration.GetValue<bool>("Workers:AssetFetch:Enabled"))
 {
     var queueName = builder.Configuration["Workers:AssetFetch:QueueName"]
         ?? RabbitMqConfig.RpcQueues.MintFetch;
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:AssetFetch:Prefetch");
+    if (prefetch == 0) prefetch = 1;
     builder.Services.AddHostedService(sp =>
         new AssetFetchWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
-            sp.GetRequiredService<ILogger<AssetFetchWorkerService>>()
+            sp.GetRequiredService<ILogger<AssetFetchWorkerService>>(),
+            prefetch
         ));
 }
 
@@ -177,12 +198,15 @@ if (builder.Configuration.GetValue<bool>("Workers:AssetFetchDb:Enabled"))
 {
     var queueName = builder.Configuration["Workers:AssetFetchDb:QueueName"]
         ?? RabbitMqConfig.RpcQueues.MintFetchDb;
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:AssetFetchDb:Prefetch");
+    if (prefetch == 0) prefetch = 1;
     builder.Services.AddHostedService(sp =>
         new AssetFetchDbWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
-            sp.GetRequiredService<ILogger<AssetFetchDbWorkerService>>()
+            sp.GetRequiredService<ILogger<AssetFetchDbWorkerService>>(),
+            prefetch
         ));
 }
 
@@ -193,6 +217,8 @@ if (builder.Configuration.GetValue<bool>("Workers:AssetFetchRpc:Enabled"))
     var queueName = builder.Configuration["Workers:AssetFetchRpc:QueueName"]
         ?? RabbitMqConfig.RpcQueues.MintFetchRpc;
     var writeToDb = builder.Configuration.GetValue<bool>("Workers:AssetFetchRpc:WriteToDb");
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:AssetFetchRpc:Prefetch");
+    if (prefetch == 0) prefetch = 1;
     builder.Services.AddHostedService(sp =>
         new AssetFetchRpcWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
@@ -200,7 +226,8 @@ if (builder.Configuration.GetValue<bool>("Workers:AssetFetchRpc:Enabled"))
             queueName,
             sp.GetRequiredService<ILogger<AssetFetchRpcWorkerService>>(),
             writeToDb ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
-            writeToDb
+            writeToDb,
+            prefetch
         ));
 }
 
@@ -212,13 +239,16 @@ if (builder.Configuration.GetValue<bool>("Workers:OwnerFetchBatch:Enabled"))
 {
     var queueName = builder.Configuration["Workers:OwnerFetchBatch:QueueName"]
         ?? RabbitMqConfig.RpcQueues.OwnerFetchBatch;
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:OwnerFetchBatch:Prefetch");
+    if (prefetch == 0) prefetch = 1;
     builder.Services.AddHostedService(sp =>
         new OwnerFetchBatchWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             sp.GetRequiredService<SolanaConfig>().TransactionRpcUrls,  // Enable api-key flow
             queueName,
-            sp.GetRequiredService<ILogger<OwnerFetchBatchWorkerService>>()
+            sp.GetRequiredService<ILogger<OwnerFetchBatchWorkerService>>(),
+            prefetch
         ));
 }
 
@@ -229,12 +259,32 @@ if (builder.Configuration.GetValue<bool>("Workers:PartyWrite:Enabled"))
 {
     var queueName = builder.Configuration["Workers:PartyWrite:QueueName"]
         ?? RabbitMqConfig.TaskQueues.PartyWrite;
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:PartyWrite:Prefetch");
+    if (prefetch == 0) prefetch = 50;
     builder.Services.AddHostedService(sp =>
         new PartyWriteWorkerService(
             sp.GetRequiredService<RabbitMqConfig>(),
             sp.GetRequiredService<DatabaseConfig>().ConnectionString,
             queueName,
-            sp.GetRequiredService<ILogger<PartyWriteWorkerService>>()
+            sp.GetRequiredService<ILogger<PartyWriteWorkerService>>(),
+            prefetch
+        ));
+}
+
+// Usage Log worker - async usage tracking for API-key requests
+if (builder.Configuration.GetValue<bool>("Workers:UsageLog:Enabled"))
+{
+    var queueName = builder.Configuration["Workers:UsageLog:QueueName"]
+        ?? RabbitMqConfig.TaskQueues.UsageLog;
+    var prefetch = builder.Configuration.GetValue<ushort>("Workers:UsageLog:Prefetch");
+    if (prefetch == 0) prefetch = 100;
+    builder.Services.AddHostedService(sp =>
+        new UsageLogWorkerService(
+            sp.GetRequiredService<RabbitMqConfig>(),
+            sp.GetRequiredService<DatabaseConfig>().ConnectionString,
+            queueName,
+            sp.GetRequiredService<ILogger<UsageLogWorkerService>>(),
+            prefetch
         ));
 }
 

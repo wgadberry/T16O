@@ -34,10 +34,12 @@ public class RabbitMqAssetFetchWorker : IDisposable
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 1)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqAssetFetchWorker(
         RabbitMqConfig config,
         string dbConnectionString,
+        ushort prefetch = 1,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -52,8 +54,7 @@ public class RabbitMqAssetFetchWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 message at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 15);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>

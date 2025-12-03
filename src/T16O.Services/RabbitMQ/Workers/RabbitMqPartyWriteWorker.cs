@@ -7,7 +7,6 @@ using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using T16O.Models.RabbitMQ;
-using T16O.Services.Configuration;
 
 namespace T16O.Services.RabbitMQ.Workers;
 
@@ -24,34 +23,19 @@ public class RabbitMqPartyWriteWorker : IDisposable
     private readonly IConnection _connection;
     private readonly IModel _channel;
     private readonly ILogger? _logger;
-    private readonly ConfigurableChannel? _configurableChannel;
     private bool _disposed;
 
     /// <summary>
-    /// Initialize the party write worker (legacy constructor without config service)
+    /// Initialize the party write worker
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
-    public RabbitMqPartyWriteWorker(
-        RabbitMqConfig config,
-        string dbConnectionString)
-        : this(config, dbConnectionString, null, RabbitMqConfig.TaskQueues.PartyWrite, null)
-    {
-    }
-
-    /// <summary>
-    /// Initialize the party write worker with dynamic configuration support
-    /// </summary>
-    /// <param name="config">RabbitMQ configuration</param>
-    /// <param name="dbConnectionString">MySQL connection string</param>
-    /// <param name="configService">Optional configuration service for dynamic prefetch</param>
-    /// <param name="queueName">Queue name for config lookup</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 50)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqPartyWriteWorker(
         RabbitMqConfig config,
         string dbConnectionString,
-        ConfigurationService? configService,
-        string queueName,
+        ushort prefetch = 50,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -64,16 +48,7 @@ public class RabbitMqPartyWriteWorker : IDisposable
         // Setup task infrastructure
         RabbitMqConnection.SetupTaskInfrastructure(_channel, _config);
 
-        // Setup prefetch - use configurable channel if config service provided
-        if (configService != null)
-        {
-            _configurableChannel = new ConfigurableChannel(_channel, queueName, configService, 10);
-        }
-        else
-        {
-            // Fallback to static prefetch
-            RabbitMqConnection.SetPrefetchCount(_channel, 15);
-        }
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>
@@ -147,7 +122,6 @@ public class RabbitMqPartyWriteWorker : IDisposable
         if (_disposed)
             return;
 
-        _configurableChannel?.Dispose();
         _channel?.Close();
         _channel?.Dispose();
         _connection?.Close();

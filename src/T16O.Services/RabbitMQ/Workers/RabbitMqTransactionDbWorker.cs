@@ -37,11 +37,13 @@ public class RabbitMqTransactionDbWorker : IDisposable
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
     /// <param name="assessMints">If true, extracts mints from transactions and triggers asset fetch for unknown mints</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 20)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqTransactionDbWorker(
         RabbitMqConfig config,
         string dbConnectionString,
         bool assessMints = false,
+        ushort prefetch = 20,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -60,8 +62,7 @@ public class RabbitMqTransactionDbWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // Prefetch count for parallel message processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 15);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>

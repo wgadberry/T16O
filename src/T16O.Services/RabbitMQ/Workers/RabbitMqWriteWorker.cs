@@ -29,10 +29,12 @@ public class RabbitMqWriteWorker : IDisposable
     /// </summary>
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 20)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqWriteWorker(
         RabbitMqConfig config,
         string dbConnectionString,
+        ushort prefetch = 20,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -45,8 +47,7 @@ public class RabbitMqWriteWorker : IDisposable
         // Setup task infrastructure
         RabbitMqConnection.SetupTaskInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 message at a time for controlled processing
-        RabbitMqConnection.SetPrefetchCount(_channel, 15);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>

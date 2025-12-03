@@ -51,7 +51,7 @@ public class RabbitMqOwnerBatchWorker : IDisposable
         RabbitMqConfig config,
         string dbConnectionString,
         ILogger? logger = null)
-        : this(config, dbConnectionString, null, logger)
+        : this(config, dbConnectionString, null, 1, logger)
     {
     }
 
@@ -61,11 +61,13 @@ public class RabbitMqOwnerBatchWorker : IDisposable
     /// <param name="config">RabbitMQ configuration</param>
     /// <param name="dbConnectionString">MySQL connection string</param>
     /// <param name="rpcUrls">RPC URLs for transaction fetching (required for api-key flow)</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 1)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqOwnerBatchWorker(
         RabbitMqConfig config,
         string dbConnectionString,
         string[]? rpcUrls,
+        ushort prefetch = 1,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -88,8 +90,7 @@ public class RabbitMqOwnerBatchWorker : IDisposable
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
         RabbitMqConnection.SetupTaskInfrastructure(_channel, _config);
 
-        // Limit prefetch to 1 batch at a time for controlled RPC rate limiting
-        RabbitMqConnection.SetPrefetchCount(_channel, 1);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>
@@ -183,6 +184,7 @@ public class RabbitMqOwnerBatchWorker : IDisposable
             request.ApiKey!,
             request.Signatures,
             request.Priority,
+            forceRefresh: false,
             cancellationToken);
 
         _logger?.LogInformation("[OwnerBatchWorker] API-key request completed. RequestId={RequestId}, State={State}, Total={Total}, Existing={Existing}, Fetched={Fetched}, Parties={Parties}, Errors={ErrorCount}",

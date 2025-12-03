@@ -35,6 +35,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
     /// <param name="fetcherOptions">Optional TransactionFetcher options (concurrency, rate limiting)</param>
     /// <param name="dbConnectionString">Optional database connection string for write-and-forward mode</param>
     /// <param name="writeAndForward">If true, writes to DB and forwards to tx.fetch.db after RPC fetch</param>
+    /// <param name="prefetch">RabbitMQ prefetch count (default: 5)</param>
     /// <param name="logger">Optional logger</param>
     public RabbitMqTransactionRpcWorker(
         RabbitMqConfig config,
@@ -42,6 +43,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
         TransactionFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
         bool writeAndForward = false,
+        ushort prefetch = 5,
         ILogger? logger = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -66,8 +68,7 @@ public class RabbitMqTransactionRpcWorker : IDisposable
         // Setup RPC infrastructure
         RabbitMqConnection.SetupRpcInfrastructure(_channel, _config);
 
-        // CRITICAL: Limit prefetch to 1 message at a time to avoid RPC rate limits
-        RabbitMqConnection.SetPrefetchCount(_channel, 15);
+        RabbitMqConnection.SetPrefetchCount(_channel, prefetch);
     }
 
     /// <summary>

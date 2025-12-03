@@ -26,6 +26,11 @@ public class RequestProcessingResult
     public int FetchedTransactions { get; set; }
     public int PartyRecordsCreated { get; set; }
     public List<string> Errors { get; set; } = new();
+
+    /// <summary>
+    /// Transaction data keyed by signature (populated when forceRefresh=true or for new fetches)
+    /// </summary>
+    public Dictionary<string, JsonElement> Transactions { get; set; } = new();
 }
 
 /// <summary>
@@ -97,10 +102,16 @@ public class RequestOrchestrator
     /// Process a batch request with API key.
     /// This is the main entry point for the API-key flow.
     /// </summary>
+    /// <param name="apiKey">API key for authentication</param>
+    /// <param name="signatures">List of transaction signatures to process</param>
+    /// <param name="priority">Priority level (default 5)</param>
+    /// <param name="forceRefresh">If true, always fetch from RPC even if transaction exists in DB</param>
+    /// <param name="cancellationToken">Cancellation token</param>
     public async Task<RequestProcessingResult> ProcessApiKeyRequestAsync(
         string apiKey,
         List<string> signatures,
         byte priority = 5,
+        bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -134,7 +145,7 @@ public class RequestOrchestrator
                 request.Id, requester.Id);
 
             // Step 3: Gather all signatures into request_queue
-            // Check if transaction already exists for each signature
+            // Check if transaction already exists for each signature (unless forceRefresh)
             foreach (var signature in signatures)
             {
                 if (string.IsNullOrWhiteSpace(signature))
@@ -142,10 +153,16 @@ public class RequestOrchestrator
 
                 try
                 {
-                    var txId = await _requestService.GetTransactionIdAsync(signature, cancellationToken);
-                    if (txId.HasValue)
+                    long? txId = null;
+
+                    // Only check for existing transaction if not forcing refresh
+                    if (!forceRefresh)
                     {
-                        result.ExistingTransactions++;
+                        txId = await _requestService.GetTransactionIdAsync(signature, cancellationToken);
+                        if (txId.HasValue)
+                        {
+                            result.ExistingTransactions++;
+                        }
                     }
 
                     await _requestService.AddToQueueAsync(
@@ -153,7 +170,7 @@ public class RequestOrchestrator
                         requester.Id,
                         signature,
                         priority,
-                        txId,
+                        txId,  // Will be null if forceRefresh, forcing RPC fetch
                         cancellationToken);
                 }
                 catch (Exception ex)
@@ -230,6 +247,9 @@ public class RequestOrchestrator
                         {
                             await _transactionWriter.UpsertTransactionAsync(fetchResult, cancellationToken);
                             dbWrites++;
+
+                            // Store transaction data in result for API response
+                            result.Transactions[fetchResult.Signature] = fetchResult.TransactionData.Value;
 
                             var txId = await _requestService.GetTransactionIdAsync(fetchResult.Signature, cancellationToken);
                             if (txId.HasValue)

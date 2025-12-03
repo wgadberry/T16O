@@ -19,9 +19,10 @@ public class TransactionFetchWorkerService : BackgroundService
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
-        ILogger<TransactionFetchWorkerService> logger)
+        ILogger<TransactionFetchWorkerService> logger,
+        ushort prefetch = 50)
     {
-        _worker = new RabbitMqTransactionFetchWorker(config, dbConnectionString);
+        _worker = new RabbitMqTransactionFetchWorker(config, dbConnectionString, useSiteRpcQueue: false, batchSize: prefetch, logger: logger);
         _queueName = queueName;
         _logger = logger;
     }

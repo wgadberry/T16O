@@ -18,9 +18,10 @@ public class TransactionWriteWorkerService : BackgroundService
         RabbitMqConfig config,
         string dbConnectionString,
         string queueName,
-        ILogger<TransactionWriteWorkerService> logger)
+        ILogger<TransactionWriteWorkerService> logger,
+        ushort prefetch = 20)
     {
-        _worker = new RabbitMqWriteWorker(config, dbConnectionString);
+        _worker = new RabbitMqWriteWorker(config, dbConnectionString, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }
