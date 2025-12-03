@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using T16O.Services;
 using T16O.Services.RabbitMQ;
 using T16O.Workers;
 using Serilog;
@@ -58,6 +59,25 @@ var assetRpcUrls = builder.Configuration.GetSection("Solana:AssetRpcUrls").Get<s
 
 builder.Services.AddSingleton(new DatabaseConfig { ConnectionString = dbConnectionString });
 builder.Services.AddSingleton(new SolanaConfig { TransactionRpcUrls = transactionRpcUrls, AssetRpcUrls = assetRpcUrls });
+
+// Read Fetcher configuration for RPC workers
+var transactionFetcherOptions = new TransactionFetcherOptions
+{
+    MaxConcurrentRequests = builder.Configuration.GetValue<int>("Fetcher:Transaction:MaxConcurrentRequests", 1),
+    RateLimitMs = builder.Configuration.GetValue<int>("Fetcher:Transaction:RateLimitMs", 40),
+    MaxRetryAttempts = builder.Configuration.GetValue<int>("Fetcher:Transaction:MaxRetryAttempts", 3),
+    InitialRetryDelayMs = builder.Configuration.GetValue<int>("Fetcher:Transaction:InitialRetryDelayMs", 1000)
+};
+var assetFetcherOptions = new AssetFetcherOptions
+{
+    MaxConcurrentRequests = builder.Configuration.GetValue<int>("Fetcher:Asset:MaxConcurrentRequests", 10),
+    RateLimitMs = builder.Configuration.GetValue<int>("Fetcher:Asset:RateLimitMs", 100),
+    EnableFallbackChain = builder.Configuration.GetValue<bool>("Fetcher:Asset:EnableFallbackChain", true),
+    DatabaseConnectionString = dbConnectionString  // For fallback chain pool lookups
+};
+
+builder.Services.AddSingleton(transactionFetcherOptions);
+builder.Services.AddSingleton(assetFetcherOptions);
 
 // Register workers based on configuration
 
@@ -130,6 +150,7 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:Enabled"))
             sp.GetRequiredService<SolanaConfig>().TransactionRpcUrls,  // Use Chainstack for transactions
             queueName,
             sp.GetRequiredService<ILogger<TransactionFetchRpcWorkerService>>(),
+            sp.GetRequiredService<TransactionFetcherOptions>(),
             writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
             writeAndForward,
             prefetch
@@ -151,6 +172,7 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpcSite:Enable
             sp.GetRequiredService<SolanaConfig>().TransactionRpcUrls,
             queueName,
             sp.GetRequiredService<ILogger<TransactionFetchRpcSiteWorkerService>>(),
+            sp.GetRequiredService<TransactionFetcherOptions>(),
             writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
             writeAndForward,
             prefetch
@@ -225,6 +247,7 @@ if (builder.Configuration.GetValue<bool>("Workers:AssetFetchRpc:Enabled"))
             sp.GetRequiredService<SolanaConfig>().AssetRpcUrls,  // Use Helius for getAsset DAS API
             queueName,
             sp.GetRequiredService<ILogger<AssetFetchRpcWorkerService>>(),
+            sp.GetRequiredService<AssetFetcherOptions>(),
             writeToDb ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
             writeToDb,
             prefetch

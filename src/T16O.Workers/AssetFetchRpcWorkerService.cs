@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using T16O.Services;
 using T16O.Services.RabbitMQ;
 using T16O.Services.RabbitMQ.Workers;
 
@@ -21,11 +22,12 @@ public class AssetFetchRpcWorkerService : BackgroundService
         string[] rpcUrls,
         string queueName,
         ILogger<AssetFetchRpcWorkerService> logger,
+        AssetFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
         bool writeToDb = false,
         ushort prefetch = 1)
     {
-        _worker = new RabbitMqAssetRpcWorker(config, rpcUrls, null, dbConnectionString, writeToDb, prefetch, logger);
+        _worker = new RabbitMqAssetRpcWorker(config, rpcUrls, fetcherOptions, dbConnectionString, writeToDb, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }

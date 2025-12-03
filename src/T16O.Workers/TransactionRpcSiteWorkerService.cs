@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using T16O.Services;
 using T16O.Services.RabbitMQ;
 using T16O.Services.RabbitMQ.Workers;
 
@@ -21,11 +22,12 @@ public class TransactionFetchRpcSiteWorkerService : BackgroundService
         string[] rpcUrls,
         string queueName,
         ILogger<TransactionFetchRpcSiteWorkerService> logger,
+        TransactionFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
         bool writeAndForward = false,
         ushort prefetch = 1)
     {
-        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, null, dbConnectionString, writeAndForward, prefetch, logger);
+        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, fetcherOptions, dbConnectionString, writeAndForward, prefetch, logger);
         _queueName = queueName;
         _logger = logger;
     }
