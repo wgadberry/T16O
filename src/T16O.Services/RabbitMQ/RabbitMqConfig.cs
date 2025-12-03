@@ -1,17 +1,18 @@
 namespace T16O.Services.RabbitMQ;
 
 /// <summary>
-/// Configuration for RabbitMQ connection and queue setup
+/// Configuration for RabbitMQ connection and queue setup.
+/// All values should be provided via appsettings.json configuration.
 /// </summary>
 public class RabbitMqConfig
 {
     /// <summary>
-    /// RabbitMQ host (default: localhost)
+    /// RabbitMQ host
     /// </summary>
     public string Host { get; set; } = "localhost";
 
     /// <summary>
-    /// RabbitMQ port (default: 5672)
+    /// RabbitMQ port
     /// </summary>
     public int Port { get; set; } = 5672;
 
@@ -26,7 +27,7 @@ public class RabbitMqConfig
     public string Password { get; set; } = "admin123";
 
     /// <summary>
-    /// Virtual host (default: t16o)
+    /// Virtual host
     /// </summary>
     public string VirtualHost { get; set; } = "t16o";
 
@@ -77,6 +78,7 @@ public class RabbitMqConfig
     {
         public const string TxWrite = "tasks.tx.write.db";
         public const string PartyWrite = "party.write";
+        public const string UsageLog = "usage.log";
     }
 
     /// <summary>
@@ -102,6 +104,7 @@ public class RabbitMqConfig
         // Task routing keys
         public const string TxWrite = "tx.write";
         public const string PartyWrite = "party.write";
+        public const string UsageLog = "usage.log";
     }
 
 }

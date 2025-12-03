@@ -9,7 +9,7 @@ builder.Services.AddControllers();
 
 // Configure Database connection string
 var dbConnectionString = builder.Configuration["Database:ConnectionString"]
-    ?? "Server=localhost;Database=t16o;User=root;Password=rootpassword;Allow User Variables=True;";
+    ?? throw new InvalidOperationException("Database:ConnectionString is required in appsettings");
 builder.Services.AddSingleton(new DatabaseSettings { ConnectionString = dbConnectionString });
 
 // Configure RabbitMQ
@@ -34,33 +34,30 @@ builder.Services.AddSingleton<RabbitMqRpcClient>(sp =>
 });
 
 // Configure RPC URLs for transaction fetching
-var rpcUrls = builder.Configuration.GetSection("Rpc:Urls").Get<string[]>()
-    ?? new[] { "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY" };
+var transactionRpcUrls = builder.Configuration.GetSection("Solana:TransactionRpcUrls").Get<string[]>()
+    ?? throw new InvalidOperationException("Solana:TransactionRpcUrls is required in appsettings");
+
+// Read Fetcher configuration
+var fetcherTransactionConfig = new TransactionFetcherOptions
+{
+    MaxConcurrentRequests = builder.Configuration.GetValue<int>("Fetcher:Transaction:MaxConcurrentRequests", 1),
+    RateLimitMs = builder.Configuration.GetValue<int>("Fetcher:Transaction:RateLimitMs", 40),
+    MaxRetryAttempts = builder.Configuration.GetValue<int>("Fetcher:Transaction:MaxRetryAttempts", 3),
+    InitialRetryDelayMs = builder.Configuration.GetValue<int>("Fetcher:Transaction:InitialRetryDelayMs", 1000)
+};
 
 // Register TransactionFetcher as singleton
 builder.Services.AddSingleton<TransactionFetcher>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<TransactionFetcher>>();
-    return new TransactionFetcher(rpcUrls, new TransactionFetcherOptions
-    {
-        MaxConcurrentRequests = 1,
-        RateLimitMs = 0,
-        MaxRetryAttempts = 3,
-        InitialRetryDelayMs = 1000
-    }, logger);
+    return new TransactionFetcher(transactionRpcUrls, fetcherTransactionConfig, logger);
 });
 
 // Register RequestOrchestrator as singleton
 builder.Services.AddSingleton<RequestOrchestrator>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<RequestOrchestrator>>();
-    return new RequestOrchestrator(dbConnectionString, rpcUrls, rabbitMqConfig, new TransactionFetcherOptions
-    {
-        MaxConcurrentRequests = 1,
-        RateLimitMs = 0,
-        MaxRetryAttempts = 3,
-        InitialRetryDelayMs = 1000
-    }, logger);
+    return new RequestOrchestrator(dbConnectionString, transactionRpcUrls, rabbitMqConfig, fetcherTransactionConfig, logger);
 });
 
 var app = builder.Build();
