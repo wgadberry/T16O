@@ -42,7 +42,8 @@ INSERT INTO config (config_type, config_key, config_value, value_type, descripti
 ('queue', 'MintFetchRpc', 'mint.fetch.rpc', 'string', 'Mint fetch from RPC queue', 'mint.fetch.rpc', 0, 1),
 ('queue', 'OwnerFetchBatch', 'owner.fetch.batch', 'string', 'Owner batch fetch queue', 'owner.fetch.batch', 0, 1),
 ('queue', 'TxWrite', 'tasks.tx.write.db', 'string', 'Transaction write task queue', 'tasks.tx.write.db', 0, 1),
-('queue', 'PartyWrite', 'party.write', 'string', 'Party write task queue', 'party.write', 0, 1);
+('queue', 'PartyWrite', 'party.write', 'string', 'Party write task queue', 'party.write', 0, 1),
+('queue', 'UsageLog', 'usage.log', 'string', 'Usage log task queue', 'usage.log', 0, 1);
 
 -- =====================
 -- SOLANA RPC URLS (config_type = 'rpc')
@@ -101,7 +102,9 @@ INSERT INTO config (config_type, config_key, config_value, value_type, descripti
 ('worker', 'PartyWrite.Concurrency', '5', 'int', 'PartyWrite worker concurrency', '5', 0),
 ('worker', 'MissingSymbol.Enabled', 'false', 'bool', 'Enable MissingSymbol timer worker', 'false', 0),
 ('worker', 'MissingSymbol.IntervalSeconds', '60', 'int', 'MissingSymbol check interval in seconds', '60', 1),
-('worker', 'MissingSymbol.BatchSize', '1000', 'int', 'MissingSymbol batch size per check', '1000', 1);
+('worker', 'MissingSymbol.BatchSize', '1000', 'int', 'MissingSymbol batch size per check', '1000', 1),
+('worker', 'UsageLog.Enabled', 'true', 'bool', 'Enable UsageLog worker for API-key tracking', 'true', 0),
+('worker', 'UsageLog.Concurrency', '1', 'int', 'UsageLog worker concurrency', '1', 0);
 
 -- =====================
 -- LOGGING (config_type = 'logging')
@@ -113,6 +116,18 @@ INSERT INTO config (config_type, config_key, config_value, value_type, descripti
 ('logging', 'FilePath', 'logs/t16o-site-queue-.log', 'string', 'Log file path pattern', 'logs/t16o-site-queue-.log', 0),
 ('logging', 'RetainedFileCountLimit', '7', 'int', 'Number of log files to retain', '7', 1),
 ('logging', 'RollingInterval', 'Day', 'string', 'Log rolling interval (Day, Hour, etc.)', 'Day', 0);
+
+-- =====================
+-- INFLUXDB / METRICS (config_type = 'influxdb')
+-- =====================
+INSERT INTO config (config_type, config_key, config_value, value_type, description, default_value, is_sensitive, is_runtime_editable, requires_restart) VALUES
+('influxdb', 'Enabled', 'true', 'bool', 'Enable InfluxDB metrics collection', 'true', 0, 1, 0),
+('influxdb', 'Url', 'http://localhost:8086', 'string', 'InfluxDB server URL', 'http://localhost:8086', 0, 0, 1),
+('influxdb', 'Token', 't16o-metrics-token', 'string', 'InfluxDB API token', NULL, 1, 0, 1),
+('influxdb', 'Org', 't16o', 'string', 'InfluxDB organization', 't16o', 0, 0, 1),
+('influxdb', 'Bucket', 'metrics', 'string', 'InfluxDB bucket for metrics', 'metrics', 0, 0, 1),
+('influxdb', 'FlushIntervalMs', '5000', 'int', 'Metrics flush interval in milliseconds', '5000', 0, 1, 0),
+('influxdb', 'BatchSize', '100', 'int', 'Batch size for metric writes', '100', 0, 1, 0);
 
 -- Summary
 SELECT config_type, COUNT(*) as count FROM config GROUP BY config_type ORDER BY config_type;

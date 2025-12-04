@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using T16O.Services;
+using T16O.Services.Monitoring;
 using T16O.Services.RabbitMQ;
 using T16O.Workers;
 using Serilog;
@@ -57,8 +58,15 @@ var transactionRpcUrls = builder.Configuration.GetSection("Solana:TransactionRpc
 var assetRpcUrls = builder.Configuration.GetSection("Solana:AssetRpcUrls").Get<string[]>()
     ?? throw new InvalidOperationException("Solana Asset RPC URLs are required");
 
+// Read per-endpoint RPC configuration (optional, falls back to legacy URLs if not configured)
+var rpcEndpoints = builder.Configuration.GetSection("Solana:RpcEndpoints").Get<T16O.Models.RpcEndpointConfig[]>();
+
 builder.Services.AddSingleton(new DatabaseConfig { ConnectionString = dbConnectionString });
 builder.Services.AddSingleton(new SolanaConfig { TransactionRpcUrls = transactionRpcUrls, AssetRpcUrls = assetRpcUrls });
+if (rpcEndpoints != null && rpcEndpoints.Length > 0)
+{
+    builder.Services.AddSingleton(rpcEndpoints);
+}
 
 // Read Fetcher configuration for RPC workers
 var transactionFetcherOptions = new TransactionFetcherOptions
@@ -78,6 +86,42 @@ var assetFetcherOptions = new AssetFetcherOptions
 
 builder.Services.AddSingleton(transactionFetcherOptions);
 builder.Services.AddSingleton(assetFetcherOptions);
+
+// Configure PerformanceMonitor for InfluxDB metrics
+var influxDbEnabled = builder.Configuration.GetValue<bool>("InfluxDB:Enabled", true);
+PerformanceMonitor? performanceMonitor = null;
+if (influxDbEnabled)
+{
+    var monitorOptions = new PerformanceMonitorOptions
+    {
+        Enabled = true,
+        Url = builder.Configuration["InfluxDB:Url"] ?? "http://localhost:8086",
+        Token = builder.Configuration["InfluxDB:Token"] ?? "t16o-metrics-token",
+        Org = builder.Configuration["InfluxDB:Org"] ?? "t16o",
+        Bucket = builder.Configuration["InfluxDB:Bucket"] ?? "metrics",
+        FlushIntervalMs = builder.Configuration.GetValue<int>("InfluxDB:FlushIntervalMs", 5000),
+        BatchSize = builder.Configuration.GetValue<int>("InfluxDB:BatchSize", 100)
+    };
+    performanceMonitor = new PerformanceMonitor(monitorOptions);
+    builder.Services.AddSingleton(performanceMonitor);
+
+    // Snapshot config values at startup
+    var configSnapshot = new Dictionary<string, Dictionary<string, string>>
+    {
+        ["fetcher"] = new Dictionary<string, string>
+        {
+            ["MaxConcurrentRequests"] = transactionFetcherOptions.MaxConcurrentRequests.ToString(),
+            ["RateLimitMs"] = transactionFetcherOptions.RateLimitMs.ToString(),
+            ["MaxRetryAttempts"] = transactionFetcherOptions.MaxRetryAttempts.ToString()
+        },
+        ["rabbitmq"] = new Dictionary<string, string>
+        {
+            ["Host"] = rabbitMqConfig.Host,
+            ["VirtualHost"] = rabbitMqConfig.VirtualHost
+        }
+    };
+    performanceMonitor.RecordConfigSnapshot(configSnapshot, "startup");
+}
 
 // Register workers based on configuration
 
@@ -135,8 +179,9 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchDb:Enabled"))
         ));
 }
 
-// RPC worker - internal use only (Solana RPC via Chainstack)
+// RPC worker - internal use only (Solana RPC via Chainstack/Helius)
 // When WriteAndForward is enabled, writes to database and forwards to tx.fetch.db for mint assessment
+// Uses per-endpoint rate limiting if RpcEndpoints config is available
 if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:Enabled"))
 {
     var queueName = builder.Configuration["Workers:TransactionFetchRpc:QueueName"]
@@ -144,17 +189,37 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:Enabled"))
     var writeAndForward = builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpc:WriteAndForward");
     var prefetch = builder.Configuration.GetValue<ushort>("Workers:TransactionFetchRpc:Prefetch");
     if (prefetch == 0) prefetch = 5;
-    builder.Services.AddHostedService(sp =>
-        new TransactionFetchRpcWorkerService(
-            sp.GetRequiredService<RabbitMqConfig>(),
-            sp.GetRequiredService<SolanaConfig>().TransactionRpcUrls,  // Use Chainstack for transactions
-            queueName,
-            sp.GetRequiredService<ILogger<TransactionFetchRpcWorkerService>>(),
-            sp.GetRequiredService<TransactionFetcherOptions>(),
-            writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
-            writeAndForward,
-            prefetch
-        ));
+
+    // Use per-endpoint config if available, otherwise fall back to legacy URLs
+    if (rpcEndpoints != null && rpcEndpoints.Length > 0)
+    {
+        builder.Services.AddHostedService(sp =>
+            new TransactionFetchRpcWorkerService(
+                sp.GetRequiredService<RabbitMqConfig>(),
+                rpcEndpoints,  // Per-endpoint rate limiting
+                queueName,
+                sp.GetRequiredService<ILogger<TransactionFetchRpcWorkerService>>(),
+                writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
+                writeAndForward,
+                prefetch,
+                sp.GetService<PerformanceMonitor>()
+            ));
+    }
+    else
+    {
+        builder.Services.AddHostedService(sp =>
+            new TransactionFetchRpcWorkerService(
+                sp.GetRequiredService<RabbitMqConfig>(),
+                sp.GetRequiredService<SolanaConfig>().TransactionRpcUrls,  // Legacy global rate limiting
+                queueName,
+                sp.GetRequiredService<ILogger<TransactionFetchRpcWorkerService>>(),
+                sp.GetRequiredService<TransactionFetcherOptions>(),
+                writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
+                writeAndForward,
+                prefetch,
+                sp.GetService<PerformanceMonitor>()
+            ));
+    }
 }
 
 // Site RPC worker - dedicated queue for site cache-misses (isolated from batch traffic)
@@ -175,7 +240,8 @@ if (builder.Configuration.GetValue<bool>("Workers:TransactionFetchRpcSite:Enable
             sp.GetRequiredService<TransactionFetcherOptions>(),
             writeAndForward ? sp.GetRequiredService<DatabaseConfig>().ConnectionString : null,
             writeAndForward,
-            prefetch
+            prefetch,
+            sp.GetService<PerformanceMonitor>()
         ));
 }
 
@@ -336,6 +402,7 @@ var host = builder.Build();
 if (!noLog)
 {
     Console.WriteLine("=== T16O RabbitMQ Workers ===");
+    Console.WriteLine($"Environment: {builder.Environment.EnvironmentName}");
     Console.WriteLine($"RabbitMQ Host: {rabbitMqConfig.Host}:{rabbitMqConfig.Port}");
     Console.WriteLine($"Virtual Host: {rabbitMqConfig.VirtualHost}");
     Console.WriteLine($"Database: {dbConnectionString.Split(';')[1].Split('=')[1]}");

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Security;
@@ -9,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using T16O.Models;
+using T16O.Models.Metrics;
+using T16O.Services.Monitoring;
 using Solnet.Rpc;
 using Solnet.Rpc.Models;
 using Solnet.Rpc.Types;
@@ -21,37 +24,111 @@ namespace T16O.Services;
 /// </summary>
 public class TransactionFetcher
 {
-    private readonly (IRpcClient client, string url)[] _rpcClients;
+    private readonly RpcEndpointState[] _endpoints;
     private readonly Dictionary<string, HttpClient> _httpClients;
     private readonly TransactionFetcherOptions _options;
     private readonly ILogger? _logger;
+    private readonly PerformanceMonitor? _monitor;
+    private int _roundRobinIndex;
 
     /// <summary>
-    /// Initialize the TransactionFetcher with RPC endpoints
+    /// State tracking for each RPC endpoint with its own rate limiter
+    /// </summary>
+    private class RpcEndpointState
+    {
+        public required IRpcClient Client { get; init; }
+        public required string Url { get; init; }
+        public required string Name { get; init; }
+        public required SemaphoreSlim Semaphore { get; init; }
+        public required int RateLimitMs { get; init; }
+        public required int MaxConcurrent { get; init; }
+        public DateTime LastRequestTime { get; set; } = DateTime.MinValue;
+        public readonly object RateLock = new();
+    }
+
+    /// <summary>
+    /// Initialize the TransactionFetcher with RPC endpoint configurations (per-endpoint rate limiting)
+    /// </summary>
+    /// <param name="endpoints">Array of RPC endpoint configurations</param>
+    /// <param name="options">Optional configuration options</param>
+    /// <param name="logger">Optional logger</param>
+    /// <param name="monitor">Optional performance monitor for RPC metrics</param>
+    public TransactionFetcher(RpcEndpointConfig[] endpoints, TransactionFetcherOptions? options = null, ILogger? logger = null, PerformanceMonitor? monitor = null)
+    {
+        if (endpoints == null || endpoints.Length == 0)
+            throw new ArgumentException("At least one RPC endpoint must be provided", nameof(endpoints));
+
+        _logger = logger;
+        _options = options ?? new TransactionFetcherOptions();
+        _monitor = monitor;
+
+        _httpClients = endpoints
+            .Where(e => e.Enabled)
+            .ToDictionary(e => e.Url, e => CreateConfiguredHttpClient(e.Url));
+
+        _endpoints = endpoints
+            .Where(e => e.Enabled)
+            .OrderBy(e => e.Priority)
+            .Select(e => new RpcEndpointState
+            {
+                Client = ClientFactory.GetClient(e.Url, logger: null, _httpClients[e.Url], rateLimiter: null),
+                Url = e.Url,
+                Name = e.Name,
+                Semaphore = new SemaphoreSlim(e.MaxConcurrent, e.MaxConcurrent),
+                RateLimitMs = e.RateLimitMs,
+                MaxConcurrent = e.MaxConcurrent
+            })
+            .ToArray();
+
+        // Log the RPCs being used
+        _logger?.LogInformation("[TransactionFetcher] Initialized with {Count} RPC endpoint(s):", _endpoints.Length);
+        foreach (var ep in _endpoints)
+        {
+            _logger?.LogInformation("  - {Name}: {MaxConcurrent} concurrent, {RateLimitMs}ms rate limit ({Rps} RPS)",
+                ep.Name, ep.MaxConcurrent, ep.RateLimitMs, ep.RateLimitMs > 0 ? 1000 / ep.RateLimitMs : 999);
+        }
+    }
+
+    /// <summary>
+    /// Initialize the TransactionFetcher with RPC endpoints (legacy constructor, uses global rate limiting)
     /// </summary>
     /// <param name="rpcUrls">Array of RPC endpoint URLs (will round-robin across them)</param>
     /// <param name="options">Optional configuration options</param>
     /// <param name="logger">Optional logger</param>
-    public TransactionFetcher(string[] rpcUrls, TransactionFetcherOptions? options = null, ILogger? logger = null)
+    /// <param name="monitor">Optional performance monitor for RPC metrics</param>
+    public TransactionFetcher(string[] rpcUrls, TransactionFetcherOptions? options = null, ILogger? logger = null, PerformanceMonitor? monitor = null)
     {
         if (rpcUrls == null || rpcUrls.Length == 0)
             throw new ArgumentException("At least one RPC URL must be provided", nameof(rpcUrls));
 
         _logger = logger;
-        _httpClients = rpcUrls.ToDictionary(url => url, url => CreateConfiguredHttpClient(url));
-        _rpcClients = rpcUrls.Select(url => (
-            client: ClientFactory.GetClient(url, logger: null, _httpClients[url], rateLimiter: null),
-            url: url
-        )).ToArray();
         _options = options ?? new TransactionFetcherOptions();
+        _monitor = monitor;
+
+        _httpClients = rpcUrls.ToDictionary(url => url, url => CreateConfiguredHttpClient(url));
+
+        // Convert to endpoint states with global rate limiting from options
+        _endpoints = rpcUrls.Select(url => new RpcEndpointState
+        {
+            Client = ClientFactory.GetClient(url, logger: null, _httpClients[url], rateLimiter: null),
+            Url = url,
+            Name = GetRpcName(url),
+            Semaphore = new SemaphoreSlim(_options.MaxConcurrentRequests, _options.MaxConcurrentRequests),
+            RateLimitMs = _options.RateLimitMs,
+            MaxConcurrent = _options.MaxConcurrentRequests
+        }).ToArray();
 
         // Log the RPCs being used
-        _logger?.LogInformation("[TransactionFetcher] Initialized with {Count} RPC(s):", _rpcClients.Length);
-        foreach (var rpc in _rpcClients)
+        _logger?.LogInformation("[TransactionFetcher] Initialized with {Count} RPC(s) (legacy mode):", _endpoints.Length);
+        foreach (var ep in _endpoints)
         {
-            _logger?.LogInformation("  - {RpcName}", GetRpcName(rpc.url));
+            _logger?.LogInformation("  - {RpcName}", ep.Name);
         }
     }
+
+    // Legacy property for backward compatibility
+    private (IRpcClient client, string url)[] _rpcClients =>
+        _endpoints.Select(e => (e.Client, e.Url)).ToArray();
 
     /// <summary>
     /// Create an HttpClient with proper SSL/TLS configuration and BaseAddress
@@ -91,6 +168,25 @@ public class TransactionFetcher
         };
 
         return httpClient;
+    }
+
+    /// <summary>
+    /// Apply rate limiting for a specific endpoint, ensuring minimum delay between requests
+    /// </summary>
+    private async Task ApplyEndpointRateLimitAsync(RpcEndpointState endpoint, CancellationToken cancellationToken)
+    {
+        int delayNeeded;
+        lock (endpoint.RateLock)
+        {
+            var timeSinceLastRequest = (DateTime.UtcNow - endpoint.LastRequestTime).TotalMilliseconds;
+            delayNeeded = Math.Max(0, endpoint.RateLimitMs - (int)timeSinceLastRequest);
+            endpoint.LastRequestTime = DateTime.UtcNow.AddMilliseconds(delayNeeded);
+        }
+
+        if (delayNeeded > 0)
+        {
+            await Task.Delay(delayNeeded, cancellationToken);
+        }
     }
 
     /// <summary>
@@ -156,8 +252,12 @@ public class TransactionFetcher
             var limit = (ulong)Math.Min(1000, maxSignatures - totalFetched);
             // Use the same RPC client (first one) for all pages to avoid cross-RPC issues
             var (rpcClient, rpcUrl) = _rpcClients[0];
+            var rpcName = GetRpcName(rpcUrl);
 
             _logger?.LogDebug("[CollectSignatures] Page {PageNumber}: Requesting {Limit} signatures, before={Before}...", pageNumber + 1, limit, before ?? "null");
+
+            var sigStopwatch = Stopwatch.StartNew();
+            string sigStatus = "success";
 
             var result = await rpcClient.GetSignaturesForAddressAsync(
                 accountAddress,
@@ -165,14 +265,37 @@ public class TransactionFetcher
                 before,
                 commitment: Commitment.Finalized);
 
+            sigStopwatch.Stop();
+
             if (result.Result == null || !result.WasSuccessful)
             {
+                sigStatus = "error";
+                _monitor?.RecordRpcMetric(new RpcMetric
+                {
+                    Endpoint = rpcName,
+                    Method = "getSignaturesForAddress",
+                    Status = sigStatus,
+                    DurationMs = sigStopwatch.Elapsed.TotalMilliseconds,
+                    ResponseSizeBytes = 0,
+                    RateLimited = false
+                });
                 _logger?.LogWarning("[CollectSignatures] RPC call failed. WasSuccessful={WasSuccessful}, Reason={Reason}, ServerErrorCode={ServerErrorCode}",
                     result.WasSuccessful, result.Reason, result.ServerErrorCode);
                 break;
             }
 
             var resultArray = result.Result;
+
+            // Record successful RPC call
+            _monitor?.RecordRpcMetric(new RpcMetric
+            {
+                Endpoint = rpcName,
+                Method = "getSignaturesForAddress",
+                Status = sigStatus,
+                DurationMs = sigStopwatch.Elapsed.TotalMilliseconds,
+                ResponseSizeBytes = resultArray.Count * 100, // Estimate ~100 bytes per signature
+                RateLimited = false
+            });
             _logger?.LogDebug("[CollectSignatures] Received {Count} signatures from RPC", resultArray.Count);
 
             if (resultArray.Count == 0)
@@ -251,7 +374,6 @@ public class TransactionFetcher
             return new List<TransactionFetchResult>();
 
         var results = new List<TransactionFetchResult>();
-        var semaphore = new SemaphoreSlim(_options.MaxConcurrentRequests);
         var tasks = new List<Task>();
         int processedCount = 0;
         int relevantCount = 0;
@@ -259,9 +381,13 @@ public class TransactionFetcher
         for (int i = 0; i < signatureList.Count; i++)
         {
             var signature = signatureList[i];
-            var startIndex = i % _rpcClients.Length; // Round-robin starting point for load balancing
 
-            await semaphore.WaitAsync(cancellationToken);
+            // Get next endpoint using round-robin
+            var endpointIndex = Interlocked.Increment(ref _roundRobinIndex) % _endpoints.Length;
+            var endpoint = _endpoints[endpointIndex];
+
+            // Wait for a slot on this specific endpoint's semaphore
+            await endpoint.Semaphore.WaitAsync(cancellationToken);
 
             var task = Task.Run(async () =>
             {
@@ -269,12 +395,14 @@ public class TransactionFetcher
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Rate limiting
-                    if (_options.RateLimitMs > 0)
-                        await Task.Delay(_options.RateLimitMs, cancellationToken);
+                    // Per-endpoint rate limiting
+                    if (endpoint.RateLimitMs > 0)
+                    {
+                        await ApplyEndpointRateLimitAsync(endpoint, cancellationToken);
+                    }
 
-                    // Use direct RPC call with fallback support
-                    var txResult = await FetchTransactionWithFallbackAsync(signature, startIndex, cancellationToken);
+                    // Fetch from this specific endpoint (no fallback in parallel mode for simplicity)
+                    var txResult = await FetchTransactionDirectWithUrlAsync(signature, endpoint.Url, cancellationToken);
 
                     if (!txResult.TransactionData.HasValue)
                     {
@@ -315,7 +443,7 @@ public class TransactionFetcher
                 }
                 finally
                 {
-                    semaphore.Release();
+                    endpoint.Semaphore.Release();
                 }
             }, cancellationToken);
 
@@ -575,6 +703,12 @@ public class TransactionFetcher
         string rpcUrl,
         CancellationToken cancellationToken)
     {
+        var rpcName = GetRpcName(rpcUrl);
+        var stopwatch = Stopwatch.StartNew();
+        string status = "success";
+        long responseSize = 0;
+        bool rateLimited = false;
+
         try
         {
             // Reuse shared HttpClient for connection pooling
@@ -603,11 +737,11 @@ public class TransactionFetcher
             // BaseAddress is already set in CreateConfiguredHttpClient, so use empty string
             var response = await httpClient.PostAsync(string.Empty, content, cancellationToken);
 
-            var rpcName = GetRpcName(rpcUrl);
-
             // Check HTTP status for rate limiting
             if ((int)response.StatusCode == 429)
             {
+                status = "rate_limited";
+                rateLimited = true;
                 _logger?.LogWarning("[TransactionFetcher] Rate limited (429) [{RpcName}] for {Signature}", rpcName, signature);
                 return new TransactionFetchResult
                 {
@@ -619,6 +753,7 @@ public class TransactionFetcher
 
             if (!response.IsSuccessStatusCode)
             {
+                status = $"http_{(int)response.StatusCode}";
                 _logger?.LogWarning("[TransactionFetcher] HTTP {StatusCode} [{RpcName}] for {Signature}", (int)response.StatusCode, rpcName, signature);
                 return new TransactionFetchResult
                 {
@@ -629,6 +764,7 @@ public class TransactionFetcher
             }
 
             var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            responseSize = responseJson.Length;
 
             using var doc = JsonDocument.Parse(responseJson);
             var root = doc.RootElement;
@@ -636,6 +772,7 @@ public class TransactionFetcher
             // Check for RPC error
             if (root.TryGetProperty("error", out var error))
             {
+                status = "rpc_error";
                 var errorMsg = error.TryGetProperty("message", out var msg) ? msg.GetString() : "Unknown RPC error";
                 _logger?.LogWarning("[TransactionFetcher] RPC error [{RpcName}] for {Signature}: {Error}", rpcName, signature, errorMsg);
                 return new TransactionFetchResult
@@ -649,6 +786,7 @@ public class TransactionFetcher
             // Check for null result (transaction not found)
             if (!root.TryGetProperty("result", out var result) || result.ValueKind == JsonValueKind.Null)
             {
+                status = "not_found";
                 return new TransactionFetchResult
                 {
                     Signature = signature,
@@ -673,7 +811,7 @@ public class TransactionFetcher
         }
         catch (Exception ex)
         {
-            var rpcName = GetRpcName(rpcUrl);
+            status = "exception";
             _logger?.LogWarning("[TransactionFetcher] Exception [{RpcName}] for {Signature}: {Error}", rpcName, signature, ex.Message);
             return new TransactionFetchResult
             {
@@ -681,6 +819,21 @@ public class TransactionFetcher
                 IsRelevant = false,
                 Error = $"{ex.Message} [{rpcName}]"
             };
+        }
+        finally
+        {
+            stopwatch.Stop();
+
+            // Record RPC metrics
+            _monitor?.RecordRpcMetric(new RpcMetric
+            {
+                Endpoint = rpcName,
+                Method = "getTransaction",
+                Status = status,
+                DurationMs = stopwatch.Elapsed.TotalMilliseconds,
+                ResponseSizeBytes = responseSize,
+                RateLimited = rateLimited
+            });
         }
     }
 

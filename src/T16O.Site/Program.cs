@@ -12,6 +12,11 @@ var dbConnectionString = builder.Configuration["Database:ConnectionString"]
     ?? throw new InvalidOperationException("Database:ConnectionString is required in appsettings");
 builder.Services.AddSingleton(new DatabaseSettings { ConnectionString = dbConnectionString });
 
+// Configure Site settings (API key for internal requests)
+var siteApiKey = builder.Configuration["Site:ApiKey"]
+    ?? throw new InvalidOperationException("Site:ApiKey is required in appsettings");
+builder.Services.AddSingleton(new SiteSettings { ApiKey = siteApiKey });
+
 // Configure RabbitMQ
 var rabbitMqConfig = new RabbitMqConfig
 {
@@ -89,4 +94,12 @@ app.Run();
 public class DatabaseSettings
 {
     public string ConnectionString { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Site-specific settings (API key for internal requests)
+/// </summary>
+public class SiteSettings
+{
+    public string ApiKey { get; set; } = string.Empty;
 }

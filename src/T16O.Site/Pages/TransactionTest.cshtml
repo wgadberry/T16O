@@ -81,11 +81,12 @@
 
     @if (Model.Response != null)
     {
+        var isSuccess = Model.Response.FinalState == T16O.Services.RequestState.Available;
         <div class="card mt-4">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="mb-0">Response</h5>
-                <span class="badge @(Model.Response.Success ? "bg-success" : "bg-danger")">
-                    @(Model.Response.Success ? "Success" : "Failed")
+                <span class="badge @(isSuccess ? "bg-success" : "bg-danger")">
+                    @(isSuccess ? "Success" : Model.Response.FinalState.ToString())
                 </span>
             </div>
             <div class="card-body">
@@ -104,32 +105,38 @@
 
                 <div class="row mb-3">
                     <div class="col-md-3">
-                        <strong>Source:</strong> @Model.Response.Source
+                        <strong>Request ID:</strong> @Model.Response.RequestId
                     </div>
                     <div class="col-md-3">
-                        <strong>Slot:</strong> @(Model.Response.Slot?.ToString() ?? "N/A")
+                        <strong>Existing:</strong> @Model.Response.ExistingTransactions
                     </div>
                     <div class="col-md-3">
-                        <strong>Block Time:</strong> @(Model.Response.BlockTime?.ToString() ?? "N/A")
+                        <strong>Fetched:</strong> @Model.Response.FetchedTransactions
                     </div>
                     <div class="col-md-3">
                         <strong>Processing Time:</strong> @Model.ProcessingTime.TotalSeconds.ToString("F2")s
                     </div>
                 </div>
 
-                @if (!string.IsNullOrEmpty(Model.Response.Error))
+                @if (Model.Response.Errors.Count > 0)
                 {
                     <div class="alert alert-warning">
-                        <strong>Response Error:</strong> @Model.Response.Error
+                        <strong>Errors:</strong>
+                        <ul class="mb-0">
+                            @foreach (var error in Model.Response.Errors)
+                            {
+                                <li>@error</li>
+                            }
+                        </ul>
                     </div>
                 }
 
-                @if (Model.Response.Transaction.HasValue)
+                @if (Model.Response.Transactions.Count > 0)
                 {
                     <h6>Transaction Data:</h6>
                     <pre class="bg-light p-3 rounded" style="max-height: 600px; overflow-y: auto;"><code>@Model.PrettifiedJson</code></pre>
                     <div class="mt-2">
-                        <small class="text-muted">Size: @Model.Response.Transaction.Value.GetRawText().Length bytes</small>
+                        <small class="text-muted">Transactions: @Model.Response.Transactions.Count | Party Records: @Model.Response.PartyRecordsCreated</small>
                     </div>
                 }
             </div>

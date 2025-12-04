@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using T16O.Services;
+using T16O.Services.Monitoring;
 using T16O.Services.RabbitMQ;
 using T16O.Services.RabbitMQ.Workers;
 
@@ -25,9 +26,10 @@ public class TransactionFetchRpcSiteWorkerService : BackgroundService
         TransactionFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
         bool writeAndForward = false,
-        ushort prefetch = 1)
+        ushort prefetch = 1,
+        PerformanceMonitor? monitor = null)
     {
-        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, fetcherOptions, dbConnectionString, writeAndForward, prefetch, logger);
+        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, fetcherOptions, dbConnectionString, writeAndForward, prefetch, logger, monitor);
         _queueName = queueName;
         _logger = logger;
     }

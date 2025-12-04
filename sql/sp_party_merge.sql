@@ -16,6 +16,7 @@ proc_body: BEGIN
     DECLARE v_has_init_account BOOLEAN DEFAULT FALSE;
     DECLARE v_has_stake_program BOOLEAN DEFAULT FALSE;
     DECLARE v_has_jito_tip BOOLEAN DEFAULT FALSE;
+    DECLARE v_has_pool_init BOOLEAN DEFAULT FALSE;
     DECLARE v_account_keys JSON;
     DECLARE v_block_time BIGINT;
 
@@ -55,8 +56,16 @@ proc_body: BEGIN
     SET v_has_transfer = (v_log_messages LIKE '%Instruction: Transfer%');
     SET v_has_transfer_checked = (v_log_messages LIKE '%Instruction: TransferChecked%');
     SET v_has_close_account = (v_log_messages LIKE '%Instruction: CloseAccount%');
-    SET v_has_init_account = (v_log_messages LIKE '%Instruction: InitializeAccount%');
+    SET v_has_init_account = (v_log_messages LIKE '%Instruction: InitializeAccount%'
+                              OR v_log_messages LIKE '%Instruction: InitializeAccount2%'
+                              OR v_log_messages LIKE '%Instruction: InitializeAccount3%');
     SET v_has_stake_program = (v_programs LIKE '%Stake11111111111111111111111111111111111111%');
+
+    -- Detect pool/account initialization from various programs
+    SET v_has_pool_init = (v_log_messages LIKE '%Instruction: InitializePool%'
+                           OR v_log_messages LIKE '%Instruction: InitializeDynamicTickArray%'
+                           OR v_log_messages LIKE '%Instruction: InitializeConfig%'
+                           OR v_log_messages LIKE '%Instruction: Initialize%');
 
     -- Check for Jito tip accounts (8 known tip accounts)
     SET v_has_jito_tip = (
@@ -232,6 +241,8 @@ proc_body: BEGIN
     SELECT mint, owner, owner_id, SIGN(balance_change), ABS(balance_change), account_index
     FROM tmp_balances;
 
+    -- First pass: find counterparties excluding fee payer (index 0 with negative balance)
+    -- This prevents network fees from being matched as counterparties
     UPDATE tmp_balances tb
     LEFT JOIN (
         SELECT mint, balance_sign, owner_id, abs_balance,
@@ -244,6 +255,20 @@ proc_body: BEGIN
     SET tb.counterparty_owner_id = tc.owner_id,
         tb.has_counterparty = (tc.owner_id IS NOT NULL)
     WHERE tb.owner_id != tc.owner_id OR tc.owner_id IS NULL;
+
+    -- Second pass: for SOL recipients without counterparty, check if fee payer is the sender
+    -- This handles cases where fee payer is also transferring SOL (not just paying fees)
+    UPDATE tmp_balances tb
+    JOIN tmp_counterparties tc ON tc.mint = tb.mint
+                               AND tc.account_index = 0
+                               AND tc.balance_sign = -1
+    SET tb.counterparty_owner_id = tc.owner_id,
+        tb.has_counterparty = TRUE
+    WHERE tb.balance_type = 'SOL'
+      AND tb.balance_change > 0
+      AND tb.counterparty_owner_id IS NULL
+      AND tb.owner_id != tc.owner_id
+      AND tc.abs_balance > 100000;
 
     -- Determine action types
     UPDATE tmp_balances tb
@@ -283,15 +308,15 @@ proc_body: BEGIN
         -- Rent paid
         WHEN tb.balance_type = 'SOL'
              AND tb.balance_change < 0
-             AND ABS(tb.balance_change) BETWEEN 890880 AND 2100000
-             AND v_has_init_account
+             AND ABS(tb.balance_change) BETWEEN 890880 AND 10000000
+             AND (v_has_init_account OR v_has_pool_init)
         THEN 'rent'
 
-        -- Rent received: SOL increase for newly created account
+        -- Rent received: SOL increase for newly created account or pool
         WHEN tb.balance_type = 'SOL'
              AND tb.balance_change > 0
-             AND ABS(tb.balance_change) BETWEEN 890880 AND 2100000
-             AND v_has_init_account
+             AND ABS(tb.balance_change) BETWEEN 890880 AND 10000000
+             AND (v_has_init_account OR v_has_pool_init)
         THEN 'rentReceived'
 
         -- Token burn
@@ -307,7 +332,7 @@ proc_body: BEGIN
         THEN 'closeAccount'
 
         -- Create account (SOL spent for rent)
-        WHEN tb.balance_type = 'SOL' AND tb.balance_change < 0 AND v_has_init_account
+        WHEN tb.balance_type = 'SOL' AND tb.balance_change < 0 AND (v_has_init_account OR v_has_pool_init)
         THEN 'createAccount'
 
         -- Swap
@@ -333,6 +358,12 @@ proc_body: BEGIN
         -- Unstake
         WHEN v_has_stake_program AND tb.balance_change > 0
         THEN 'unstake'
+
+        -- Protocol fee: small SOL changes during swaps (AMM fees)
+        WHEN tb.balance_type = 'SOL'
+             AND v_has_swap
+             AND ABS(tb.balance_change) < 890880
+        THEN 'protocolFee'
 
         ELSE 'unknown'
     END;

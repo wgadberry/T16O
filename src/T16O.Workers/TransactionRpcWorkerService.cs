@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using T16O.Models;
 using T16O.Services;
+using T16O.Services.Monitoring;
 using T16O.Services.RabbitMQ;
 using T16O.Services.RabbitMQ.Workers;
 
@@ -17,6 +19,9 @@ public class TransactionFetchRpcWorkerService : BackgroundService
     private readonly string _queueName;
     private readonly ILogger<TransactionFetchRpcWorkerService> _logger;
 
+    /// <summary>
+    /// Legacy constructor using string[] rpcUrls with global rate limiting
+    /// </summary>
     public TransactionFetchRpcWorkerService(
         RabbitMqConfig config,
         string[] rpcUrls,
@@ -25,9 +30,28 @@ public class TransactionFetchRpcWorkerService : BackgroundService
         TransactionFetcherOptions? fetcherOptions = null,
         string? dbConnectionString = null,
         bool writeAndForward = false,
-        ushort prefetch = 5)
+        ushort prefetch = 5,
+        PerformanceMonitor? monitor = null)
     {
-        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, fetcherOptions, dbConnectionString, writeAndForward, prefetch, logger);
+        _worker = new RabbitMqTransactionRpcWorker(config, rpcUrls, fetcherOptions, dbConnectionString, writeAndForward, prefetch, logger, monitor);
+        _queueName = queueName;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Constructor using RpcEndpointConfig[] with per-endpoint rate limiting
+    /// </summary>
+    public TransactionFetchRpcWorkerService(
+        RabbitMqConfig config,
+        RpcEndpointConfig[] endpoints,
+        string queueName,
+        ILogger<TransactionFetchRpcWorkerService> logger,
+        string? dbConnectionString = null,
+        bool writeAndForward = false,
+        ushort prefetch = 5,
+        PerformanceMonitor? monitor = null)
+    {
+        _worker = new RabbitMqTransactionRpcWorker(config, endpoints, dbConnectionString, writeAndForward, prefetch, logger, monitor);
         _queueName = queueName;
         _logger = logger;
     }

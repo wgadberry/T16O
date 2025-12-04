@@ -53,10 +53,39 @@ services:
       retries: 5
     restart: unless-stopped
 
+  influxdb:
+    image: influxdb:2.7
+    container_name: t16o-influxdb
+    ports:
+      - "8086:8086"    # HTTP API + UI
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin123456
+      DOCKER_INFLUXDB_INIT_ORG: t16o
+      DOCKER_INFLUXDB_INIT_BUCKET: metrics
+      DOCKER_INFLUXDB_INIT_RETENTION: 7d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: t16o-metrics-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks:
+      - t16o-network
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   rabbitmq_data:
     driver: local
   mysql_data:
+    driver: local
+  influxdb_data:
+    driver: local
+  influxdb_config:
     driver: local
 
 networks:
