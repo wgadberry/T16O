@@ -1,3 +1,60 @@
+-- ============================================================================
+-- Party System Build Script
+-- Includes: party table, indexes, and all associated stored procedures
+--
+-- Usage: mysql -u root -p t16o_db < party_build.sql
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- Party Table
+-- ----------------------------------------------------------------------------
+DROP TABLE IF EXISTS party;
+
+CREATE TABLE party (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tx_id BIGINT UNSIGNED NOT NULL,
+    block_time BIGINT,
+    owner_id INT UNSIGNED NOT NULL,
+    token_account_id INT UNSIGNED,
+    mint_id INT UNSIGNED NOT NULL,
+    account_index SMALLINT UNSIGNED,
+    party_type ENUM('party', 'counterparty') NOT NULL DEFAULT 'party',
+    balance_type ENUM('SOL', 'TOKEN') NOT NULL DEFAULT 'TOKEN',
+    action_type ENUM(
+        'fee', 'rent', 'rentReceived', 'transfer', 'transferChecked',
+        'burn', 'mint', 'swap', 'createAccount', 'closeAccount',
+        'stake', 'unstake', 'reward', 'airdrop',
+        'jitoTip', 'jitoTipReceived', 'unknown'
+    ),
+    counterparty_owner_id INT UNSIGNED,
+    pre_amount BIGINT,
+    post_amount BIGINT,
+    amount_change BIGINT,
+    decimals TINYINT UNSIGNED,
+    pre_ui_amount DECIMAL(30, 9),
+    post_ui_amount DECIMAL(30, 9),
+    ui_amount_change DECIMAL(30, 9),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_tx_owner_mint_acct (tx_id, owner_id, mint_id, account_index),
+    KEY idx_mint (mint_id),
+    KEY idx_token_account (token_account_id),
+    KEY idx_owner_mint (owner_id, mint_id),
+    KEY idx_counterparty (counterparty_owner_id),
+    KEY idx_tx_mint (tx_id, mint_id, id),
+    KEY idx_tx_action (tx_id, action_type),
+    KEY idx_block_time (block_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- ============================================================================
+-- Stored Procedures
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- sp_party_merge: Parse transaction and create party records
+-- ----------------------------------------------------------------------------
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_party_merge$$
@@ -368,6 +425,219 @@ proc_body: BEGIN
     -- Cleanup
     DROP TEMPORARY TABLE IF EXISTS tmp_balances;
     DROP TEMPORARY TABLE IF EXISTS tmp_counterparties;
+END$$
+
+DELIMITER ;
+
+
+-- ----------------------------------------------------------------------------
+-- sp_party_get: Query party records with optional filters
+-- ----------------------------------------------------------------------------
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS sp_party_get$$
+
+CREATE PROCEDURE sp_party_get(
+    IN p_signature VARCHAR(88),
+    IN p_mint_address VARCHAR(44),
+    IN p_owner_address VARCHAR(44),
+    IN p_token_account_address VARCHAR(44),
+    IN p_balance_changed TINYINT  -- 0 = no change, 1 = has change, -1 or NULL = all
+)
+BEGIN
+    DECLARE v_mint_id INT UNSIGNED DEFAULT NULL;
+    DECLARE v_owner_id INT UNSIGNED DEFAULT NULL;
+    DECLARE v_token_account_id INT UNSIGNED DEFAULT NULL;
+    DECLARE v_tx_id BIGINT UNSIGNED DEFAULT NULL;
+
+    -- Resolve signature to tx_id
+    IF p_signature IS NOT NULL AND p_signature != '' THEN
+        SELECT id INTO v_tx_id FROM transactions WHERE signature = p_signature;
+    END IF;
+
+    -- Resolve addresses to IDs
+    IF p_mint_address IS NOT NULL AND p_mint_address != '' THEN
+        SELECT id INTO v_mint_id FROM addresses WHERE address = p_mint_address;
+    END IF;
+
+    IF p_owner_address IS NOT NULL AND p_owner_address != '' THEN
+        SELECT id INTO v_owner_id FROM addresses WHERE address = p_owner_address;
+    END IF;
+
+    IF p_token_account_address IS NOT NULL AND p_token_account_address != '' THEN
+        SELECT id INTO v_token_account_id FROM addresses WHERE address = p_token_account_address;
+    END IF;
+
+    -- Return all parties from matching transactions
+    SELECT
+        t.signature,
+        p.tx_id,
+        p.block_time,
+        FROM_UNIXTIME(p.block_time) AS block_datetime,
+        p.account_index,
+        p.party_type,
+        p.balance_type,
+        p.action_type,
+        a_owner.address AS owner_address,
+        a_token.address AS token_account_address,
+        a_mint.address AS mint_address,
+        CASE
+            WHEN a_mint.label LIKE '% - %' THEN SUBSTRING_INDEX(a_mint.label, ' - ', 1)
+            ELSE a_mint.label
+        END AS mint_symbol,
+        a_counterparty.address AS counterparty_address,
+        p.pre_amount,
+        p.post_amount,
+        p.amount_change,
+        p.decimals,
+        p.pre_ui_amount,
+        p.post_ui_amount,
+        p.ui_amount_change,
+        p.created_at
+    FROM party p
+    INNER JOIN transactions t ON t.id = p.tx_id
+    INNER JOIN addresses a_owner ON a_owner.id = p.owner_id
+    LEFT JOIN addresses a_token ON a_token.id = p.token_account_id
+    INNER JOIN addresses a_mint ON a_mint.id = p.mint_id
+    LEFT JOIN addresses a_counterparty ON a_counterparty.id = p.counterparty_owner_id
+    WHERE p.tx_id IN (
+        SELECT DISTINCT p2.tx_id
+        FROM party p2
+        WHERE (v_tx_id IS NULL OR p2.tx_id = v_tx_id)
+          AND (v_mint_id IS NULL OR p2.mint_id = v_mint_id)
+          AND (v_owner_id IS NULL OR p2.owner_id = v_owner_id)
+          AND (v_token_account_id IS NULL OR p2.token_account_id = v_token_account_id)
+    )
+      AND (p_balance_changed IS NULL OR p_balance_changed = -1
+           OR (p_balance_changed = 1 AND p.amount_change != 0)
+           OR (p_balance_changed = 0 AND p.amount_change = 0))
+    ORDER BY p.block_time DESC, p.tx_id DESC, p.account_index;
+END$$
+
+DELIMITER ;
+
+
+-- ----------------------------------------------------------------------------
+-- sp_party_reprocess_unknown: Reprocess transactions with unknown/missing party
+-- ----------------------------------------------------------------------------
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS sp_party_reprocess_unknown$$
+
+CREATE PROCEDURE sp_party_reprocess_unknown(IN p_batch_size INT)
+BEGIN
+    DECLARE v_done INT DEFAULT FALSE;
+    DECLARE v_signature VARCHAR(88);
+    DECLARE v_tx_id BIGINT UNSIGNED;
+    DECLARE v_processed INT DEFAULT 0;
+    DECLARE v_total INT DEFAULT 0;
+
+    -- Cursor for transactions needing processing (missing or unknown)
+    DECLARE cur CURSOR FOR
+        SELECT t.id, t.signature
+        FROM transactions t
+        LEFT JOIN party p ON p.tx_id = t.id
+        WHERE p.tx_id IS NULL OR p.action_type = 'unknown'
+        GROUP BY t.id, t.signature
+        LIMIT p_batch_size;
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
+
+    -- Count total needing processing
+    SELECT COUNT(*) INTO v_total
+    FROM (
+        SELECT t.id
+        FROM transactions t
+        LEFT JOIN party p ON p.tx_id = t.id
+        WHERE p.tx_id IS NULL OR p.action_type = 'unknown'
+        GROUP BY t.id
+    ) sub;
+
+    SELECT CONCAT('Found ', v_total, ' transactions needing processing') AS status;
+
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        SET p_batch_size = 1000;
+    END IF;
+
+    OPEN cur;
+
+    read_loop: LOOP
+        FETCH cur INTO v_tx_id, v_signature;
+        IF v_done THEN
+            LEAVE read_loop;
+        END IF;
+
+        -- Delete existing party records for this tx
+        DELETE FROM party WHERE tx_id = v_tx_id;
+
+        -- Reprocess
+        CALL sp_party_merge(v_signature);
+
+        SET v_processed = v_processed + 1;
+
+        -- Progress every 100
+        IF v_processed MOD 100 = 0 THEN
+            SELECT CONCAT('Processed ', v_processed, ' of ', LEAST(p_batch_size, v_total)) AS progress;
+        END IF;
+    END LOOP;
+
+    CLOSE cur;
+
+    SELECT CONCAT('Completed. Reprocessed ', v_processed, ' transactions.') AS result;
+
+    -- Show remaining
+    SELECT COUNT(*) AS remaining
+    FROM (
+        SELECT t.id
+        FROM transactions t
+        LEFT JOIN party p ON p.tx_id = t.id
+        WHERE p.tx_id IS NULL OR p.action_type = 'unknown'
+        GROUP BY t.id
+    ) sub;
+END$$
+
+DELIMITER ;
+
+
+-- ----------------------------------------------------------------------------
+-- sp_maint_reset_tables: Reset party and transactions tables
+-- ----------------------------------------------------------------------------
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS sp_maint_reset_tables$$
+
+CREATE PROCEDURE sp_maint_reset_tables(
+    IN p_reset_addresses TINYINT  -- 0 = no (default), 1 = yes (keep mints/programs)
+)
+BEGIN
+    -- Default to no if NULL
+    IF p_reset_addresses IS NULL THEN
+        SET p_reset_addresses = 0;
+    END IF;
+
+    SET FOREIGN_KEY_CHECKS = 0;
+
+    -- Delete party records
+    TRUNCATE TABLE party;
+
+    -- Delete transactions
+    TRUNCATE TABLE transactions;
+
+    -- Optionally reset addresses (keep mints and programs)
+    IF p_reset_addresses = 1 THEN
+        DELETE FROM addresses
+        WHERE address_type NOT IN ('mint', 'program')
+           OR address_type IS NULL;
+    END IF;
+
+    SET FOREIGN_KEY_CHECKS = 1;
+
+    -- Report results
+    SELECT
+        (SELECT COUNT(*) FROM party) AS party_count,
+        (SELECT COUNT(*) FROM transactions) AS transaction_count,
+        (SELECT COUNT(*) FROM addresses) AS address_count,
+        CASE WHEN p_reset_addresses = 1 THEN 'Yes (kept mints/programs)' ELSE 'No' END AS addresses_reset;
 END$$
 
 DELIMITER ;
