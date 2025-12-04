@@ -106,12 +106,14 @@ public class RequestOrchestrator
     /// <param name="signatures">List of transaction signatures to process</param>
     /// <param name="priority">Priority level (default 5)</param>
     /// <param name="forceRefresh">If true, always fetch from RPC even if transaction exists in DB</param>
+    /// <param name="bitmask">Bitmask for fn_reconstruct_transaction (default 1918 = all fields)</param>
     /// <param name="cancellationToken">Cancellation token</param>
     public async Task<RequestProcessingResult> ProcessApiKeyRequestAsync(
         string apiKey,
         List<string> signatures,
         byte priority = 5,
         bool forceRefresh = false,
+        int bitmask = 1918,
         CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -298,6 +300,16 @@ public class RequestOrchestrator
                     {
                         partyRecordsCreated++;
                         _logger?.LogDebug("[RequestOrchestrator] Created party records for {Signature}", item.Signature);
+                    }
+
+                    // If transaction data not already in result (cache hit), fetch from database
+                    if (!result.Transactions.ContainsKey(item.Signature))
+                    {
+                        var txData = await _transactionWriter.GetTransactionJsonAsync(item.Signature, bitmask, cancellationToken);
+                        if (txData.HasValue)
+                        {
+                            result.Transactions[item.Signature] = txData.Value;
+                        }
                     }
                 }
                 catch (Exception ex)

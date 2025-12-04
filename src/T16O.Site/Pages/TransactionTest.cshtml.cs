@@ -4,15 +4,15 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using MySqlConnector;
-using T16O.Models.RabbitMQ;
-using T16O.Services.RabbitMQ;
+using T16O.Services;
 
 namespace T16O.Site.Pages;
 
 public class TransactionTestModel : PageModel
 {
-    private readonly RabbitMqRpcClient _rpcClient;
+    private readonly RequestOrchestrator _orchestrator;
     private readonly string _connectionString;
+    private readonly string _apiKey;
 
     [BindProperty]
     public string? Signature { get; set; }
@@ -23,7 +23,7 @@ public class TransactionTestModel : PageModel
     [BindProperty]
     public bool ForceOverwrite { get; set; }
 
-    public new FetchTransactionResponse? Response { get; set; }
+    public new RequestProcessingResult? Response { get; set; }
     public string? PrettifiedJson { get; set; }
     public string? ErrorMessage { get; set; }
     public string? InfoMessage { get; set; }
@@ -31,10 +31,11 @@ public class TransactionTestModel : PageModel
     public int DeletedPartyCount { get; set; }
     public int DeletedPayloadCount { get; set; }
 
-    public TransactionTestModel(RabbitMqRpcClient rpcClient, DatabaseSettings dbSettings)
+    public TransactionTestModel(RequestOrchestrator orchestrator, DatabaseSettings dbSettings, SiteSettings siteSettings)
     {
-        _rpcClient = rpcClient;
+        _orchestrator = orchestrator;
         _connectionString = dbSettings.ConnectionString;
+        _apiKey = siteSettings.ApiKey;
     }
 
     public void OnGet()
@@ -68,27 +69,27 @@ public class TransactionTestModel : PageModel
                 DeletedPartyCount = partyDeleted;
                 DeletedPayloadCount = payloadDeleted;
 
-                if (partyDeleted > 0 || payloadDeleted > 0)
+                if (partyDeleted > 0)
                 {
-                    InfoMessage = $"Deleted {partyDeleted} tx_party and {payloadDeleted} tx_payload records for reprocessing";
+                    InfoMessage = $"Deleted {partyDeleted} party records for reprocessing";
                 }
             }
 
-            // Use singleton RPC client (connection already established - massive perf boost!)
-            // Web UI requests use dedicated SITE queue with HIGH concurrency (20 parallel)
-            // Ensures zero queueing lag for interactive bubblemap exploration
-            Response = await _rpcClient.FetchTransactionSiteAsync(
-                Signature,
-                Bitmask.Value,
-                priority: RabbitMqConfig.Priority.Realtime);
+            // Use RequestOrchestrator with api-key for tracked processing
+            // This bypasses the dedicated site RPC worker and uses the main RPC pool
+            Response = await _orchestrator.ProcessApiKeyRequestAsync(
+                _apiKey,
+                new System.Collections.Generic.List<string> { Signature },
+                priority: 10,  // Realtime priority
+                forceRefresh: ForceOverwrite,
+                bitmask: Bitmask.Value);
 
             ProcessingTime = DateTime.UtcNow - startTime;
 
-            if (Response.Transaction.HasValue)
+            if (Response.Transactions.TryGetValue(Signature, out var txData))
             {
                 // Prettify the JSON
-                var jsonElement = Response.Transaction.Value;
-                PrettifiedJson = JsonSerializer.Serialize(jsonElement, new JsonSerializerOptions
+                PrettifiedJson = JsonSerializer.Serialize(txData, new JsonSerializerOptions
                 {
                     WriteIndented = true
                 });
@@ -109,35 +110,27 @@ public class TransactionTestModel : PageModel
     }
 
     /// <summary>
-    /// Delete existing tx_party and tx_payload records for the given signature.
+    /// Delete existing party records for the given signature.
     /// This allows reprocessing with updated asset information.
     /// </summary>
     private async Task<(int partyDeleted, int payloadDeleted)> DeleteExistingRecordsAsync(string signature)
     {
         int partyDeleted = 0;
-        int payloadDeleted = 0;
 
         await using var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync();
 
-        // Delete from tx_party
+        // Delete from party (joins through transactions table)
         await using (var cmd = new MySqlCommand(
-            "DELETE FROM tx_party WHERE signature = @signature",
+            @"DELETE p FROM party p
+              JOIN transactions t ON p.tx_id = t.id
+              WHERE t.signature = @signature",
             connection))
         {
             cmd.Parameters.AddWithValue("@signature", signature);
             partyDeleted = await cmd.ExecuteNonQueryAsync();
         }
 
-        // Delete from tx_payload
-        await using (var cmd = new MySqlCommand(
-            "DELETE FROM tx_payload WHERE signature = @signature",
-            connection))
-        {
-            cmd.Parameters.AddWithValue("@signature", signature);
-            payloadDeleted = await cmd.ExecuteNonQueryAsync();
-        }
-
-        return (partyDeleted, payloadDeleted);
+        return (partyDeleted, 0);
     }
 }

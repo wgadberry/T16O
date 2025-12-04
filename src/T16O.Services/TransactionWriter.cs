@@ -29,6 +29,51 @@ public class TransactionWriter
     }
 
     /// <summary>
+    /// Get transaction JSON from database by signature using fn_reconstruct_transaction
+    /// </summary>
+    /// <param name="signature">Transaction signature</param>
+    /// <param name="bitmask">Bitmask for fields to include (default 1918 = standard fields)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Transaction JSON or null if not found</returns>
+    /// <remarks>
+    /// Bitmask flags:
+    /// 2    = logMessages
+    /// 4    = preBalances
+    /// 8    = postBalances
+    /// 16   = preTokenBalances
+    /// 32   = innerInstructions
+    /// 64   = postTokenBalances
+    /// 256  = accountKeys
+    /// 512  = instructions
+    /// 1024 = loadedAddresses
+    /// Default 1918 = 2+4+8+16+32+64+256+512+1024
+    /// </remarks>
+    public async Task<JsonElement?> GetTransactionJsonAsync(
+        string signature,
+        int bitmask = 1918,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new MySqlCommand(
+            "SELECT fn_reconstruct_transaction(@signature, @bitmask)",
+            connection);
+        command.Parameters.AddWithValue("@signature", signature);
+        command.Parameters.AddWithValue("@bitmask", bitmask);
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result == null || result == DBNull.Value)
+            return null;
+
+        var json = result.ToString();
+        if (string.IsNullOrEmpty(json))
+            return null;
+
+        return JsonSerializer.Deserialize<JsonElement>(json);
+    }
+
+    /// <summary>
     /// Write transaction data to the database by calling sp_tx_merge
     /// </summary>
     /// <param name="transaction">The transaction fetch result to write</param>

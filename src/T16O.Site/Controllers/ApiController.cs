@@ -75,6 +75,7 @@ public class ApiController : ControllerBase
                 signatureStrings,
                 priority,
                 forceRefresh: false,
+                bitmask: 1918,
                 cancellationToken);
 
             _logger.LogInformation("[API] Owner request completed: requestId={RequestId}, state={State}, total={Total}, fetched={Fetched}",
@@ -131,6 +132,7 @@ public class ApiController : ControllerBase
                 new List<string> { signature },
                 priority,
                 forceRefresh,
+                bitmask: 1918,
                 cancellationToken);
 
             _logger.LogInformation("[API] Signature request completed: requestId={RequestId}, state={State}, fetched={Fetched}",
@@ -187,6 +189,7 @@ public class ApiController : ControllerBase
                 signatures,
                 priority,
                 forceRefresh: false,
+                bitmask: 1918,
                 cancellationToken);
 
             _logger.LogInformation("[API] Batch signatures completed: requestId={RequestId}, state={State}, total={Total}, fetched={Fetched}",

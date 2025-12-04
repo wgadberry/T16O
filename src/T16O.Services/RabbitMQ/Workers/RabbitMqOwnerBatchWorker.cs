@@ -185,6 +185,7 @@ public class RabbitMqOwnerBatchWorker : IDisposable
             request.Signatures,
             request.Priority,
             forceRefresh: false,
+            bitmask: 1918,
             cancellationToken);
 
         _logger?.LogInformation("[OwnerBatchWorker] API-key request completed. RequestId={RequestId}, State={State}, Total={Total}, Existing={Existing}, Fetched={Fetched}, Parties={Parties}, Errors={ErrorCount}",
