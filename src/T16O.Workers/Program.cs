@@ -125,6 +125,31 @@ if (influxDbEnabled)
 
 // Register workers based on configuration
 
+// Winston worker - FIRST so it starts before blocking RabbitMQ workers
+// "I solve problems" - analyzes unknown action types and generates cleanup scripts
+var winstonEnabled = builder.Configuration.GetValue<bool>("Workers:Winston:Enabled");
+Console.WriteLine($"[DEBUG] Winston Enabled: {winstonEnabled}");
+if (winstonEnabled)
+{
+    Console.WriteLine("[DEBUG] Registering Winston worker FIRST...");
+    var intervalSeconds = builder.Configuration.GetValue<int>("Workers:Winston:IntervalSeconds");
+    if (intervalSeconds <= 0) intervalSeconds = 3600; // Default 1 hour
+    var patternLimit = builder.Configuration.GetValue<int>("Workers:Winston:PatternLimit");
+    if (patternLimit <= 0) patternLimit = 100; // Default 100 patterns
+    var outputDirectory = builder.Configuration["Workers:Winston:OutputDirectory"] ?? "./sql";
+
+    builder.Services.AddHostedService(sp =>
+        new WinstonWorkerService(
+            sp.GetRequiredService<DatabaseConfig>().ConnectionString,
+            sp.GetRequiredService<SolanaConfig>().AssetRpcUrls,
+            intervalSeconds,
+            patternLimit,
+            outputDirectory,
+            sp.GetRequiredService<AssetFetcherOptions>(),
+            sp.GetRequiredService<ILogger<WinstonWorkerService>>()
+        ));
+}
+
 // Orchestrator worker - public entry point (db → rpc → write)
 if (builder.Configuration.GetValue<bool>("Workers:TransactionFetch:Enabled"))
 {
@@ -394,27 +419,6 @@ if (builder.Configuration.GetValue<bool>("Workers:MissingSymbol:Enabled"))
             intervalSeconds,
             batchSize,
             sp.GetRequiredService<ILogger<MissingSymbolWorkerService>>()
-        ));
-}
-
-// Winston worker - "I solve problems" - analyzes unknown action types and generates cleanup scripts
-if (builder.Configuration.GetValue<bool>("Workers:Winston:Enabled"))
-{
-    var intervalSeconds = builder.Configuration.GetValue<int>("Workers:Winston:IntervalSeconds");
-    if (intervalSeconds <= 0) intervalSeconds = 3600; // Default 1 hour
-    var patternLimit = builder.Configuration.GetValue<int>("Workers:Winston:PatternLimit");
-    if (patternLimit <= 0) patternLimit = 100; // Default 100 patterns
-    var outputDirectory = builder.Configuration["Workers:Winston:OutputDirectory"] ?? "./sql";
-
-    builder.Services.AddHostedService(sp =>
-        new WinstonWorkerService(
-            sp.GetRequiredService<DatabaseConfig>().ConnectionString,
-            sp.GetRequiredService<SolanaConfig>().AssetRpcUrls,
-            intervalSeconds,
-            patternLimit,
-            outputDirectory,
-            sp.GetRequiredService<AssetFetcherOptions>(),
-            sp.GetRequiredService<ILogger<WinstonWorkerService>>()
         ));
 }
 

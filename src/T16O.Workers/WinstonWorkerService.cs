@@ -12,7 +12,7 @@ namespace T16O.Workers;
 /// SQL scripts to improve data quality. Named after Winston Wolf from Pulp Fiction:
 /// "I solve problems."
 ///
-/// This worker uses System.Threading.Timer to ensure it runs independently of other
+/// This worker uses a dedicated thread to ensure it runs independently of other
 /// BackgroundServices that may block the thread pool.
 ///
 /// This worker:
@@ -22,7 +22,7 @@ namespace T16O.Workers;
 /// 4. Generates timestamped SQL scripts (worker-wolf-{unixtime}.sql) for review
 /// 5. Does NOT execute scripts automatically - requires manual review
 /// </summary>
-public class WinstonWorkerService : IHostedService, IDisposable
+public class WinstonWorkerService : BackgroundService
 {
     private readonly string _connectionString;
     private readonly string[] _assetRpcUrls;
@@ -31,9 +31,6 @@ public class WinstonWorkerService : IHostedService, IDisposable
     private readonly string _outputDirectory;
     private readonly ILogger<WinstonWorkerService> _logger;
     private readonly AssetFetcherOptions _assetFetcherOptions;
-    private Timer? _timer;
-    private bool _isRunning;
-    private CancellationTokenSource? _cts;
 
     public WinstonWorkerService(
         string connectionString,
@@ -51,10 +48,12 @@ public class WinstonWorkerService : IHostedService, IDisposable
         _outputDirectory = outputDirectory;
         _assetFetcherOptions = assetFetcherOptions;
         _logger = logger;
+        Console.WriteLine("[Winston] Constructor called!");
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        Console.WriteLine($"[Winston] ExecuteAsync started!");
         _logger.LogInformation(
             "[Winston] I solve problems. Interval: {Interval}s, PatternLimit: {PatternLimit}, Output: {OutputDir}",
             _intervalSeconds, _patternLimit, _outputDirectory);
@@ -66,60 +65,61 @@ public class WinstonWorkerService : IHostedService, IDisposable
             _logger.LogInformation("[Winston] Created output directory: {OutputDir}", _outputDirectory);
         }
 
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-        // Start timer - fires immediately (0ms) then on interval
-        _timer = new Timer(
-            callback: ExecuteAnalysis,
-            state: null,
-            dueTime: TimeSpan.Zero,  // Run immediately
-            period: TimeSpan.FromSeconds(_intervalSeconds));
-
-        _logger.LogInformation("[Winston] Timer started - first run in 0s, then every {Interval}s", _intervalSeconds);
-
-        return Task.CompletedTask;
-    }
-
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        _logger.LogInformation("[Winston] Stopping...");
-
-        _timer?.Change(Timeout.Infinite, 0);
-        _cts?.Cancel();
-
-        return Task.CompletedTask;
-    }
-
-    private async void ExecuteAnalysis(object? state)
-    {
-        // Prevent overlapping executions
-        if (_isRunning)
+        // Run on a dedicated thread to avoid being blocked by other workers
+        var thread = new Thread(() => RunAnalysisLoop(stoppingToken))
         {
-            _logger.LogDebug("[Winston] Previous analysis still running, skipping this cycle");
-            return;
-        }
+            Name = "Winston-Worker",
+            IsBackground = true
+        };
+        thread.Start();
 
-        _isRunning = true;
+        Console.WriteLine("[Winston] Analysis thread started, yielding ExecuteAsync");
 
+        // Return immediately to not block other services
+        await Task.CompletedTask;
+    }
+
+    private void RunAnalysisLoop(CancellationToken stoppingToken)
+    {
+        Console.WriteLine("[Winston] RunAnalysisLoop started on dedicated thread");
+        _logger.LogInformation("[Winston] Timer started - running immediately, then every {Interval}s", _intervalSeconds);
+
+        // Run immediately
         try
         {
-            await AnalyzeAndGenerateScriptAsync(_cts?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("[Winston] Analysis cancelled");
+            RunAnalysisAsync(stoppingToken).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[Winston] Error during analysis cycle");
+            _logger.LogError(ex, "[Winston] Error during initial analysis");
         }
-        finally
+
+        // Then run on interval
+        while (!stoppingToken.IsCancellationRequested)
         {
-            _isRunning = false;
+            try
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(_intervalSeconds));
+
+                if (stoppingToken.IsCancellationRequested)
+                    break;
+
+                RunAnalysisAsync(stoppingToken).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[Winston] Error during analysis cycle");
+            }
         }
+
+        _logger.LogInformation("[Winston] Worker stopped");
     }
 
-    private async Task AnalyzeAndGenerateScriptAsync(CancellationToken cancellationToken)
+    private async Task RunAnalysisAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("[Winston] Starting analysis cycle...");
 
@@ -489,11 +489,5 @@ public class WinstonWorkerService : IHostedService, IDisposable
         }
 
         return "unknown";
-    }
-
-    public void Dispose()
-    {
-        _timer?.Dispose();
-        _cts?.Dispose();
     }
 }
