@@ -62,8 +62,22 @@ public class WinstonWorkerService : BackgroundService
 
         try
         {
+            // Run immediately on startup
+            _logger.LogInformation("[Winston] Running initial analysis...");
+            try
+            {
+                await AnalyzeAndGenerateScriptAsync(stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "[Winston] Error during initial analysis");
+            }
+
+            // Then continue on schedule
             while (!stoppingToken.IsCancellationRequested)
             {
+                await Task.Delay(TimeSpan.FromSeconds(_intervalSeconds), stoppingToken);
+
                 try
                 {
                     await AnalyzeAndGenerateScriptAsync(stoppingToken);
@@ -72,8 +86,6 @@ public class WinstonWorkerService : BackgroundService
                 {
                     _logger.LogError(ex, "[Winston] Error during analysis cycle");
                 }
-
-                await Task.Delay(TimeSpan.FromSeconds(_intervalSeconds), stoppingToken);
             }
         }
         catch (OperationCanceledException)
