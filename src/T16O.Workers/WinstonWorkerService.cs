@@ -12,6 +12,9 @@ namespace T16O.Workers;
 /// SQL scripts to improve data quality. Named after Winston Wolf from Pulp Fiction:
 /// "I solve problems."
 ///
+/// This worker uses System.Threading.Timer to ensure it runs independently of other
+/// BackgroundServices that may block the thread pool.
+///
 /// This worker:
 /// 1. Runs sp_party_assess_unknown on a configurable schedule
 /// 2. Analyzes patterns of unknown action types
@@ -19,7 +22,7 @@ namespace T16O.Workers;
 /// 4. Generates timestamped SQL scripts (worker-wolf-{unixtime}.sql) for review
 /// 5. Does NOT execute scripts automatically - requires manual review
 /// </summary>
-public class WinstonWorkerService : BackgroundService
+public class WinstonWorkerService : IHostedService, IDisposable
 {
     private readonly string _connectionString;
     private readonly string[] _assetRpcUrls;
@@ -28,6 +31,9 @@ public class WinstonWorkerService : BackgroundService
     private readonly string _outputDirectory;
     private readonly ILogger<WinstonWorkerService> _logger;
     private readonly AssetFetcherOptions _assetFetcherOptions;
+    private Timer? _timer;
+    private bool _isRunning;
+    private CancellationTokenSource? _cts;
 
     public WinstonWorkerService(
         string connectionString,
@@ -47,17 +53,8 @@ public class WinstonWorkerService : BackgroundService
         _logger = logger;
     }
 
-    public override Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("[Winston] Starting Winston worker service...");
-        return base.StartAsync(cancellationToken);
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        // Yield immediately to allow other services to start
-        await Task.Yield();
-
         _logger.LogInformation(
             "[Winston] I solve problems. Interval: {Interval}s, PatternLimit: {PatternLimit}, Output: {OutputDir}",
             _intervalSeconds, _patternLimit, _outputDirectory);
@@ -69,37 +66,56 @@ public class WinstonWorkerService : BackgroundService
             _logger.LogInformation("[Winston] Created output directory: {OutputDir}", _outputDirectory);
         }
 
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        // Start timer - fires immediately (0ms) then on interval
+        _timer = new Timer(
+            callback: ExecuteAnalysis,
+            state: null,
+            dueTime: TimeSpan.Zero,  // Run immediately
+            period: TimeSpan.FromSeconds(_intervalSeconds));
+
+        _logger.LogInformation("[Winston] Timer started - first run in 0s, then every {Interval}s", _intervalSeconds);
+
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("[Winston] Stopping...");
+
+        _timer?.Change(Timeout.Infinite, 0);
+        _cts?.Cancel();
+
+        return Task.CompletedTask;
+    }
+
+    private async void ExecuteAnalysis(object? state)
+    {
+        // Prevent overlapping executions
+        if (_isRunning)
+        {
+            _logger.LogDebug("[Winston] Previous analysis still running, skipping this cycle");
+            return;
+        }
+
+        _isRunning = true;
+
         try
         {
-            // Run immediately on startup
-            _logger.LogInformation("[Winston] Running initial analysis...");
-            try
-            {
-                await AnalyzeAndGenerateScriptAsync(stoppingToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "[Winston] Error during initial analysis");
-            }
-
-            // Then continue on schedule
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(_intervalSeconds), stoppingToken);
-
-                try
-                {
-                    await AnalyzeAndGenerateScriptAsync(stoppingToken);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogError(ex, "[Winston] Error during analysis cycle");
-                }
-            }
+            await AnalyzeAndGenerateScriptAsync(_cts?.Token ?? CancellationToken.None);
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("[Winston] Worker stopped gracefully");
+            _logger.LogInformation("[Winston] Analysis cancelled");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Winston] Error during analysis cycle");
+        }
+        finally
+        {
+            _isRunning = false;
         }
     }
 
@@ -473,5 +489,11 @@ public class WinstonWorkerService : BackgroundService
         }
 
         return "unknown";
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+        _cts?.Dispose();
     }
 }
