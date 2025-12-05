@@ -209,20 +209,36 @@ public class WinstonWorkerService : BackgroundService
 
     private async Task<JsonDocument?> RunAssessmentAsync(CancellationToken cancellationToken)
     {
-        await using var connection = new MySqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        const int maxRetries = 3;
 
-        await using var cmd = new MySqlCommand(
-            $"CALL sp_party_assess_unknown({_patternLimit})",
-            connection);
-        cmd.CommandTimeout = 120;
-
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-
-        if (await reader.ReadAsync(cancellationToken))
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            var json = reader.GetString(0);
-            return JsonDocument.Parse(json);
+            try
+            {
+                await using var connection = new MySqlConnection(_connectionString);
+                await connection.OpenAsync(cancellationToken);
+
+                await using var cmd = new MySqlCommand(
+                    $"CALL sp_party_assess_unknown({_patternLimit})",
+                    connection);
+                cmd.CommandTimeout = 120;
+
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    var json = reader.GetString(0);
+                    return JsonDocument.Parse(json);
+                }
+
+                return null;
+            }
+            catch (MySqlException ex) when (ex.Number == 1213 && attempt < maxRetries) // Deadlock
+            {
+                _logger.LogWarning("[Winston] Deadlock detected, retry {Attempt}/{MaxRetries} in {Delay}ms",
+                    attempt, maxRetries, attempt * 1000);
+                await Task.Delay(attempt * 1000, cancellationToken);
+            }
         }
 
         return null;
