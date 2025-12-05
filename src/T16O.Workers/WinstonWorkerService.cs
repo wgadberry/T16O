@@ -47,8 +47,17 @@ public class WinstonWorkerService : BackgroundService
         _logger = logger;
     }
 
+    public override Task StartAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("[Winston] Starting Winston worker service...");
+        return base.StartAsync(cancellationToken);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Yield immediately to allow other services to start
+        await Task.Yield();
+
         _logger.LogInformation(
             "[Winston] I solve problems. Interval: {Interval}s, PatternLimit: {PatternLimit}, Output: {OutputDir}",
             _intervalSeconds, _patternLimit, _outputDirectory);
