@@ -27,11 +27,20 @@ BEGIN
         account_keys JSON
     ) ENGINE=InnoDB;
 
+    -- Sample transactions across different mints for better diversity
+    -- Takes up to 10 transactions per mint, up to 10000 total
     INSERT INTO tmp_unknown_txs (tx_id, signature, log_messages, programs, inner_instructions, instructions, account_keys)
-    SELECT DISTINCT t.id, t.signature, t.log_messages, t.programs, t.inner_instructions, t.instructions, t.account_keys
-    FROM transactions t
-    INNER JOIN party p ON p.tx_id = t.id
-    WHERE p.action_type = 'unknown'
+    SELECT t.id, t.signature, t.log_messages, t.programs, t.inner_instructions, t.instructions, t.account_keys
+    FROM (
+        SELECT
+            p.tx_id,
+            p.mint_id,
+            ROW_NUMBER() OVER (PARTITION BY p.mint_id ORDER BY p.tx_id DESC) AS rn
+        FROM party p
+        WHERE p.action_type = 'unknown'
+    ) ranked
+    INNER JOIN transactions t ON t.id = ranked.tx_id
+    WHERE ranked.rn <= 10  -- Up to 10 transactions per mint
     LIMIT 10000;
 
     -- Instruction patterns from log_messages

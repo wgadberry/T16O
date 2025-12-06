@@ -9,7 +9,7 @@ namespace T16O.Workers;
 
 /// <summary>
 /// Timer-based data cleanup worker that analyzes unknown action types and generates
-/// SQL scripts to improve data quality. Named after Winston Wolf from Pulp Fiction:
+/// reports to improve data quality. Named after Winston Wolf from Pulp Fiction:
 /// "I solve problems."
 ///
 /// This worker uses a dedicated thread to ensure it runs independently of other
@@ -19,7 +19,9 @@ namespace T16O.Workers;
 /// 1. Runs sp_party_assess_unknown on a configurable schedule
 /// 2. Analyzes patterns of unknown action types
 /// 3. Fetches missing mint information via AssetFetcher
-/// 4. Generates timestamped SQL scripts (worker-wolf-{unixtime}.sql) for review
+/// 4. Generates two output files:
+///    - worker-wolf-{unixtime}.md - Assessment report in markdown
+///    - sp_party_merge-{unixtime}.sql - Updated stored procedure with suggestions
 /// 5. Does NOT execute scripts automatically - requires manual review
 /// </summary>
 public class WinstonWorkerService : BackgroundService
@@ -28,7 +30,8 @@ public class WinstonWorkerService : BackgroundService
     private readonly string[] _assetRpcUrls;
     private readonly int _intervalSeconds;
     private readonly int _patternLimit;
-    private readonly string _outputDirectory;
+    private readonly string _sqlSourceDirectory;
+    private readonly string _sqlOutputDirectory;
     private readonly ILogger<WinstonWorkerService> _logger;
     private readonly AssetFetcherOptions _assetFetcherOptions;
 
@@ -37,7 +40,8 @@ public class WinstonWorkerService : BackgroundService
         string[] assetRpcUrls,
         int intervalSeconds,
         int patternLimit,
-        string outputDirectory,
+        string sqlSourceDirectory,
+        string sqlOutputDirectory,
         AssetFetcherOptions assetFetcherOptions,
         ILogger<WinstonWorkerService> logger)
     {
@@ -45,7 +49,8 @@ public class WinstonWorkerService : BackgroundService
         _assetRpcUrls = assetRpcUrls;
         _intervalSeconds = intervalSeconds;
         _patternLimit = patternLimit;
-        _outputDirectory = outputDirectory;
+        _sqlSourceDirectory = sqlSourceDirectory;
+        _sqlOutputDirectory = sqlOutputDirectory;
         _assetFetcherOptions = assetFetcherOptions;
         _logger = logger;
         Console.WriteLine("[Winston] Constructor called!");
@@ -55,14 +60,16 @@ public class WinstonWorkerService : BackgroundService
     {
         Console.WriteLine($"[Winston] ExecuteAsync started!");
         _logger.LogInformation(
-            "[Winston] I solve problems. Interval: {Interval}s, PatternLimit: {PatternLimit}, Output: {OutputDir}",
-            _intervalSeconds, _patternLimit, _outputDirectory);
+            "[Winston] I solve problems. Interval: {Interval}s, PatternLimit: {PatternLimit}",
+            _intervalSeconds, _patternLimit);
+        _logger.LogInformation("[Winston] SqlSourceDirectory: {SqlSourceDir}", _sqlSourceDirectory);
+        _logger.LogInformation("[Winston] SqlOutputDirectory: {SqlOutputDir}", _sqlOutputDirectory);
 
         // Ensure output directory exists
-        if (!Directory.Exists(_outputDirectory))
+        if (!Directory.Exists(_sqlOutputDirectory))
         {
-            Directory.CreateDirectory(_outputDirectory);
-            _logger.LogInformation("[Winston] Created output directory: {OutputDir}", _outputDirectory);
+            Directory.CreateDirectory(_sqlOutputDirectory);
+            _logger.LogInformation("[Winston] Created output directory: {OutputDir}", _sqlOutputDirectory);
         }
 
         // Run on a dedicated thread to avoid being blocked by other workers
@@ -192,19 +199,28 @@ public class WinstonWorkerService : BackgroundService
                 resolvedMints.Count, missingMints.Count);
         }
 
-        // Step 5: Generate SQL script
+        // Step 5: Generate output files
         var unixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var scriptPath = Path.Combine(_outputDirectory, $"worker-wolf-{unixTime}.sql");
 
-        await GenerateSqlScriptAsync(
-            scriptPath,
+        // Generate assessment report (markdown) - goes to output directory
+        var reportPath = Path.Combine(_sqlOutputDirectory, $"worker-wolf-{unixTime}.md");
+        await GenerateAssessmentReportAsync(
+            reportPath,
             assessment,
             programPatterns,
             instructionPatterns,
             resolvedMints,
             cancellationToken);
+        _logger.LogInformation("[Winston] Generated assessment report: {ReportPath}", reportPath);
 
-        _logger.LogInformation("[Winston] Generated script: {ScriptPath}", scriptPath);
+        // Generate updated sp_party_merge with suggestions incorporated - goes to output directory
+        var spPath = Path.Combine(_sqlOutputDirectory, $"sp_party_merge-{unixTime}.sql");
+        await GenerateUpdatedPartyMergeStoredProcAsync(
+            spPath,
+            instructionPatterns,
+            programPatterns,
+            cancellationToken);
+        _logger.LogInformation("[Winston] Generated updated stored procedure: {SpPath}", spPath);
     }
 
     private async Task<JsonDocument?> RunAssessmentAsync(CancellationToken cancellationToken)
@@ -345,8 +361,8 @@ public class WinstonWorkerService : BackgroundService
         return results;
     }
 
-    private async Task GenerateSqlScriptAsync(
-        string scriptPath,
+    private async Task GenerateAssessmentReportAsync(
+        string reportPath,
         JsonDocument assessment,
         List<(string programId, int count, List<string> samples)> programPatterns,
         List<(string instructionType, int count, List<string> samples)> instructionPatterns,
@@ -357,27 +373,31 @@ public class WinstonWorkerService : BackgroundService
         var timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
         var summary = assessment.RootElement.GetProperty("summary");
 
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- Winston Worker Output - Data Cleanup Script");
-        sb.AppendLine($"-- Generated: {timestamp} UTC");
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- ");
-        sb.AppendLine("-- REVIEW THIS SCRIPT BEFORE EXECUTING!");
-        sb.AppendLine("-- ");
-        sb.AppendLine($"-- Summary:");
-        sb.AppendLine($"--   Unknown party records: {summary.GetProperty("total_unknown_party_records").GetInt32()}");
-        sb.AppendLine($"--   Unknown transactions: {summary.GetProperty("total_unknown_transactions").GetInt32()}");
-        sb.AppendLine($"--   Unknown percentage: {summary.GetProperty("unknown_percentage").GetDouble():F2}%");
-        sb.AppendLine("-- ");
+        sb.AppendLine("# Winston Worker Assessment Report");
+        sb.AppendLine();
+        sb.AppendLine($"**Generated:** {timestamp} UTC");
+        sb.AppendLine();
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine("## Summary");
+        sb.AppendLine();
+        sb.AppendLine($"| Metric | Value |");
+        sb.AppendLine($"|--------|-------|");
+        sb.AppendLine($"| Unknown party records | {summary.GetProperty("total_unknown_party_records").GetInt32():N0} |");
+        sb.AppendLine($"| Unknown transactions | {summary.GetProperty("total_unknown_transactions").GetInt32():N0} |");
+        sb.AppendLine($"| Unknown percentage | {summary.GetProperty("unknown_percentage").GetDouble():F2}% |");
         sb.AppendLine();
 
         // Section 1: Mint label updates
         if (resolvedMints.Count > 0)
         {
-            sb.AppendLine("-- ============================================================");
-            sb.AppendLine("-- SECTION 1: Mint Label Updates");
-            sb.AppendLine("-- ============================================================");
+            sb.AppendLine("---");
             sb.AppendLine();
+            sb.AppendLine("## Mint Label Updates");
+            sb.AppendLine();
+            sb.AppendLine("The following mints were resolved and can be labeled:");
+            sb.AppendLine();
+            sb.AppendLine("```sql");
 
             foreach (var (mintAddress, (name, symbol)) in resolvedMints)
             {
@@ -390,112 +410,352 @@ public class WinstonWorkerService : BackgroundService
 
                 sb.AppendLine($"UPDATE addresses SET label = '{escapedLabel}' WHERE address = '{escapedAddress}';");
             }
+
+            sb.AppendLine("```");
             sb.AppendLine();
         }
 
         // Section 2: Program pattern analysis
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- SECTION 2: Program Pattern Analysis");
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- ");
-        sb.AppendLine("-- These program IDs appear in unknown transactions.");
-        sb.AppendLine("-- Consider adding detection logic to sp_party_merge for these.");
-        sb.AppendLine("-- ");
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine("## Program Pattern Analysis");
+        sb.AppendLine();
+        sb.AppendLine("These program IDs appear in unknown transactions. Consider adding detection logic to `sp_party_merge`.");
+        sb.AppendLine();
+        sb.AppendLine("| Program ID | Count | Sample Signatures |");
+        sb.AppendLine("|------------|-------|-------------------|");
 
         foreach (var (programId, count, samples) in programPatterns.Take(20))
         {
-            sb.AppendLine($"-- Program: {programId}");
-            sb.AppendLine($"--   Count: {count}");
-            sb.AppendLine($"--   Samples: {string.Join(", ", samples.Take(3))}");
-            sb.AppendLine("-- ");
+            var sampleStr = string.Join(", ", samples.Take(2).Select(s => $"`{s[..8]}...`"));
+            sb.AppendLine($"| `{programId}` | {count:N0} | {sampleStr} |");
         }
         sb.AppendLine();
 
         // Section 3: Instruction pattern analysis
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- SECTION 3: Instruction Pattern Analysis");
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- ");
-        sb.AppendLine("-- These instruction types appear in unknown transactions.");
-        sb.AppendLine("-- Consider adding detection logic to sp_party_merge for these.");
-        sb.AppendLine("-- ");
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine("## Instruction Pattern Analysis");
+        sb.AppendLine();
+        sb.AppendLine("These instruction types appear in unknown transactions.");
+        sb.AppendLine();
+        sb.AppendLine("| Instruction | Count | Suggested Action | Sample Signatures |");
+        sb.AppendLine("|-------------|-------|------------------|-------------------|");
 
         foreach (var (instructionType, count, samples) in instructionPatterns.Take(20))
         {
-            sb.AppendLine($"-- Instruction: {instructionType}");
-            sb.AppendLine($"--   Count: {count}");
-            sb.AppendLine($"--   Samples: {string.Join(", ", samples.Take(3))}");
-            sb.AppendLine("-- ");
+            if (string.IsNullOrWhiteSpace(instructionType)) continue;
+
+            var cleanType = instructionType.Trim();
+            var actionType = InferActionType(cleanType);
+            var actionStr = actionType != null ? $"`{actionType}`" : "*(needs review)*";
+            var sampleStr = string.Join(", ", samples.Take(2).Select(s => s.Length > 8 ? $"`{s[..8]}...`" : $"`{s}`"));
+
+            sb.AppendLine($"| `{cleanType}` | {count:N0} | {actionStr} | {sampleStr} |");
         }
         sb.AppendLine();
 
-        // Section 4: Suggested sp_party_merge updates
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- SECTION 4: Suggested sp_party_merge Updates");
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- ");
-        sb.AppendLine("-- Based on the patterns above, consider adding the following");
-        sb.AppendLine("-- detection logic to sp_party_merge.");
-        sb.AppendLine("-- ");
+        // Section 4: Collect new action types that would need ENUM updates
+        var newActionTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (instructionType, _, _) in instructionPatterns)
+        {
+            if (string.IsNullOrWhiteSpace(instructionType)) continue;
+            var actionType = InferActionType(instructionType.Trim());
+            if (actionType != null && !KnownActionTypes.Contains(actionType))
+            {
+                newActionTypes.Add(actionType);
+            }
+        }
 
-        // Generate suggestions based on common patterns
-        foreach (var (instructionType, count, _) in instructionPatterns.Take(5))
+        if (newActionTypes.Count > 0)
+        {
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine("## New ENUM Values Required");
+            sb.AppendLine();
+            sb.AppendLine("The following action types are not yet in the `party.action_type` ENUM:");
+            sb.AppendLine();
+            foreach (var actionType in newActionTypes.Order())
+            {
+                sb.AppendLine($"- `{actionType}`");
+            }
+            sb.AppendLine();
+            sb.AppendLine("Run the ALTER TABLE statement in the generated `sp_party_merge-*.sql` file first.");
+            sb.AppendLine();
+        }
+
+        // Section 5: Suggested sp_party_merge updates
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine("## Suggested sp_party_merge Updates");
+        sb.AppendLine();
+        sb.AppendLine("Based on the patterns above, the following detection logic can be added:");
+        sb.AppendLine();
+        sb.AppendLine("```sql");
+        sb.AppendLine("-- Add these conditions to the action type CASE statement:");
+
+        foreach (var (instructionType, count, _) in instructionPatterns.Take(10))
         {
             if (string.IsNullOrWhiteSpace(instructionType)) continue;
 
             var cleanType = instructionType.Trim();
             var actionType = InferActionType(cleanType);
 
-            sb.AppendLine($"-- Instruction '{cleanType}' appears {count} times");
-            sb.AppendLine($"-- Suggested action type: '{actionType}'");
-            sb.AppendLine("-- ");
-            sb.AppendLine($"-- IF v_log_messages LIKE '%Instruction: {cleanType}%' THEN");
-            sb.AppendLine($"--     SET v_action = '{actionType}';");
-            sb.AppendLine("-- END IF;");
-            sb.AppendLine("-- ");
+            if (actionType != null)
+            {
+                var isNew = !KnownActionTypes.Contains(actionType);
+                sb.AppendLine();
+                sb.AppendLine($"-- Instruction '{cleanType}' appears {count} times{(isNew ? " [NEW ENUM VALUE]" : "")}");
+                sb.AppendLine($"WHEN v_log_messages LIKE '%Instruction: {cleanType}%' THEN '{actionType}'");
+            }
         }
+
+        sb.AppendLine("```");
         sb.AppendLine();
 
-        // Section 5: Reprocess command
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- SECTION 5: Reprocess Unknown Records");
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine("-- ");
-        sb.AppendLine("-- After updating sp_party_merge, run the following to reprocess:");
-        sb.AppendLine("-- ");
-        sb.AppendLine("-- CALL sp_party_reprocess_unknown(1000);");
-        sb.AppendLine("-- ");
+        // Section 5: Instructions needing manual review
+        var needsReview = instructionPatterns
+            .Where(p => !string.IsNullOrWhiteSpace(p.instructionType) && InferActionType(p.instructionType.Trim()) == null)
+            .Take(10)
+            .ToList();
+
+        if (needsReview.Count > 0)
+        {
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine("## Instructions Needing Manual Review");
+            sb.AppendLine();
+            sb.AppendLine("These instructions could not be automatically mapped:");
+            sb.AppendLine();
+
+            foreach (var (instructionType, count, samples) in needsReview)
+            {
+                sb.AppendLine($"### `{instructionType.Trim()}`");
+                sb.AppendLine();
+                sb.AppendLine($"- **Count:** {count:N0}");
+                sb.AppendLine($"- **Sample signatures:**");
+                foreach (var sig in samples.Take(3))
+                {
+                    sb.AppendLine($"  - `{sig}`");
+                }
+                sb.AppendLine();
+            }
+        }
+
+        // Section 6: Reprocess command
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine("## Next Steps");
+        sb.AppendLine();
+        sb.AppendLine("1. Review the generated `sp_party_merge-*.sql` file");
+        sb.AppendLine("2. Apply the stored procedure update if the changes look correct");
+        sb.AppendLine("3. Reprocess unknown records:");
+        sb.AppendLine();
+        sb.AppendLine("```sql");
+        sb.AppendLine("CALL sp_party_reprocess_unknown(1000);");
+        sb.AppendLine("```");
         sb.AppendLine();
 
-        await File.WriteAllTextAsync(scriptPath, sb.ToString(), cancellationToken);
+        await File.WriteAllTextAsync(reportPath, sb.ToString(), cancellationToken);
     }
 
-    private string InferActionType(string instructionType)
+    private async Task GenerateUpdatedPartyMergeStoredProcAsync(
+        string spPath,
+        List<(string instructionType, int count, List<string> samples)> instructionPatterns,
+        List<(string programId, int count, List<string> samples)> programPatterns,
+        CancellationToken cancellationToken)
+    {
+        // Read the current sp_party_merge.sql template from the source directory
+        var templatePath = Path.Combine(_sqlSourceDirectory, "sp_party_merge.sql");
+        _logger.LogDebug("[Winston] Looking for template at: {TemplatePath}", templatePath);
+
+        string template;
+        try
+        {
+            template = await File.ReadAllTextAsync(templatePath, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[Winston] Could not read sp_party_merge.sql template: {Error}", ex.Message);
+            // Generate a minimal output file indicating the template wasn't found
+            var sb = new StringBuilder();
+            sb.AppendLine("-- Winston Worker - sp_party_merge Update");
+            sb.AppendLine($"-- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+            sb.AppendLine("--");
+            sb.AppendLine("-- ERROR: Could not read sp_party_merge.sql template from:");
+            sb.AppendLine($"--   {templatePath}");
+            sb.AppendLine("--");
+            sb.AppendLine("-- Suggested additions (add manually to sp_party_merge):");
+            sb.AppendLine();
+
+            foreach (var (instructionType, count, _) in instructionPatterns.Take(10))
+            {
+                if (string.IsNullOrWhiteSpace(instructionType)) continue;
+                var cleanType = instructionType.Trim();
+                var actionType = InferActionType(cleanType);
+                if (actionType != null)
+                {
+                    sb.AppendLine($"-- WHEN v_log_messages LIKE '%Instruction: {cleanType}%' THEN '{actionType}'");
+                }
+            }
+
+            await File.WriteAllTextAsync(spPath, sb.ToString(), cancellationToken);
+            return;
+        }
+
+        // Find the action type CASE statement and inject new patterns
+        // Look for the pattern: "ELSE 'unknown'" and insert before it
+        var insertionPoint = template.IndexOf("ELSE 'unknown'", StringComparison.Ordinal);
+
+        if (insertionPoint == -1)
+        {
+            _logger.LogWarning("[Winston] Could not find insertion point in sp_party_merge.sql");
+            await File.WriteAllTextAsync(spPath, template, cancellationToken);
+            return;
+        }
+
+        // Collect new action types and conditions
+        var newConditions = new StringBuilder();
+        var newActionTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var addedConditions = 0;
+
+        newConditions.AppendLine();
+        newConditions.AppendLine("        -- ============================================================");
+        newConditions.AppendLine($"        -- Winston Worker Additions ({DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC)");
+        newConditions.AppendLine("        -- ============================================================");
+
+        foreach (var (instructionType, count, _) in instructionPatterns)
+        {
+            if (string.IsNullOrWhiteSpace(instructionType)) continue;
+
+            var cleanType = instructionType.Trim();
+            var actionType = InferActionType(cleanType);
+
+            if (actionType != null)
+            {
+                // Check if this instruction type is already handled in the template
+                var checkPattern = $"Instruction: {cleanType}";
+                if (template.Contains(checkPattern, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue; // Already handled
+                }
+
+                // Track if this action type is new (not in known ENUM values)
+                if (!KnownActionTypes.Contains(actionType))
+                {
+                    newActionTypes.Add(actionType);
+                }
+
+                newConditions.AppendLine();
+                newConditions.AppendLine($"        -- {cleanType} instruction ({count} occurrences)");
+                newConditions.AppendLine($"        WHEN v_log_messages LIKE '%Instruction: {cleanType}%'");
+                newConditions.AppendLine($"        THEN '{actionType}'");
+                addedConditions++;
+            }
+        }
+
+        if (addedConditions == 0)
+        {
+            newConditions.AppendLine();
+            newConditions.AppendLine("        -- No new patterns to add");
+        }
+
+        newConditions.AppendLine();
+        newConditions.Append("        ");
+
+        // Insert the new conditions before "ELSE 'unknown'"
+        var updatedTemplate = template.Insert(insertionPoint, newConditions.ToString());
+
+        // Build the output file
+        var output = new StringBuilder();
+        output.AppendLine("-- ============================================================");
+        output.AppendLine("-- Winston Worker - Updated sp_party_merge");
+        output.AppendLine($"-- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+        output.AppendLine($"-- Added {addedConditions} new action type conditions");
+        if (newActionTypes.Count > 0)
+        {
+            output.AppendLine($"-- New ENUM values required: {string.Join(", ", newActionTypes.Order())}");
+        }
+        output.AppendLine("-- ============================================================");
+        output.AppendLine("--");
+        output.AppendLine("-- REVIEW BEFORE DEPLOYING!");
+        output.AppendLine("--");
+        output.AppendLine();
+
+        // If there are new action types, generate ALTER TABLE statement first
+        if (newActionTypes.Count > 0)
+        {
+            output.AppendLine("-- ============================================================");
+            output.AppendLine("-- STEP 1: Add new ENUM values to party.action_type");
+            output.AppendLine("-- ============================================================");
+            output.AppendLine("-- Run this ALTER TABLE before running the stored procedure update");
+            output.AppendLine("--");
+            output.AppendLine();
+
+            // Build the complete ENUM with all values
+            var allEnumValues = KnownActionTypes
+                .Union(newActionTypes)
+                .OrderBy(x => x)
+                .Select(x => $"'{x}'");
+
+            output.AppendLine("ALTER TABLE party MODIFY COLUMN action_type ENUM(");
+            output.AppendLine($"    {string.Join(",\n    ", allEnumValues)}");
+            output.AppendLine(");");
+            output.AppendLine();
+            output.AppendLine("-- ============================================================");
+            output.AppendLine("-- STEP 2: Update the stored procedure");
+            output.AppendLine("-- ============================================================");
+            output.AppendLine();
+        }
+
+        output.Append(updatedTemplate);
+
+        await File.WriteAllTextAsync(spPath, output.ToString(), cancellationToken);
+    }
+
+    // Known action types that exist in the party table ENUM
+    // These don't need ALTER TABLE statements
+    private static readonly HashSet<string> KnownActionTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "fee", "rent", "rentReceived", "transfer", "transferChecked",
+        "burn", "mint", "swap", "createAccount", "closeAccount",
+        "stake", "unstake", "reward", "airdrop",
+        "jitoTip", "jitoTipReceived", "protocolFee", "unknown"
+    };
+
+    private string? InferActionType(string instructionType)
     {
         // Common instruction type to action type mappings
         var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["Transfer"] = "transfer",
-            ["TransferChecked"] = "transfer",
+            ["TransferChecked"] = "transferChecked",
             ["Swap"] = "swap",
             ["SwapBaseIn"] = "swap",
             ["SwapBaseOut"] = "swap",
+            ["Buy"] = "swap",  // Buy/Sell are swap variants
+            ["Sell"] = "swap",
             ["AddLiquidity"] = "addLiquidity",
             ["RemoveLiquidity"] = "removeLiquidity",
             ["Deposit"] = "deposit",
             ["Withdraw"] = "withdraw",
             ["Stake"] = "stake",
             ["Unstake"] = "unstake",
-            ["Claim"] = "claim",
-            ["ClaimReward"] = "claimReward",
-            ["Harvest"] = "harvest",
+            ["Claim"] = "reward",  // Map to existing 'reward' type
+            ["ClaimReward"] = "reward",
+            ["Harvest"] = "reward",
             ["Mint"] = "mint",
+            ["MintTo"] = "mint",
             ["Burn"] = "burn",
-            ["Close"] = "close",
-            ["CloseAccount"] = "close",
-            ["Initialize"] = "initialize",
-            ["Create"] = "create",
-            ["CreateAccount"] = "create"
+            ["Close"] = "closeAccount",
+            ["CloseAccount"] = "closeAccount",
+            ["Initialize"] = "createAccount",
+            ["Create"] = "createAccount",
+            ["CreateAccount"] = "createAccount",
+            ["Approve"] = "approve",
+            ["Revoke"] = "revoke",
+            ["Sync"] = "sync",
+            ["SyncNative"] = "sync"
         };
 
         foreach (var (key, value) in mappings)
@@ -504,6 +764,7 @@ public class WinstonWorkerService : BackgroundService
                 return value;
         }
 
-        return "unknown";
+        // Return null if we can't infer - don't suggest "unknown"
+        return null;
     }
 }

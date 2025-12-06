@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using T16O.Services;
+using T16O.Services.Configuration;
 using T16O.Services.Monitoring;
 using T16O.Services.RabbitMQ;
 using T16O.Workers;
@@ -87,6 +88,10 @@ var assetFetcherOptions = new AssetFetcherOptions
 builder.Services.AddSingleton(transactionFetcherOptions);
 builder.Services.AddSingleton(assetFetcherOptions);
 
+// Create PathResolver for variable substitution in paths
+var pathResolver = new PathResolver(builder.Configuration);
+builder.Services.AddSingleton(pathResolver);
+
 // Configure PerformanceMonitor for InfluxDB metrics
 var influxDbEnabled = builder.Configuration.GetValue<bool>("InfluxDB:Enabled", true);
 PerformanceMonitor? performanceMonitor = null;
@@ -136,7 +141,10 @@ if (winstonEnabled)
     if (intervalSeconds <= 0) intervalSeconds = 3600; // Default 1 hour
     var patternLimit = builder.Configuration.GetValue<int>("Workers:Winston:PatternLimit");
     if (patternLimit <= 0) patternLimit = 100; // Default 100 patterns
-    var outputDirectory = builder.Configuration["Workers:Winston:OutputDirectory"] ?? "./sql";
+    var sqlSourceDirectory = pathResolver.Resolve(builder.Configuration["Workers:Winston:SqlSourceDirectory"] ?? "{Sql}");
+    var sqlOutputDirectory = pathResolver.Resolve(builder.Configuration["Workers:Winston:SqlOutputDirectory"] ?? "{Sql}");
+    Console.WriteLine($"[DEBUG] Winston SqlSourceDirectory: {sqlSourceDirectory}");
+    Console.WriteLine($"[DEBUG] Winston SqlOutputDirectory: {sqlOutputDirectory}");
 
     builder.Services.AddHostedService(sp =>
         new WinstonWorkerService(
@@ -144,7 +152,8 @@ if (winstonEnabled)
             sp.GetRequiredService<SolanaConfig>().AssetRpcUrls,
             intervalSeconds,
             patternLimit,
-            outputDirectory,
+            sqlSourceDirectory,
+            sqlOutputDirectory,
             sp.GetRequiredService<AssetFetcherOptions>(),
             sp.GetRequiredService<ILogger<WinstonWorkerService>>()
         ));
