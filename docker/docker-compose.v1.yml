@@ -1,0 +1,80 @@
+version: '3.8'
+
+# T16O V1 Infrastructure
+# Usage:
+#   Start:   docker-compose -f docker-compose.v1.yml up -d
+#   Stop:    docker-compose -f docker-compose.v1.yml down
+#   Logs:    docker-compose -f docker-compose.v1.yml logs -f
+#   Status:  docker-compose -f docker-compose.v1.yml ps
+#
+# NOTE: Does NOT create database schema - run SQL scripts manually after MySQL is ready
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: t16o_v1_mysql
+    restart: unless-stopped
+    ports:
+      - "3396:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: t16o_db
+    command: --binlog_expire_logs_seconds=259200
+    volumes:
+      - t16o_v1_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: t16o_v1_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5692:5672"    # AMQP
+      - "15692:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    volumes:
+      - t16o_v1_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: t16o_v1_influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin123456
+      DOCKER_INFLUXDB_INIT_ORG: t16o
+      DOCKER_INFLUXDB_INIT_BUCKET: metrics
+      DOCKER_INFLUXDB_INIT_RETENTION: 7d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: t16o-metrics-token
+    volumes:
+      - t16o_v1_influxdb_data:/var/lib/influxdb2
+      - t16o_v1_influxdb_config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  t16o_v1_mysql_data:
+    name: t16o_v1_mysql_data
+  t16o_v1_rabbitmq_data:
+    name: t16o_v1_rabbitmq_data
+  t16o_v1_influxdb_data:
+    name: t16o_v1_influxdb_data
+  t16o_v1_influxdb_config:
+    name: t16o_v1_influxdb_config
