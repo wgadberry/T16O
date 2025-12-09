@@ -41,14 +41,18 @@ public class SolscanClient : ISolscanClient
         _options = new SolscanOptions
         {
             ApiToken = apiToken,
-            BaseUrl = baseUrl ?? "https://pro-api.solscan.io/v2.0",
+            BaseUrl = baseUrl ?? "https://pro-api.solscan.io/v2.0/",
             TimeoutSeconds = timeoutSeconds
         };
         _jsonOptions = SolscanJsonOptions.Default;
 
-        _httpClient.BaseAddress = new Uri(_options.BaseUrl);
+        // Ensure base URL ends with slash for proper relative URL resolution
+        var baseUrlWithSlash = _options.BaseUrl.EndsWith("/") ? _options.BaseUrl : _options.BaseUrl + "/";
+        _httpClient.BaseAddress = new Uri(baseUrlWithSlash);
         _httpClient.Timeout = TimeSpan.FromSeconds(_options.TimeoutSeconds);
         _httpClient.DefaultRequestHeaders.Add("token", _options.ApiToken);
+
+        Console.WriteLine($"[SolscanClient] Initialized with base URL: {_httpClient.BaseAddress}");
     }
 
     #region Transaction APIs
@@ -258,15 +262,22 @@ public class SolscanClient : ISolscanClient
     {
         var json = await GetRawAsync(endpoint, queryParams, cancellationToken);
         if (string.IsNullOrEmpty(json))
+        {
+            Console.WriteLine($"[SolscanClient] GetRawAsync returned null/empty for {endpoint}");
             return null;
+        }
 
         try
         {
-            return JsonSerializer.Deserialize<SolscanApiResponse<T>>(json, _jsonOptions);
+            var result = JsonSerializer.Deserialize<SolscanApiResponse<T>>(json, _jsonOptions);
+            var hasData = result != null && result.Data != null;
+            Console.WriteLine($"[SolscanClient] Deserialized: Success={result?.Success}, HasData={hasData}");
+            return result;
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to deserialize response from {Endpoint}", endpoint);
+            Console.WriteLine($"[SolscanClient] Deserialization failed for {endpoint}: {ex.Message}");
+            Console.WriteLine($"[SolscanClient] JSON: {(json.Length > 300 ? json[..300] : json)}");
             return null;
         }
     }
@@ -279,28 +290,31 @@ public class SolscanClient : ISolscanClient
         try
         {
             var url = BuildUrl(endpoint, queryParams);
-            _logger?.LogDebug("GET {Url}", url);
+            Console.WriteLine($"[SolscanClient] GET {_httpClient.BaseAddress}{url}");
 
             var response = await _httpClient.GetAsync(url, cancellationToken);
+
+            Console.WriteLine($"[SolscanClient] Response: {response.StatusCode}");
 
             if (!response.IsSuccessStatusCode)
             {
                 var error = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger?.LogWarning("API returned {StatusCode} for {Endpoint}: {Error}",
-                    response.StatusCode, endpoint, error.Length > 200 ? error[..200] : error);
+                Console.WriteLine($"[SolscanClient] Error: {(error.Length > 200 ? error[..200] : error)}");
                 return null;
             }
 
-            return await response.Content.ReadAsStringAsync(cancellationToken);
+            var content = await response.Content.ReadAsStringAsync(cancellationToken);
+            Console.WriteLine($"[SolscanClient] Content length: {content.Length}");
+            return content;
         }
         catch (TaskCanceledException)
         {
-            _logger?.LogWarning("Request to {Endpoint} was cancelled or timed out", endpoint);
+            Console.WriteLine($"[SolscanClient] Request to {endpoint} was cancelled or timed out");
             return null;
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Error fetching {Endpoint}", endpoint);
+            Console.WriteLine($"[SolscanClient] Error fetching {endpoint}: {ex.Message}");
             return null;
         }
     }
@@ -311,17 +325,21 @@ public class SolscanClient : ISolscanClient
 
     private static string BuildUrl(string endpoint, Dictionary<string, string>? queryParams)
     {
+        // Remove leading slash - relative URLs must not start with /
+        // when using HttpClient.BaseAddress (otherwise it overrides the base path)
+        var relativeEndpoint = endpoint.TrimStart('/');
+
         if (queryParams == null || queryParams.Count == 0)
-            return endpoint;
+            return relativeEndpoint;
 
         // Check if endpoint already has query string
-        if (endpoint.Contains('?'))
-            return endpoint;
+        if (relativeEndpoint.Contains('?'))
+            return relativeEndpoint;
 
         var query = string.Join("&", queryParams.Select(kvp =>
             $"{Uri.EscapeDataString(kvp.Key)}={Uri.EscapeDataString(kvp.Value)}"));
 
-        return $"{endpoint}?{query}";
+        return $"{relativeEndpoint}?{query}";
     }
 
     private static int CoerceToValidLimit(int requestedLimit)

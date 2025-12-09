@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MySqlConnector;
 using T16O.Services;
+using T16O.Solscan;
 
 namespace T16O.Workers;
 
@@ -34,6 +35,7 @@ public class WinstonWorkerService : BackgroundService
     private readonly string _sqlOutputDirectory;
     private readonly ILogger<WinstonWorkerService> _logger;
     private readonly AssetFetcherOptions _assetFetcherOptions;
+    private readonly ISolscanClient? _solscanClient;
 
     public WinstonWorkerService(
         string connectionString,
@@ -53,6 +55,14 @@ public class WinstonWorkerService : BackgroundService
         _sqlOutputDirectory = sqlOutputDirectory;
         _assetFetcherOptions = assetFetcherOptions;
         _logger = logger;
+
+        // Initialize Solscan client if API token provided
+        if (!string.IsNullOrEmpty(assetFetcherOptions.SolscanApiToken))
+        {
+            _solscanClient = new SolscanClient(assetFetcherOptions.SolscanApiToken);
+            Console.WriteLine("[Winston] Solscan client initialized for address label resolution");
+        }
+
         Console.WriteLine("[Winston] Constructor called!");
     }
 
@@ -129,6 +139,12 @@ public class WinstonWorkerService : BackgroundService
     private async Task RunAnalysisAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("[Winston] Starting analysis cycle...");
+
+        // Step 0: Resolve missing address labels (ATAs, mints)
+        if (_solscanClient != null)
+        {
+            await ResolveAddressLabelsAsync(cancellationToken);
+        }
 
         // Step 1: Run sp_party_assess_unknown
         var assessment = await RunAssessmentAsync(cancellationToken);
@@ -306,6 +322,246 @@ public class WinstonWorkerService : BackgroundService
         {
             missingMints.Add(reader.GetString(0));
         }
+    }
+
+    /// <summary>
+    /// Resolve missing labels for addresses (ATAs and mints) using Solscan API.
+    /// For ATAs: looks up the funding transaction to find the underlying mint.
+    /// For mints: directly fetches token metadata.
+    /// </summary>
+    private async Task ResolveAddressLabelsAsync(CancellationToken cancellationToken)
+    {
+        if (_solscanClient == null)
+            return;
+
+        _logger.LogInformation("[Winston] Resolving missing address labels...");
+
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        // Get addresses needing label resolution (ATAs without labels)
+        var addressesToResolve = new List<(int id, string address, string addressType, string? parentMintAddress, string? parentLabel)>();
+
+        var sql = @"
+            SELECT
+                a.id,
+                a.address,
+                a.address_type,
+                parent.address AS parent_mint_address,
+                parent.label AS parent_label
+            FROM addresses a
+            LEFT JOIN addresses parent ON a.parent_id = parent.id
+            WHERE a.address_type = 'ata'
+              AND (a.label IS NULL OR a.label = '')
+            ORDER BY a.id DESC
+            LIMIT 50";
+
+        await using (var cmd = new MySqlCommand(sql, connection))
+        {
+            cmd.CommandTimeout = 30;
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                addressesToResolve.Add((
+                    reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4)
+                ));
+            }
+        }
+
+        if (addressesToResolve.Count == 0)
+        {
+            _logger.LogInformation("[Winston] No addresses need label resolution");
+            return;
+        }
+
+        _logger.LogInformation("[Winston] Found {Count} addresses needing label resolution", addressesToResolve.Count);
+
+        var resolvedCount = 0;
+        foreach (var (id, address, addressType, parentMintAddress, parentLabel) in addressesToResolve)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            try
+            {
+                string? label = null;
+                string? resolvedMintAddress = parentMintAddress;
+
+                // If parent already has a label, just copy it
+                if (!string.IsNullOrEmpty(parentLabel))
+                {
+                    label = parentLabel;
+                    _logger.LogDebug("[Winston] Using parent label for {Address}: {Label}", address, label);
+                }
+                // If parent mint is known but no label, fetch the mint's metadata
+                else if (!string.IsNullOrEmpty(parentMintAddress))
+                {
+                    var tokenMeta = await _solscanClient.GetTokenMetaAsync(parentMintAddress, cancellationToken);
+                    if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
+                    {
+                        label = tokenMeta.Symbol;
+                        _logger.LogDebug("[Winston] Resolved parent mint {Mint} -> {Label}", parentMintAddress, label);
+                    }
+                }
+                // No parent mint known - need to look up via account metadata and funding tx
+                else
+                {
+                    var resolved = await ResolveAtaViaFundingTxAsync(address, cancellationToken);
+                    if (resolved.HasValue)
+                    {
+                        label = resolved.Value.symbol;
+                        resolvedMintAddress = resolved.Value.mintAddress;
+                        _logger.LogDebug("[Winston] Resolved burned ATA {Address} -> mint {Mint} ({Label})",
+                            address, resolvedMintAddress, label);
+                    }
+                }
+
+                // Update the address with the resolved label
+                if (!string.IsNullOrEmpty(label))
+                {
+                    await UpdateAddressLabelAsync(address, label, resolvedMintAddress, connection, cancellationToken);
+                    resolvedCount++;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("[Winston] Failed to resolve address {Address}: {Error}", address, ex.Message);
+            }
+
+            // Rate limit to avoid hitting API limits
+            await Task.Delay(100, cancellationToken);
+        }
+
+        _logger.LogInformation("[Winston] Resolved {Resolved}/{Total} address labels",
+            resolvedCount, addressesToResolve.Count);
+    }
+
+    /// <summary>
+    /// Resolve an ATA's symbol by looking up its funding transaction.
+    /// For burned ATAs, the token_bal_change in the funding tx reveals the underlying mint.
+    /// </summary>
+    private async Task<(string mintAddress, string symbol)?> ResolveAtaViaFundingTxAsync(
+        string ataAddress,
+        CancellationToken cancellationToken)
+    {
+        if (_solscanClient == null)
+            return null;
+
+        try
+        {
+            // Step 1: Get account metadata to find funding transaction
+            var accountMeta = await _solscanClient.GetAccountMetadataAsync(ataAddress, cancellationToken);
+            if (accountMeta?.FundedBy?.TxHash == null)
+            {
+                _logger.LogDebug("[Winston] No funding tx found for {Address}", ataAddress);
+                return null;
+            }
+
+            var txHash = accountMeta.FundedBy.TxHash;
+            _logger.LogDebug("[Winston] Found funding tx for {Address}: {TxHash}", ataAddress, txHash);
+
+            // Step 2: Get transaction details to find token_bal_change
+            var txDetail = await _solscanClient.GetTransactionDetailAsync(txHash, cancellationToken);
+            if (txDetail?.TokenBalChange == null || txDetail.TokenBalChange.Count == 0)
+            {
+                _logger.LogDebug("[Winston] No token balance changes in funding tx {TxHash}", txHash);
+                return null;
+            }
+
+            // Step 3: Find the token balance change for our ATA
+            var ataBalChange = txDetail.TokenBalChange.FirstOrDefault(tbc =>
+                tbc.Address == ataAddress);
+
+            if (ataBalChange == null)
+            {
+                _logger.LogDebug("[Winston] ATA {Address} not found in token_bal_change", ataAddress);
+                return null;
+            }
+
+            var mintAddress = ataBalChange.GetTokenMint();
+            if (string.IsNullOrEmpty(mintAddress))
+            {
+                _logger.LogDebug("[Winston] No mint address in token_bal_change for {Address}", ataAddress);
+                return null;
+            }
+
+            _logger.LogDebug("[Winston] ATA {Address} was created for mint {Mint}", ataAddress, mintAddress);
+
+            // Step 4: Get the token metadata for the mint
+            var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintAddress, cancellationToken);
+            if (tokenMeta == null || string.IsNullOrEmpty(tokenMeta.Symbol))
+            {
+                _logger.LogDebug("[Winston] Token meta not found for mint {Mint}", mintAddress);
+                return null;
+            }
+
+            return (mintAddress, tokenMeta.Symbol);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[Winston] Error resolving ATA {Address}: {Error}", ataAddress, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Update an address with its resolved label and parent mint.
+    /// </summary>
+    private async Task UpdateAddressLabelAsync(
+        string address,
+        string label,
+        string? parentMintAddress,
+        MySqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        // If parent mint provided, ensure it exists and get/create its ID
+        int? parentId = null;
+        if (!string.IsNullOrEmpty(parentMintAddress))
+        {
+            // Check if parent mint exists
+            await using var checkCmd = new MySqlCommand(
+                "SELECT id FROM addresses WHERE address = @addr",
+                connection);
+            checkCmd.Parameters.AddWithValue("@addr", parentMintAddress);
+
+            var result = await checkCmd.ExecuteScalarAsync(cancellationToken);
+            if (result != null)
+            {
+                parentId = Convert.ToInt32(result);
+            }
+            else
+            {
+                // Create the mint address
+                await using var insertCmd = new MySqlCommand(
+                    "INSERT INTO addresses (address, address_type, label) VALUES (@addr, 'mint', @label); SELECT LAST_INSERT_ID();",
+                    connection);
+                insertCmd.Parameters.AddWithValue("@addr", parentMintAddress);
+                insertCmd.Parameters.AddWithValue("@label", label);
+                parentId = Convert.ToInt32(await insertCmd.ExecuteScalarAsync(cancellationToken));
+            }
+        }
+
+        // Update the ATA with label and parent
+        var updateSql = parentId.HasValue
+            ? "UPDATE addresses SET label = @label, parent_id = COALESCE(parent_id, @parentId) WHERE address = @addr"
+            : "UPDATE addresses SET label = @label WHERE address = @addr";
+
+        await using var updateCmd = new MySqlCommand(updateSql, connection);
+        updateCmd.Parameters.AddWithValue("@addr", address);
+        updateCmd.Parameters.AddWithValue("@label", label);
+        if (parentId.HasValue)
+        {
+            updateCmd.Parameters.AddWithValue("@parentId", parentId.Value);
+        }
+
+        await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        _logger.LogDebug("[Winston] Updated address {Address} with label '{Label}'{ParentInfo}",
+            address, label, parentId.HasValue ? $" and parent_id {parentId}" : "");
     }
 
     private async Task<Dictionary<string, (string? name, string? symbol)>> FetchMintInformationAsync(

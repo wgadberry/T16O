@@ -6,18 +6,39 @@ namespace T16O.Solscan.Models;
 public class SolscanTokenMeta
 {
     public string? Address { get; set; }
-    public string? Symbol { get; set; }
     public string? Name { get; set; }
-    public int? Decimals { get; set; }
-    public decimal? Supply { get; set; }
+    public string? Symbol { get; set; }
     public string? Icon { get; set; }
-    public decimal? Price { get; set; }
-    public decimal? MarketCap { get; set; }
-    public decimal? PriceChange24h { get; set; }
-    public decimal? Volume24h { get; set; }
-    public string? Holder { get; set; }
+    public int? Decimals { get; set; }
+    public int? Holder { get; set; }
     public string? Creator { get; set; }
-    public long? CreateTx { get; set; }
+    public string? CreateTx { get; set; }
+    public long? CreatedTime { get; set; }
+    public SolscanTokenMetadata? Metadata { get; set; }
+    public string? MetadataUri { get; set; }
+    public string? MintAuthority { get; set; }
+    public string? FreezeAuthority { get; set; }
+    public string? Supply { get; set; }
+    public decimal? Price { get; set; }
+    public decimal? Volume24h { get; set; }
+    public decimal? MarketCap { get; set; }
+    public int? MarketCapRank { get; set; }
+    public decimal? PriceChange24h { get; set; }
+    public decimal? TotalDexVol24h { get; set; }
+    public decimal? DexVolChange24h { get; set; }
+}
+
+/// <summary>
+/// Nested metadata within token meta response.
+/// </summary>
+public class SolscanTokenMetadata
+{
+    public string? Name { get; set; }
+    public string? Image { get; set; }
+    public string? Symbol { get; set; }
+    public string? Description { get; set; }
+    public string? Twitter { get; set; }
+    public string? Website { get; set; }
 }
 
 /// <summary>
@@ -83,8 +104,23 @@ public class SolscanDefiActivity
     public string? FromAddress { get; set; }
     public string? ToAddress { get; set; }
     public List<string>? Sources { get; set; }
-    public string? Platform { get; set; }
+    public List<string>? Platform { get; set; }
     public SolscanAmountInfo? AmountInfo { get; set; }
+    public decimal? Value { get; set; }
+    public SolscanRouterInfo? Routers { get; set; }
+}
+
+/// <summary>
+/// Router info in DeFi activity (different structure from pool routers).
+/// </summary>
+public class SolscanRouterInfo
+{
+    public string? Token1 { get; set; }
+    public int? Token1Decimals { get; set; }
+    public decimal? Amount1 { get; set; }
+    public string? Token2 { get; set; }
+    public int? Token2Decimals { get; set; }
+    public decimal? Amount2 { get; set; }
 }
 
 /// <summary>

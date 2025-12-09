@@ -63,6 +63,26 @@ public class SolscanTokenBalanceChange
     public object? ChangeAmount { get; set; }
 
     /// <summary>
+    /// Type of change: "inc", "dec", etc.
+    /// </summary>
+    public string? ChangeType { get; set; }
+
+    /// <summary>
+    /// Event type: "create_account", "transfer", etc.
+    /// </summary>
+    public string? EventType { get; set; }
+
+    /// <summary>
+    /// Owner address after the transaction.
+    /// </summary>
+    public string? PostOwner { get; set; }
+
+    /// <summary>
+    /// Owner address before the transaction.
+    /// </summary>
+    public string? PreOwner { get; set; }
+
+    /// <summary>
     /// Gets the token mint address from either field.
     /// </summary>
     public string? GetTokenMint() => Token ?? TokenAddress;

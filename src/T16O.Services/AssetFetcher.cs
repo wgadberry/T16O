@@ -327,11 +327,21 @@ public class AssetFetcher
             // Try token metadata first (for mint addresses)
             try
             {
+                Console.WriteLine($"[AssetFetcher] Trying token meta for: {address}");
                 var tokenMeta = await _solscanClient.GetTokenMetaAsync(address, cancellationToken);
-                if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
+
+                if (tokenMeta == null)
                 {
-                    Console.WriteLine($"[AssetFetcher] Resolved symbol from Solscan token meta: {address} -> {tokenMeta.Symbol}");
-                    return tokenMeta.Symbol;
+                    Console.WriteLine($"[AssetFetcher] Token meta returned null for: {address}");
+                }
+                else
+                {
+                    Console.WriteLine($"[AssetFetcher] Token meta result: Name={tokenMeta.Name ?? "null"}, Symbol={tokenMeta.Symbol ?? "null"}");
+                    if (!string.IsNullOrEmpty(tokenMeta.Symbol))
+                    {
+                        Console.WriteLine($"[AssetFetcher] Resolved symbol from Solscan token meta: {address} -> {tokenMeta.Symbol}");
+                        return tokenMeta.Symbol;
+                    }
                 }
             }
             catch (Exception ex)
@@ -364,26 +374,23 @@ public class AssetFetcher
                         return accountMeta.TokenSymbol;
                     }
 
-                    // If we have funded_by and block_time, try to resolve via DeFi activities
-                    if (!string.IsNullOrEmpty(fundedByAddr) &&
-                        !string.IsNullOrEmpty(txHash) &&
-                        blockTime.HasValue)
+                    // If we have tx_hash, look up the funding transaction to find the token mint
+                    if (!string.IsNullOrEmpty(txHash))
                     {
-                        Console.WriteLine($"[AssetFetcher] Trying DeFi activity lookup for ATA...");
-                        var ataSymbol = await ResolveAtaSymbolViaDefiActivityAsync(
-                            fundedByAddr,
+                        Console.WriteLine($"[AssetFetcher] Trying funding tx lookup for burned ATA...");
+                        var ataSymbol = await ResolveAtaSymbolViaFundingTxAsync(
+                            address,
                             txHash,
-                            blockTime.Value,
                             cancellationToken);
 
                         if (!string.IsNullOrEmpty(ataSymbol))
                         {
-                            Console.WriteLine($"[AssetFetcher] Resolved ATA symbol via DeFi activity: {address} -> {ataSymbol}");
+                            Console.WriteLine($"[AssetFetcher] Resolved burned ATA symbol via funding tx: {address} -> {ataSymbol}");
                             return ataSymbol;
                         }
                         else
                         {
-                            Console.WriteLine($"[AssetFetcher] DeFi activity lookup returned no symbol");
+                            Console.WriteLine($"[AssetFetcher] Funding tx lookup returned no symbol");
                         }
                     }
 
@@ -405,12 +412,12 @@ public class AssetFetcher
     }
 
     /// <summary>
-    /// Resolve ATA symbol by looking up the DeFi activity that created the ATA.
+    /// Resolve ATA symbol by looking up the funding transaction to find the token mint.
+    /// For burned ATAs, the token_bal_change in the funding tx shows which token the ATA was created for.
     /// </summary>
-    private async Task<string?> ResolveAtaSymbolViaDefiActivityAsync(
-        string fundedBy,
+    private async Task<string?> ResolveAtaSymbolViaFundingTxAsync(
+        string ataAddress,
         string txHash,
-        long blockTime,
         CancellationToken cancellationToken)
     {
         if (_solscanClient == null)
@@ -418,45 +425,54 @@ public class AssetFetcher
 
         try
         {
-            // Get DeFi activities for the funder at the exact block time
-            var activities = await _solscanClient.GetAccountDefiActivitiesAsync(
-                fundedBy,
-                blockTime,
-                blockTime,
-                cancellationToken);
+            Console.WriteLine($"[AssetFetcher] Looking up funding transaction: {txHash}");
 
-            Console.WriteLine($"[AssetFetcher] Found {activities.Count} DeFi activities for {fundedBy} at block time {blockTime}");
+            // Get the funding transaction details
+            var txDetail = await _solscanClient.GetTransactionDetailAsync(txHash, cancellationToken);
 
-            // Find the activity matching the tx_hash
-            var swapActivity = activities.FirstOrDefault(a =>
-                a.TransId == txHash &&
-                a.FromAddress == fundedBy);
-
-            if (swapActivity?.AmountInfo != null)
+            if (txDetail?.TokenBalChange == null || txDetail.TokenBalChange.Count == 0)
             {
-                // Token2 is the output token (token received in swap)
-                var outputTokenMint = swapActivity.AmountInfo.Token2;
-                Console.WriteLine($"[AssetFetcher] Swap activity found: {swapActivity.ActivityType}, output token: {outputTokenMint}");
+                Console.WriteLine($"[AssetFetcher] No token balance changes in funding tx");
+                return null;
+            }
 
-                if (!string.IsNullOrEmpty(outputTokenMint))
-                {
-                    // Now resolve the output token mint to get its symbol
-                    var tokenMeta = await _solscanClient.GetTokenMetaAsync(outputTokenMint, cancellationToken);
-                    if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
-                    {
-                        Console.WriteLine($"[AssetFetcher] Resolved output token symbol: {tokenMeta.Symbol}");
-                        return tokenMeta.Symbol;
-                    }
-                }
+            Console.WriteLine($"[AssetFetcher] Found {txDetail.TokenBalChange.Count} token balance changes");
+
+            // Find the token balance change where the address matches our ATA
+            // This tells us what token mint the ATA was created for
+            var ataBalChange = txDetail.TokenBalChange.FirstOrDefault(tbc =>
+                tbc.Address == ataAddress);
+
+            if (ataBalChange == null)
+            {
+                Console.WriteLine($"[AssetFetcher] No token balance change found for ATA {ataAddress}");
+                return null;
+            }
+
+            var tokenMint = ataBalChange.GetTokenMint();
+            Console.WriteLine($"[AssetFetcher] ATA {ataAddress} was created for token mint: {tokenMint}, event_type: {ataBalChange.EventType}");
+
+            if (string.IsNullOrEmpty(tokenMint))
+            {
+                Console.WriteLine($"[AssetFetcher] Token mint is null/empty");
+                return null;
+            }
+
+            // Now get the token metadata to get the symbol
+            var tokenMeta = await _solscanClient.GetTokenMetaAsync(tokenMint, cancellationToken);
+            if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
+            {
+                Console.WriteLine($"[AssetFetcher] Resolved token symbol: {tokenMeta.Symbol}");
+                return tokenMeta.Symbol;
             }
             else
             {
-                Console.WriteLine($"[AssetFetcher] No matching swap activity found for tx {txHash}");
+                Console.WriteLine($"[AssetFetcher] Token meta returned no symbol for {tokenMint}");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[AssetFetcher] DeFi activity lookup failed for {fundedBy}: {ex.Message}");
+            Console.WriteLine($"[AssetFetcher] Funding tx lookup failed: {ex.Message}");
         }
 
         return null;

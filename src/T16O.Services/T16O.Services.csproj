@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\T16O.Models\T16O.Models.csproj" />
     <ProjectReference Include="..\T16O.Utilities\T16O.Utilities.csproj" />
+    <ProjectReference Include="..\T16O.Workers\T16O.Solscan\T16O.Solscan.csproj" />
     <ProjectReference Include="..\..\Solnet\src\Solnet.Rpc\Solnet.Rpc.csproj" />
     <ProjectReference Include="..\..\Solnet\src\Solnet.Programs\Solnet.Programs.csproj" />
     <ProjectReference Include="..\..\Solnet\src\Solnet.Wallet\Solnet.Wallet.csproj" />
