@@ -10,7 +10,8 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using T16O.Models;
-using T16O.Services.Fallback;
+using T16O.Solscan;
+using T16O.Solscan.Models;
 
 namespace T16O.Services;
 
@@ -25,14 +26,8 @@ public class AssetFetcher
     private readonly AssetFetcherOptions _options;
 
     // Fallback fetchers (lazy initialized)
-    private MintInfoFetcher? _mintInfoFetcher;
-    private MetaplexMetadataFetcher? _metaplexFetcher;
-    private MeteoraPoolFetcher? _meteoraFetcher;
-    private LifinityPoolFetcher? _lifinityFetcher;
-    private MeteoraCpammFetcher? _meteoraCpammFetcher;
-    private PumpSwapPoolFetcher? _pumpSwapFetcher;
-    private PoolFetcher? _poolFetcher;
     private AssetDatabaseReader? _assetDbReader;
+    private ISolscanClient? _solscanClient;
 
     /// <summary>
     /// Initialize the AssetFetcher with RPC endpoints
@@ -50,19 +45,17 @@ public class AssetFetcher
         // Initialize fallback fetchers if enabled
         if (_options.EnableFallbackChain)
         {
-            var primaryRpcUrl = rpcUrls[0];
-            _mintInfoFetcher = new MintInfoFetcher(primaryRpcUrl);
-            _metaplexFetcher = new MetaplexMetadataFetcher(primaryRpcUrl);
-            _lifinityFetcher = new LifinityPoolFetcher(primaryRpcUrl);
-            _meteoraCpammFetcher = new MeteoraCpammFetcher(primaryRpcUrl);
-            _pumpSwapFetcher = new PumpSwapPoolFetcher(primaryRpcUrl);
-            _meteoraFetcher = new MeteoraPoolFetcher(); // Re-enabled for DAMM/DLMM API support
-
-            // Initialize pool cache and asset reader if connection string provided
+            // Initialize asset reader if connection string provided
             if (!string.IsNullOrEmpty(_options.DatabaseConnectionString))
             {
-                _poolFetcher = new PoolFetcher(_options.DatabaseConnectionString);
                 _assetDbReader = new AssetDatabaseReader(_options.DatabaseConnectionString);
+            }
+
+            // Initialize Solscan client if API token provided
+            if (!string.IsNullOrEmpty(_options.SolscanApiToken))
+            {
+                _solscanClient = new SolscanClient(_options.SolscanApiToken);
+                Console.WriteLine("[AssetFetcher] Solscan fallback enabled for token resolution");
             }
         }
     }
@@ -171,40 +164,14 @@ public class AssetFetcher
     }
 
     /// <summary>
-    /// Fetch asset using fallback chain when Helius doesn't have data.
-    /// Tries: Helius → Solana RPC (mint info) → Metaplex → Jupiter → Raydium (for LP tokens)
+    /// Fetch asset using Solscan API directly (Helius disabled).
     /// </summary>
     public async Task<AssetFetchResult> FetchAssetWithFallbackAsync(
         string mintAddress,
         CancellationToken cancellationToken = default)
     {
-        // Try Helius first
-        var heliusResult = await FetchAssetFromHeliusAsync(_httpClients[0].client, _httpClients[0].url, mintAddress, cancellationToken);
-
-        if (heliusResult.Success && heliusResult.AssetData.HasValue)
-        {
-            // Check if Helius returned meaningful metadata (name/symbol)
-            var hasMetadata = HasMeaningfulMetadata(heliusResult.AssetData.Value);
-            if (hasMetadata)
-            {
-                return heliusResult;
-            }
-
-            // Helius returned "success" but without meaningful metadata - try fallback
-            Console.WriteLine($"[AssetFetcher] Helius returned incomplete data for {mintAddress}, trying fallback chain...");
-        }
-        else
-        {
-            Console.WriteLine($"[AssetFetcher] Helius failed for {mintAddress}: {heliusResult.Error}");
-        }
-
-        // Helius failed or incomplete - try fallback chain
-        if (!_options.EnableFallbackChain)
-        {
-            return heliusResult; // Return original result if fallbacks disabled
-        }
-
-        return await FetchFromFallbackChainAsync(mintAddress, heliusResult.Error, cancellationToken);
+        // Go directly to Solscan fallback
+        return await FetchFromFallbackChainAsync(mintAddress, null, cancellationToken);
     }
 
     /// <summary>
@@ -253,7 +220,8 @@ public class AssetFetcher
     }
 
     /// <summary>
-    /// Fetch asset data from fallback sources and build a combined result
+    /// Fetch asset data from fallback sources and build a combined result.
+    /// Uses Solscan API as the primary fallback source.
     /// </summary>
     private async Task<AssetFetchResult> FetchFromFallbackChainAsync(
         string mintAddress,
@@ -262,483 +230,35 @@ public class AssetFetcher
     {
         var sources = new List<string>();
         var combinedData = new JsonObject();
+        combinedData["id"] = mintAddress;
 
-        // Level 2: Solana RPC getAccountInfo (basic mint info)
-        MintInfo? mintInfo = null;
-        if (_mintInfoFetcher != null)
+        Console.WriteLine($"[AssetFetcher] Starting Solscan fallback for: {mintAddress}");
+
+        // Try to resolve via Solscan
+        if (_solscanClient != null)
         {
-            mintInfo = await _mintInfoFetcher.GetMintInfoAsync(mintAddress, cancellationToken);
-            if (mintInfo != null)
+            var resolvedSymbol = await ResolveTokenSymbolAsync(mintAddress, cancellationToken);
+
+            if (!string.IsNullOrEmpty(resolvedSymbol))
             {
-                sources.Add("solana-rpc");
-                combinedData["id"] = mintAddress;
-                combinedData["token_info"] = new JsonObject
-                {
-                    ["decimals"] = mintInfo.Decimals,
-                    ["supply"] = mintInfo.Supply,
-                    ["mint_authority"] = mintInfo.MintAuthority,
-                    ["freeze_authority"] = mintInfo.FreezeAuthority
-                };
-                combinedData["is_token_2022"] = mintInfo.IsToken2022;
-                combinedData["is_lp_token"] = mintInfo.IsLpToken;
-                if (mintInfo.AmmProgram != null)
-                    combinedData["amm_program"] = mintInfo.AmmProgram;
-                if (mintInfo.PoolAddress != null)
-                    combinedData["pool_address"] = mintInfo.PoolAddress;
-                if (mintInfo.TokenAMint != null)
-                    combinedData["token_a_mint"] = mintInfo.TokenAMint;
-                if (mintInfo.TokenBMint != null)
-                    combinedData["token_b_mint"] = mintInfo.TokenBMint;
-            }
-        }
-
-        // Level 2.5: Local pool cache (fast lookup for LP tokens)
-        PoolInfo? poolInfo = null;
-        if (_poolFetcher != null)
-        {
-            poolInfo = await _poolFetcher.GetByLpMintAsync(mintAddress, cancellationToken);
-            if (poolInfo != null)
-            {
-                sources.Add("pool-cache");
-                combinedData["is_lp_token"] = true;
-                combinedData["amm_program"] = poolInfo.ProgramId;
-                combinedData["pool_address"] = poolInfo.PoolAddress;
-                combinedData["token_a_mint"] = poolInfo.TokenAMint;
-                if (poolInfo.TokenBMint != null)
-                    combinedData["token_b_mint"] = poolInfo.TokenBMint;
-
-                combinedData["pool_info"] = new JsonObject
-                {
-                    ["pool_address"] = poolInfo.PoolAddress,
-                    ["pool_type"] = poolInfo.PoolType,
-                    ["program_id"] = poolInfo.ProgramId,
-                    ["dex_name"] = poolInfo.DexName
-                };
-
-                // Resolve missing token symbols using Metaplex if needed
-                if (_metaplexFetcher != null &&
-                    (string.IsNullOrWhiteSpace(poolInfo.TokenASymbol) || string.IsNullOrWhiteSpace(poolInfo.TokenBSymbol)) &&
-                    !string.IsNullOrWhiteSpace(poolInfo.TokenAMint))
-                {
-                    var symbolTasks = new List<Task<MetaplexMetadata?>>();
-
-                    if (string.IsNullOrWhiteSpace(poolInfo.TokenASymbol) && !string.IsNullOrWhiteSpace(poolInfo.TokenAMint))
-                        symbolTasks.Add(_metaplexFetcher.GetMetadataAsync(poolInfo.TokenAMint, cancellationToken));
-                    else
-                        symbolTasks.Add(Task.FromResult<MetaplexMetadata?>(null));
-
-                    if (string.IsNullOrWhiteSpace(poolInfo.TokenBSymbol) && !string.IsNullOrWhiteSpace(poolInfo.TokenBMint))
-                        symbolTasks.Add(_metaplexFetcher.GetMetadataAsync(poolInfo.TokenBMint, cancellationToken));
-                    else
-                        symbolTasks.Add(Task.FromResult<MetaplexMetadata?>(null));
-
-                    var symbolResults = await Task.WhenAll(symbolTasks);
-
-                    if (string.IsNullOrWhiteSpace(poolInfo.TokenASymbol) && symbolResults[0] != null)
-                        poolInfo.TokenASymbol = symbolResults[0]!.Symbol ?? ShortenAddress(poolInfo.TokenAMint);
-
-                    if (string.IsNullOrWhiteSpace(poolInfo.TokenBSymbol) && symbolResults.Length > 1 && symbolResults[1] != null)
-                        poolInfo.TokenBSymbol = symbolResults[1]!.Symbol ?? ShortenAddress(poolInfo.TokenBMint);
-
-                    Console.WriteLine($"[AssetFetcher] Resolved pool token symbols: {poolInfo.TokenASymbol}/{poolInfo.TokenBSymbol}");
-                }
-
-                // If we have token symbols, set the LP name right away
-                if (!string.IsNullOrWhiteSpace(poolInfo.TokenASymbol) || !string.IsNullOrWhiteSpace(poolInfo.PoolName))
-                {
-                    EnsureContentMetadata(combinedData);
-                    var metadata = (JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!;
-                    metadata["name"] = PoolFetcher.GetLpDisplayName(poolInfo);
-
-                    if (!string.IsNullOrWhiteSpace(poolInfo.TokenASymbol) && !string.IsNullOrWhiteSpace(poolInfo.TokenBSymbol))
-                        metadata["symbol"] = $"{poolInfo.TokenASymbol}/{poolInfo.TokenBSymbol}";
-                }
-
-                if (!string.IsNullOrWhiteSpace(poolInfo.TokenASymbol))
-                {
-                    combinedData["token_a"] = new JsonObject
-                    {
-                        ["address"] = poolInfo.TokenAMint,
-                        ["symbol"] = poolInfo.TokenASymbol
-                    };
-                }
-
-                if (!string.IsNullOrWhiteSpace(poolInfo.TokenBMint))
-                {
-                    combinedData["token_b"] = new JsonObject
-                    {
-                        ["address"] = poolInfo.TokenBMint,
-                        ["symbol"] = poolInfo.TokenBSymbol
-                    };
-                }
-
-                Console.WriteLine($"[AssetFetcher] Pool cache hit for {mintAddress}: {PoolFetcher.GetLpDisplayName(poolInfo)}");
-            }
-        }
-
-        // Level 3: Metaplex on-chain metadata
-        // Only use Metaplex data if it has meaningful name/symbol AND pool cache didn't already provide better data
-        if (_metaplexFetcher != null)
-        {
-            var metaplex = await _metaplexFetcher.GetMetadataAsync(mintAddress, cancellationToken);
-            if (metaplex != null)
-            {
-                var hasMetaplexName = !string.IsNullOrWhiteSpace(metaplex.Name);
-                var hasMetaplexSymbol = !string.IsNullOrWhiteSpace(metaplex.Symbol);
-
-                // Check if we already have a meaningful name from pool cache
-                var hasPoolCacheName = combinedData.ContainsKey("content") &&
-                    ((JsonObject)combinedData["content"]!).ContainsKey("metadata") &&
-                    !string.IsNullOrEmpty(((JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!)["name"]?.ToString());
-
-                // Skip Metaplex name/symbol if it's generic LP token metadata
-                var genericLpNames = new[] { "Meteora LP", "MLP", "Raydium LP", "LP Token" };
-                var isGenericMetaplex = (hasMetaplexName && genericLpNames.Any(g =>
-                    metaplex.Name!.Equals(g, StringComparison.OrdinalIgnoreCase))) ||
-                    (hasMetaplexSymbol && genericLpNames.Any(g =>
-                    metaplex.Symbol!.Equals(g, StringComparison.OrdinalIgnoreCase)));
-
-                // Only use Metaplex data if it has meaningful (non-generic) content and doesn't override pool cache
-                if ((hasMetaplexName || hasMetaplexSymbol) && !isGenericMetaplex && !hasPoolCacheName)
-                {
-                    sources.Add("metaplex");
-                    EnsureContentMetadata(combinedData);
-                    var content = (JsonObject)combinedData["content"]!;
-                    var metadata = (JsonObject)content["metadata"]!;
-
-                    // Only set name/symbol if they're actually present
-                    if (hasMetaplexName)
-                        metadata["name"] = metaplex.Name;
-                    if (hasMetaplexSymbol)
-                        metadata["symbol"] = metaplex.Symbol;
-                    if (!string.IsNullOrEmpty(metaplex.Uri))
-                        content["json_uri"] = metaplex.Uri;
-                }
-                else if (isGenericMetaplex && hasPoolCacheName)
-                {
-                    Console.WriteLine($"[AssetFetcher] Skipping generic Metaplex metadata '{metaplex.Name}' in favor of pool cache");
-                }
-
-                if (!string.IsNullOrEmpty(metaplex.UpdateAuthority))
-                    combinedData["update_authority"] = metaplex.UpdateAuthority;
-            }
-        }
-
-        // === SLOW FALLBACKS (disabled by default for performance) ===
-        // These make external API calls or parse on-chain data which can be slow
-        if (_options.EnableSlowFallbacks)
-        {
-            // Level 4: Meteora API (for LP tokens)
-            var needsMoreData = !combinedData.ContainsKey("content") ||
-                            !((JsonObject)combinedData["content"]!).ContainsKey("metadata") ||
-                            string.IsNullOrEmpty(((JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!)["name"]?.ToString());
-
-            if (_meteoraFetcher != null && needsMoreData)
-            {
-                var meteora = await _meteoraFetcher.GetPoolByLpMintAsync(mintAddress, cancellationToken);
-                if (meteora != null)
-                {
-                    sources.Add("meteora");
-
-                    // Resolve missing token symbols using Metaplex metadata
-                    await ResolveMeteoraTokenSymbolsAsync(meteora, cancellationToken);
-
-                    // Add Meteora LP-specific data
-                    EnsureContentMetadata(combinedData);
-                    var content = (JsonObject)combinedData["content"]!;
-                    var metadata = (JsonObject)content["metadata"]!;
-
-                    if (!string.IsNullOrEmpty(meteora.LpMintName))
-                        metadata["name"] = meteora.LpMintName;
-                    if (!string.IsNullOrEmpty(meteora.LpMintSymbol))
-                        metadata["symbol"] = meteora.LpMintSymbol;
-
-                    combinedData["is_lp_token"] = true;
-                    combinedData["amm_program"] = meteora.PoolType;
-
-                    combinedData["pool_info"] = new JsonObject
-                    {
-                        ["pool_address"] = meteora.PoolAddress,
-                        ["pool_type"] = meteora.PoolType,
-                        ["program_id"] = meteora.ProgramId,
-                        ["tvl"] = meteora.Tvl,
-                        ["volume_24h"] = meteora.Volume24h,
-                        ["fees_24h"] = meteora.Fees24h
-                    };
-
-                    if (meteora.MintA != null)
-                    {
-                        combinedData["token_a"] = new JsonObject
-                        {
-                            ["address"] = meteora.MintA.Address,
-                            ["symbol"] = meteora.MintA.Symbol,
-                            ["name"] = meteora.MintA.Name,
-                            ["decimals"] = meteora.MintA.Decimals,
-                            ["logo_uri"] = meteora.MintA.LogoUri
-                        };
-                    }
-
-                    if (meteora.MintB != null)
-                    {
-                        combinedData["token_b"] = new JsonObject
-                        {
-                            ["address"] = meteora.MintB.Address,
-                            ["symbol"] = meteora.MintB.Symbol,
-                            ["name"] = meteora.MintB.Name,
-                            ["decimals"] = meteora.MintB.Decimals,
-                            ["logo_uri"] = meteora.MintB.LogoUri
-                        };
-                    }
-                }
-            }
-
-            // Level 5: Lifinity (on-chain pool data)
-            needsMoreData = !combinedData.ContainsKey("content") ||
-                            !((JsonObject)combinedData["content"]!).ContainsKey("metadata") ||
-                            string.IsNullOrEmpty(((JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!)["name"]?.ToString());
-
-            if (_lifinityFetcher != null && needsMoreData)
-            {
-                var lifinity = await _lifinityFetcher.GetPoolByLpMintAsync(mintAddress, cancellationToken);
-                if (lifinity != null)
-                {
-                    sources.Add("lifinity");
-
-                    // Resolve token symbols - check local DB first, then fallback to Metaplex
-                    lifinity.TokenASymbol = await ResolveTokenSymbolAsync(lifinity.TokenAMint, cancellationToken);
-                    lifinity.TokenBSymbol = await ResolveTokenSymbolAsync(lifinity.TokenBMint, cancellationToken);
-
-                    // Add Lifinity LP-specific data
-                    EnsureContentMetadata(combinedData);
-                    var content = (JsonObject)combinedData["content"]!;
-                    var metadata = (JsonObject)content["metadata"]!;
-
-                    metadata["name"] = lifinity.GetLpName();
-                    metadata["symbol"] = lifinity.GetLpSymbol();
-
-                    combinedData["is_lp_token"] = true;
-                    combinedData["amm_program"] = lifinity.PoolType;
-
-                    combinedData["pool_info"] = new JsonObject
-                    {
-                        ["pool_address"] = lifinity.PoolAddress,
-                        ["pool_type"] = lifinity.PoolType,
-                        ["program_id"] = lifinity.ProgramId
-                    };
-
-                    combinedData["token_a"] = new JsonObject
-                    {
-                        ["address"] = lifinity.TokenAMint,
-                        ["symbol"] = lifinity.TokenASymbol
-                    };
-
-                    combinedData["token_b"] = new JsonObject
-                    {
-                        ["address"] = lifinity.TokenBMint,
-                        ["symbol"] = lifinity.TokenBSymbol
-                    };
-
-                    // On-demand discovery: save to pool cache for future lookups
-                    if (_poolFetcher != null)
-                    {
-                        var discoveredPool = new PoolInfo
-                        {
-                            LpMint = mintAddress,
-                            PoolAddress = lifinity.PoolAddress,
-                            ProgramId = lifinity.ProgramId,
-                            DexName = "Lifinity",
-                            PoolType = lifinity.PoolType,
-                            TokenAMint = lifinity.TokenAMint,
-                            TokenBMint = lifinity.TokenBMint,
-                            TokenASymbol = lifinity.TokenASymbol,
-                            TokenBSymbol = lifinity.TokenBSymbol
-                        };
-                        _ = _poolFetcher.UpsertPoolAsync(discoveredPool, cancellationToken);
-                        Console.WriteLine($"[AssetFetcher] Cached discovered Lifinity pool: {mintAddress}");
-                    }
-                }
-            }
-
-            // Level 6: Meteora CPAMM (on-chain pool data)
-            needsMoreData = !combinedData.ContainsKey("content") ||
-                            !((JsonObject)combinedData["content"]!).ContainsKey("metadata") ||
-                            string.IsNullOrEmpty(((JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!)["name"]?.ToString());
-
-            if (_meteoraCpammFetcher != null && needsMoreData)
-            {
-                var meteora = await _meteoraCpammFetcher.GetPoolByLpMintAsync(mintAddress, cancellationToken);
-                if (meteora != null)
-                {
-                    sources.Add("meteora-cpamm");
-
-                    // Resolve token symbols - check local DB first, then fallback to Metaplex
-                    meteora.TokenASymbol = await ResolveTokenSymbolAsync(meteora.TokenAMint, cancellationToken);
-                    meteora.TokenBSymbol = await ResolveTokenSymbolAsync(meteora.TokenBMint, cancellationToken);
-
-                    // Add Meteora LP-specific data
-                    EnsureContentMetadata(combinedData);
-                    var content = (JsonObject)combinedData["content"]!;
-                    var metadata = (JsonObject)content["metadata"]!;
-
-                    metadata["name"] = meteora.GetLpName();
-                    metadata["symbol"] = meteora.GetLpSymbol();
-
-                    combinedData["is_lp_token"] = true;
-                    combinedData["amm_program"] = meteora.PoolType;
-
-                    combinedData["pool_info"] = new JsonObject
-                    {
-                        ["pool_address"] = meteora.PoolAddress,
-                        ["pool_type"] = meteora.PoolType,
-                        ["program_id"] = meteora.ProgramId
-                    };
-
-                    combinedData["token_a"] = new JsonObject
-                    {
-                        ["address"] = meteora.TokenAMint,
-                        ["symbol"] = meteora.TokenASymbol
-                    };
-
-                    combinedData["token_b"] = new JsonObject
-                    {
-                        ["address"] = meteora.TokenBMint,
-                        ["symbol"] = meteora.TokenBSymbol
-                    };
-
-                    // On-demand discovery: save to pool cache for future lookups
-                    if (_poolFetcher != null)
-                    {
-                        var discoveredPool = new PoolInfo
-                        {
-                            LpMint = mintAddress,
-                            PoolAddress = meteora.PoolAddress,
-                            ProgramId = meteora.ProgramId,
-                            DexName = "Meteora",
-                            PoolType = meteora.PoolType,
-                            TokenAMint = meteora.TokenAMint,
-                            TokenBMint = meteora.TokenBMint,
-                            TokenASymbol = meteora.TokenASymbol,
-                            TokenBSymbol = meteora.TokenBSymbol
-                        };
-                        _ = _poolFetcher.UpsertPoolAsync(discoveredPool, cancellationToken);
-                        Console.WriteLine($"[AssetFetcher] Cached discovered Meteora CPAMM pool: {mintAddress}");
-                    }
-                }
-            }
-
-            // Level 7: PumpSwap (on-chain pool data)
-            needsMoreData = !combinedData.ContainsKey("content") ||
-                            !((JsonObject)combinedData["content"]!).ContainsKey("metadata") ||
-                            string.IsNullOrEmpty(((JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!)["name"]?.ToString());
-
-            if (_pumpSwapFetcher != null && needsMoreData)
-            {
-                var pumpSwap = await _pumpSwapFetcher.GetPoolByLpMintAsync(mintAddress, cancellationToken);
-                if (pumpSwap != null)
-                {
-                    sources.Add("pumpswap");
-
-                    // Resolve token symbols - check local DB first, then fallback to Metaplex
-                    pumpSwap.BaseSymbol = await ResolveTokenSymbolAsync(pumpSwap.BaseMint, cancellationToken);
-                    pumpSwap.QuoteSymbol = await ResolveTokenSymbolAsync(pumpSwap.QuoteMint, cancellationToken);
-
-                    // Add PumpSwap LP-specific data
-                    EnsureContentMetadata(combinedData);
-                    var content = (JsonObject)combinedData["content"]!;
-                    var metadata = (JsonObject)content["metadata"]!;
-
-                    metadata["name"] = pumpSwap.GetLpName();
-                    metadata["symbol"] = pumpSwap.GetLpSymbol();
-
-                    combinedData["is_lp_token"] = true;
-                    combinedData["amm_program"] = pumpSwap.PoolType;
-
-                    combinedData["pool_info"] = new JsonObject
-                    {
-                        ["pool_address"] = pumpSwap.PoolAddress,
-                        ["pool_type"] = pumpSwap.PoolType,
-                        ["program_id"] = pumpSwap.ProgramId
-                    };
-
-                    combinedData["token_a"] = new JsonObject
-                    {
-                        ["address"] = pumpSwap.BaseMint,
-                        ["symbol"] = pumpSwap.BaseSymbol
-                    };
-
-                    combinedData["token_b"] = new JsonObject
-                    {
-                        ["address"] = pumpSwap.QuoteMint,
-                        ["symbol"] = pumpSwap.QuoteSymbol
-                    };
-
-                    // On-demand discovery: save to pool cache for future lookups
-                    if (_poolFetcher != null)
-                    {
-                        var discoveredPool = new PoolInfo
-                        {
-                            LpMint = mintAddress,
-                            PoolAddress = pumpSwap.PoolAddress,
-                            ProgramId = pumpSwap.ProgramId,
-                            DexName = "PumpSwap",
-                            PoolType = pumpSwap.PoolType,
-                            TokenAMint = pumpSwap.BaseMint,
-                            TokenBMint = pumpSwap.QuoteMint,
-                            TokenASymbol = pumpSwap.BaseSymbol,
-                            TokenBSymbol = pumpSwap.QuoteSymbol
-                        };
-                        _ = _poolFetcher.UpsertPoolAsync(discoveredPool, cancellationToken);
-                        Console.WriteLine($"[AssetFetcher] Cached discovered PumpSwap pool: {mintAddress}");
-                    }
-                }
-            }
-        } // End slow fallbacks
-
-        // If we have token mints from pool data but no LP name, resolve token symbols
-        if (mintInfo?.IsLpToken == true && !string.IsNullOrEmpty(mintInfo.TokenAMint) && !string.IsNullOrEmpty(mintInfo.TokenBMint))
-        {
-            var hasName = combinedData.ContainsKey("content") &&
-                          ((JsonObject)combinedData["content"]!).ContainsKey("metadata") &&
-                          !string.IsNullOrEmpty(((JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!)["name"]?.ToString());
-
-            if (!hasName)
-            {
-                Console.WriteLine($"[AssetFetcher] Resolving token symbols from pool data...");
-
-                // Use ResolveTokenSymbolAsync which checks DB first, then Metaplex
-                var symbolA = await ResolveTokenSymbolAsync(mintInfo.TokenAMint, cancellationToken) ?? ShortenAddress(mintInfo.TokenAMint);
-                var symbolB = await ResolveTokenSymbolAsync(mintInfo.TokenBMint, cancellationToken) ?? ShortenAddress(mintInfo.TokenBMint);
-
-                Console.WriteLine($"[AssetFetcher] Token A: {symbolA}, Token B: {symbolB}");
-
-                // Set LP name from resolved symbols
+                sources.Add("solscan");
                 EnsureContentMetadata(combinedData);
                 var metadata = (JsonObject)((JsonObject)combinedData["content"]!)["metadata"]!;
-                metadata["name"] = $"{symbolA}-{symbolB} LP";
-                metadata["symbol"] = $"{symbolA}/{symbolB}";
-
-                // Also add token info
-                combinedData["token_a"] = new JsonObject
-                {
-                    ["address"] = mintInfo.TokenAMint,
-                    ["symbol"] = symbolA
-                };
-                combinedData["token_b"] = new JsonObject
-                {
-                    ["address"] = mintInfo.TokenBMint,
-                    ["symbol"] = symbolB
-                };
+                metadata["name"] = resolvedSymbol;
+                metadata["symbol"] = resolvedSymbol;
+                Console.WriteLine($"[AssetFetcher] Resolved via Solscan: {mintAddress} -> {resolvedSymbol}");
             }
         }
 
         // Build result
         if (sources.Count == 0)
         {
+            Console.WriteLine($"[AssetFetcher] No fallback sources returned data for: {mintAddress}");
             return new AssetFetchResult
             {
                 MintAddress = mintAddress,
                 Success = false,
-                Error = $"Helius: {heliusError ?? "No data"}. No fallback sources returned data."
+                Error = $"Helius: {heliusError ?? "No data"}. Solscan fallback returned no data."
             };
         }
 
@@ -775,66 +295,12 @@ public class AssetFetcher
     }
 
     /// <summary>
-    /// Resolve missing token symbols for Meteora pool using DB first, then Metaplex
+    /// Resolve a token symbol - check local DB first, then fallback to Solscan.
+    /// Supports both token mint addresses and Associated Token Account (ATA) addresses.
     /// </summary>
-    private async Task ResolveMeteoraTokenSymbolsAsync(
-        MeteoraPool pool,
-        CancellationToken cancellationToken)
+    private async Task<string?> ResolveTokenSymbolAsync(string address, CancellationToken cancellationToken)
     {
-        var tasks = new List<Task<string?>>();
-
-        // Resolve MintA symbol if missing
-        if (pool.MintA != null && string.IsNullOrEmpty(pool.MintA.Symbol) && !string.IsNullOrEmpty(pool.MintA.Address))
-        {
-            tasks.Add(ResolveTokenSymbolAsync(pool.MintA.Address!, cancellationToken));
-        }
-        else
-        {
-            tasks.Add(Task.FromResult<string?>(pool.MintA?.Symbol));
-        }
-
-        // Resolve MintB symbol if missing
-        if (pool.MintB != null && string.IsNullOrEmpty(pool.MintB.Symbol) && !string.IsNullOrEmpty(pool.MintB.Address))
-        {
-            tasks.Add(ResolveTokenSymbolAsync(pool.MintB.Address!, cancellationToken));
-        }
-        else
-        {
-            tasks.Add(Task.FromResult<string?>(pool.MintB?.Symbol));
-        }
-
-        // Wait for both to complete
-        var results = await Task.WhenAll(tasks);
-
-        // Apply resolved symbols
-        if (pool.MintA != null && !string.IsNullOrEmpty(results[0]))
-        {
-            pool.MintA = pool.MintA with { Symbol = results[0] };
-            Console.WriteLine($"[AssetFetcher] Resolved Meteora token A: {results[0]}");
-        }
-
-        if (pool.MintB != null && results.Length > 1 && !string.IsNullOrEmpty(results[1]))
-        {
-            pool.MintB = pool.MintB with { Symbol = results[1] };
-            Console.WriteLine($"[AssetFetcher] Resolved Meteora token B: {results[1]}");
-        }
-
-        // Regenerate LP name/symbol with resolved symbols
-        if (pool.MintA != null && pool.MintB != null)
-        {
-            var symA = pool.MintA.Symbol ?? ShortenAddress(pool.MintA.Address);
-            var symB = pool.MintB.Symbol ?? ShortenAddress(pool.MintB.Address);
-            pool.LpMintName = $"{symA}-{symB} LP";
-            pool.LpMintSymbol = $"{symA}/{symB}";
-        }
-    }
-
-    /// <summary>
-    /// Resolve a token symbol - check local DB first, then fallback to Metaplex
-    /// </summary>
-    private async Task<string?> ResolveTokenSymbolAsync(string mintAddress, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrEmpty(mintAddress))
+        if (string.IsNullOrEmpty(address))
             return null;
 
         // First, try local asset database (fastest)
@@ -842,35 +308,155 @@ public class AssetFetcher
         {
             try
             {
-                var symbol = await _assetDbReader.GetSymbolAsync(mintAddress, cancellationToken);
+                var symbol = await _assetDbReader.GetSymbolAsync(address, cancellationToken);
                 if (!string.IsNullOrEmpty(symbol))
                 {
-                    Console.WriteLine($"[AssetFetcher] Resolved symbol from DB: {mintAddress} -> {symbol}");
+                    Console.WriteLine($"[AssetFetcher] Resolved symbol from DB: {address} -> {symbol}");
                     return symbol;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[AssetFetcher] DB symbol lookup failed for {mintAddress}: {ex.Message}");
+                Console.WriteLine($"[AssetFetcher] DB symbol lookup failed for {address}: {ex.Message}");
             }
         }
 
-        // Fallback to Metaplex on-chain metadata
-        if (_metaplexFetcher != null)
+        // Fallback to Solscan Pro API
+        if (_solscanClient != null)
         {
+            // Try token metadata first (for mint addresses)
             try
             {
-                var metadata = await _metaplexFetcher.GetMetadataAsync(mintAddress, cancellationToken);
-                if (metadata != null && !string.IsNullOrEmpty(metadata.Symbol))
+                var tokenMeta = await _solscanClient.GetTokenMetaAsync(address, cancellationToken);
+                if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
                 {
-                    Console.WriteLine($"[AssetFetcher] Resolved symbol from Metaplex: {mintAddress} -> {metadata.Symbol}");
-                    return metadata.Symbol;
+                    Console.WriteLine($"[AssetFetcher] Resolved symbol from Solscan token meta: {address} -> {tokenMeta.Symbol}");
+                    return tokenMeta.Symbol;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[AssetFetcher] Metaplex lookup failed for {mintAddress}: {ex.Message}");
+                Console.WriteLine($"[AssetFetcher] Solscan token meta lookup failed for {address}: {ex.Message}");
             }
+
+            // Try account metadata for ATA addresses
+            try
+            {
+                Console.WriteLine($"[AssetFetcher] Trying account metadata for: {address}");
+                var accountMeta = await _solscanClient.GetAccountMetadataAsync(address, cancellationToken);
+
+                if (accountMeta == null)
+                {
+                    Console.WriteLine($"[AssetFetcher] Account metadata returned null for: {address}");
+                }
+                else
+                {
+                    var fundedByAddr = accountMeta.FundedBy?.FundedBy;
+                    var txHash = accountMeta.FundedBy?.TxHash;
+                    var blockTime = accountMeta.FundedBy?.BlockTime;
+
+                    Console.WriteLine($"[AssetFetcher] Account metadata: TokenSymbol={accountMeta.TokenSymbol ?? "null"}, FundedBy={fundedByAddr ?? "null"}, TxHash={txHash ?? "null"}, BlockTime={blockTime?.ToString() ?? "null"}");
+
+                    // If TokenSymbol is directly available, use it
+                    if (!string.IsNullOrEmpty(accountMeta.TokenSymbol))
+                    {
+                        Console.WriteLine($"[AssetFetcher] Resolved symbol from Solscan ATA: {address} -> {accountMeta.TokenSymbol}");
+                        return accountMeta.TokenSymbol;
+                    }
+
+                    // If we have funded_by and block_time, try to resolve via DeFi activities
+                    if (!string.IsNullOrEmpty(fundedByAddr) &&
+                        !string.IsNullOrEmpty(txHash) &&
+                        blockTime.HasValue)
+                    {
+                        Console.WriteLine($"[AssetFetcher] Trying DeFi activity lookup for ATA...");
+                        var ataSymbol = await ResolveAtaSymbolViaDefiActivityAsync(
+                            fundedByAddr,
+                            txHash,
+                            blockTime.Value,
+                            cancellationToken);
+
+                        if (!string.IsNullOrEmpty(ataSymbol))
+                        {
+                            Console.WriteLine($"[AssetFetcher] Resolved ATA symbol via DeFi activity: {address} -> {ataSymbol}");
+                            return ataSymbol;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[AssetFetcher] DeFi activity lookup returned no symbol");
+                        }
+                    }
+
+                    // Fallback to account label if available
+                    if (!string.IsNullOrEmpty(accountMeta.AccountLabel))
+                    {
+                        Console.WriteLine($"[AssetFetcher] Resolved label from Solscan account: {address} -> {accountMeta.AccountLabel}");
+                        return accountMeta.AccountLabel;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[AssetFetcher] Solscan account meta lookup failed for {address}: {ex.Message}");
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Resolve ATA symbol by looking up the DeFi activity that created the ATA.
+    /// </summary>
+    private async Task<string?> ResolveAtaSymbolViaDefiActivityAsync(
+        string fundedBy,
+        string txHash,
+        long blockTime,
+        CancellationToken cancellationToken)
+    {
+        if (_solscanClient == null)
+            return null;
+
+        try
+        {
+            // Get DeFi activities for the funder at the exact block time
+            var activities = await _solscanClient.GetAccountDefiActivitiesAsync(
+                fundedBy,
+                blockTime,
+                blockTime,
+                cancellationToken);
+
+            Console.WriteLine($"[AssetFetcher] Found {activities.Count} DeFi activities for {fundedBy} at block time {blockTime}");
+
+            // Find the activity matching the tx_hash
+            var swapActivity = activities.FirstOrDefault(a =>
+                a.TransId == txHash &&
+                a.FromAddress == fundedBy);
+
+            if (swapActivity?.AmountInfo != null)
+            {
+                // Token2 is the output token (token received in swap)
+                var outputTokenMint = swapActivity.AmountInfo.Token2;
+                Console.WriteLine($"[AssetFetcher] Swap activity found: {swapActivity.ActivityType}, output token: {outputTokenMint}");
+
+                if (!string.IsNullOrEmpty(outputTokenMint))
+                {
+                    // Now resolve the output token mint to get its symbol
+                    var tokenMeta = await _solscanClient.GetTokenMetaAsync(outputTokenMint, cancellationToken);
+                    if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
+                    {
+                        Console.WriteLine($"[AssetFetcher] Resolved output token symbol: {tokenMeta.Symbol}");
+                        return tokenMeta.Symbol;
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine($"[AssetFetcher] No matching swap activity found for tx {txHash}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AssetFetcher] DeFi activity lookup failed for {fundedBy}: {ex.Message}");
         }
 
         return null;
@@ -1151,4 +737,10 @@ public record AssetFetcherOptions
     /// If provided, enables local pool cache lookup for LP tokens.
     /// </summary>
     public string? DatabaseConnectionString { get; init; }
+
+    /// <summary>
+    /// Solscan Pro API token for token metadata resolution (optional).
+    /// If provided, enables Solscan as the fallback for token symbol resolution.
+    /// </summary>
+    public string? SolscanApiToken { get; init; }
 }

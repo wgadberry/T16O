@@ -140,8 +140,12 @@ public class WinstonWorkerService : BackgroundService
 
         // Parse the assessment
         var summary = assessment.RootElement.GetProperty("summary");
-        var unknownPercentage = summary.GetProperty("unknown_percentage").GetDouble();
-        var totalUnknown = summary.GetProperty("total_unknown_party_records").GetInt32();
+
+        var unknownPercentageProp = summary.GetProperty("unknown_percentage");
+        var unknownPercentage = unknownPercentageProp.ValueKind == JsonValueKind.Null ? 0.0 : unknownPercentageProp.GetDouble();
+
+        var totalUnknownProp = summary.GetProperty("total_unknown_party_records");
+        var totalUnknown = totalUnknownProp.ValueKind == JsonValueKind.Null ? 0 : totalUnknownProp.GetInt32();
 
         _logger.LogInformation(
             "[Winston] Assessment complete: {TotalUnknown} unknown records ({Percentage:F2}%)",
@@ -315,7 +319,8 @@ public class WinstonWorkerService : BackgroundService
             MaxConcurrentRequests = _assetFetcherOptions.MaxConcurrentRequests,
             RateLimitMs = _assetFetcherOptions.RateLimitMs,
             EnableFallbackChain = true,
-            DatabaseConnectionString = _connectionString
+            DatabaseConnectionString = _connectionString,
+            SolscanApiToken = _assetFetcherOptions.SolscanApiToken
         };
 
         var fetcher = new AssetFetcher(_assetRpcUrls, fetcherOptions);

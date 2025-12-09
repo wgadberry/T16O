@@ -82,7 +82,8 @@ var assetFetcherOptions = new AssetFetcherOptions
     MaxConcurrentRequests = builder.Configuration.GetValue<int>("Fetcher:Asset:MaxConcurrentRequests", 10),
     RateLimitMs = builder.Configuration.GetValue<int>("Fetcher:Asset:RateLimitMs", 100),
     EnableFallbackChain = builder.Configuration.GetValue<bool>("Fetcher:Asset:EnableFallbackChain", true),
-    DatabaseConnectionString = dbConnectionString  // For fallback chain pool lookups
+    DatabaseConnectionString = dbConnectionString,  // For fallback chain pool lookups
+    SolscanApiToken = builder.Configuration["Solscan:ApiToken"]  // For token symbol resolution
 };
 
 builder.Services.AddSingleton(transactionFetcherOptions);

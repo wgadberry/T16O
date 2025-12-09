@@ -7,6 +7,12 @@
     <UserSecretsId>dotnet-T16O.Workers-33776055-dcf6-49dd-b3a9-7fffb8413988</UserSecretsId>
   </PropertyGroup>
 
+  <!-- Exclude T16O.Solscan subfolder as it's a separate project -->
+  <ItemGroup>
+    <Compile Remove="T16O.Solscan\**\*.cs" />
+    <None Remove="T16O.Solscan\**\*" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
