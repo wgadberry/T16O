@@ -410,13 +410,34 @@ public class WinstonWorkerService : BackgroundService
                 // No parent mint known - need to look up via account metadata and funding tx
                 else
                 {
-                    var resolved = await ResolveAtaViaFundingTxAsync(address, cancellationToken);
-                    if (resolved.HasValue)
+                    // First check if account_label is available directly
+                    var accountMeta = await _solscanClient.GetAccountMetadataAsync(address, cancellationToken);
+                    if (accountMeta != null && !string.IsNullOrEmpty(accountMeta.AccountLabel))
                     {
-                        label = resolved.Value.symbol;
-                        resolvedMintAddress = resolved.Value.mintAddress;
-                        _logger.LogDebug("[Winston] Resolved burned ATA {Address} -> mint {Mint} ({Label})",
-                            address, resolvedMintAddress, label);
+                        label = accountMeta.AccountLabel;
+                        _logger.LogDebug("[Winston] Using account_label for {Address}: {Label}", address, label);
+
+                        // Still try to get the mint address from funding tx for parent_id
+                        if (!string.IsNullOrEmpty(accountMeta.FundedBy?.TxHash))
+                        {
+                            var txDetail = await _solscanClient.GetTransactionDetailAsync(
+                                accountMeta.FundedBy.TxHash, cancellationToken);
+                            var ataBalChange = txDetail?.TokenBalChange?.FirstOrDefault(tbc =>
+                                tbc.Address == address);
+                            resolvedMintAddress = ataBalChange?.GetTokenMint();
+                        }
+                    }
+                    else
+                    {
+                        // Fall back to funding tx resolution
+                        var resolved = await ResolveAtaViaFundingTxAsync(address, cancellationToken);
+                        if (resolved.HasValue)
+                        {
+                            label = resolved.Value.symbol;
+                            resolvedMintAddress = resolved.Value.mintAddress;
+                            _logger.LogDebug("[Winston] Resolved burned ATA {Address} -> mint {Mint} ({Label})",
+                                address, resolvedMintAddress, label);
+                        }
                     }
                 }
 
