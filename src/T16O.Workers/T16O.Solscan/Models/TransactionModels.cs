@@ -158,3 +158,31 @@ public class SolscanRouter
     public int? TokenDecimal1 { get; set; }
     public int? TokenDecimal2 { get; set; }
 }
+
+/// <summary>
+/// Response from /account/defi/activities endpoint.
+/// </summary>
+public class SolscanDefiActivitiesResponse
+{
+    public List<SolscanDefiActivity>? Data { get; set; }
+    public SolscanDefiMetadata? Metadata { get; set; }
+}
+
+/// <summary>
+/// Metadata in defi activities response containing token info.
+/// </summary>
+public class SolscanDefiMetadata
+{
+    public Dictionary<string, SolscanDefiTokenInfo>? Tokens { get; set; }
+}
+
+/// <summary>
+/// Token info in defi activities metadata.
+/// </summary>
+public class SolscanDefiTokenInfo
+{
+    public string? TokenAddress { get; set; }
+    public string? TokenName { get; set; }
+    public string? TokenSymbol { get; set; }
+    public string? TokenIcon { get; set; }
+}

@@ -497,20 +497,39 @@ public class WinstonWorkerService : BackgroundService
             var ataBalChange = txDetail.TokenBalChange.FirstOrDefault(tbc =>
                 tbc.Address == ataAddress);
 
-            if (ataBalChange == null)
+            string? mintAddress = null;
+
+            if (ataBalChange != null)
             {
-                _logger.LogDebug("[Winston] ATA {Address} not found in token_bal_change", ataAddress);
-                return null;
+                mintAddress = ataBalChange.GetTokenMint();
+                if (!string.IsNullOrEmpty(mintAddress))
+                {
+                    _logger.LogDebug("[Winston] ATA {Address} was created for mint {Mint}", ataAddress, mintAddress);
+                }
             }
 
-            var mintAddress = ataBalChange.GetTokenMint();
+            // Step 3b: If ATA not in token_bal_change, try defi/activities API
+            // This works when the ATA was created as part of a swap but not directly in token_bal_change
+            if (string.IsNullOrEmpty(mintAddress) && accountMeta.FundedBy?.BlockTime != null)
+            {
+                _logger.LogDebug("[Winston] ATA {Address} not in token_bal_change, trying defi/activities...", ataAddress);
+
+                var resolved = await ResolveAtaViaDefiActivitiesAsync(
+                    accountMeta.FundedBy.FundedBy!,
+                    accountMeta.FundedBy.BlockTime.Value,
+                    cancellationToken);
+
+                if (resolved != null)
+                {
+                    return resolved;
+                }
+            }
+
             if (string.IsNullOrEmpty(mintAddress))
             {
-                _logger.LogDebug("[Winston] No mint address in token_bal_change for {Address}", ataAddress);
+                _logger.LogDebug("[Winston] Could not determine mint for {Address}", ataAddress);
                 return null;
             }
-
-            _logger.LogDebug("[Winston] ATA {Address} was created for mint {Mint}", ataAddress, mintAddress);
 
             // Step 4: Get the token metadata for the mint
             var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintAddress, cancellationToken);
@@ -534,6 +553,73 @@ public class WinstonWorkerService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning("[Winston] Error resolving ATA {Address}: {Error}", ataAddress, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Resolve ATA via defi/activities API.
+    /// Looks up activities for the funder at the funding block time to find tokens involved.
+    /// The metadata includes token symbols, so we can identify what token the ATA was for.
+    /// </summary>
+    private async Task<(string mintAddress, string symbol)?> ResolveAtaViaDefiActivitiesAsync(
+        string funderAddress,
+        long blockTime,
+        CancellationToken cancellationToken)
+    {
+        if (_solscanClient == null)
+            return null;
+
+        try
+        {
+            // Query defi activities for the funder around the funding time
+            // Use a small window: block_time -5s to +5s
+            var activities = await _solscanClient.GetDefiActivitiesAsync(
+                funderAddress,
+                blockTime - 5,
+                blockTime + 5,
+                page: 1,
+                pageSize: 10,
+                cancellationToken);
+
+            if (activities?.Data == null || activities.Data.Count == 0)
+            {
+                _logger.LogDebug("[Winston] No defi activities found for {Address} at {Time}",
+                    funderAddress, blockTime);
+                return null;
+            }
+
+            // Check the metadata for token info - it has pre-resolved symbols
+            if (activities.Metadata?.Tokens != null && activities.Metadata.Tokens.Count > 0)
+            {
+                // Look for tokens in the activities that aren't SOL/WSOL
+                // Prefer stable coins (USDC, USDT) or the first non-SOL token
+                var solMint = "So11111111111111111111111111111111111111112";
+
+                foreach (var activity in activities.Data)
+                {
+                    var tokens = new[] { activity.Routers?.Token1, activity.Routers?.Token2 }
+                        .Where(t => !string.IsNullOrEmpty(t) && t != solMint)
+                        .ToList();
+
+                    foreach (var tokenMint in tokens)
+                    {
+                        if (activities.Metadata.Tokens.TryGetValue(tokenMint!, out var tokenInfo) &&
+                            !string.IsNullOrEmpty(tokenInfo.TokenSymbol))
+                        {
+                            _logger.LogDebug("[Winston] Resolved via defi activities: {Mint} -> {Symbol}",
+                                tokenMint, tokenInfo.TokenSymbol);
+                            return (tokenMint!, tokenInfo.TokenSymbol);
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[Winston] Error in defi activities resolution: {Error}", ex.Message);
             return null;
         }
     }

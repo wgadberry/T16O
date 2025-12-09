@@ -198,6 +198,39 @@ public class SolscanClient : ISolscanClient
         return response?.Data;
     }
 
+    /// <summary>
+    /// Get DeFi activities for an account, optionally filtered by block time range.
+    /// </summary>
+    public async Task<SolscanDefiActivitiesResponse?> GetDefiActivitiesAsync(
+        string address,
+        long? fromBlockTime = null,
+        long? toBlockTime = null,
+        int page = 1,
+        int pageSize = 10,
+        CancellationToken cancellationToken = default)
+    {
+        // Build URL manually because block_time needs array format: block_time[]=from&block_time[]=to
+        var url = $"/account/defi/activities?address={address}&page={page}&page_size={pageSize}";
+
+        if (fromBlockTime.HasValue && toBlockTime.HasValue)
+        {
+            url += $"&block_time%5B%5D={fromBlockTime.Value}&block_time%5B%5D={toBlockTime.Value}";
+        }
+
+        var json = await GetRawAsync(url, null, cancellationToken);
+        if (string.IsNullOrEmpty(json))
+            return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<SolscanDefiActivitiesResponse>(json, _jsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     #endregion
 
     #region Pool/Market APIs

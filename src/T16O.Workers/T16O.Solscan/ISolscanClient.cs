@@ -87,6 +87,25 @@ public interface ISolscanClient
         long toTime,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Gets DeFi activities with full response including metadata.
+    /// Endpoint: GET /v2.0/account/defi/activities
+    /// </summary>
+    /// <param name="address">The account address.</param>
+    /// <param name="fromBlockTime">Start block time (Unix timestamp).</param>
+    /// <param name="toBlockTime">End block time (Unix timestamp).</param>
+    /// <param name="page">Page number.</param>
+    /// <param name="pageSize">Page size (10, 20, 30, 40, 60, 100).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Response with activities and token metadata.</returns>
+    Task<SolscanDefiActivitiesResponse?> GetDefiActivitiesAsync(
+        string address,
+        long? fromBlockTime = null,
+        long? toBlockTime = null,
+        int page = 1,
+        int pageSize = 10,
+        CancellationToken cancellationToken = default);
+
     #endregion
 
     #region Token APIs
