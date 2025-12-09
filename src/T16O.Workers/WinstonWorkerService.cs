@@ -553,62 +553,107 @@ public class WinstonWorkerService : BackgroundService
 
         try
         {
-            // Call market/info using mint_authority (which is the pool address for LP tokens)
+            // Step 1: Try market/info using mint_authority (which is the pool address for LP tokens)
             var poolInfo = await _solscanClient.GetPoolInfoAsync(mintAuthority, cancellationToken);
 
-            if (poolInfo?.TokensInfo == null || poolInfo.TokensInfo.Count < 2)
+            if (poolInfo?.TokensInfo != null && poolInfo.TokensInfo.Count >= 2)
             {
-                _logger.LogDebug("[Winston] No pool info found for mint_authority {MintAuth}", mintAuthority);
-                return null;
-            }
-
-            // Verify this pool's LP token matches our mint
-            if (poolInfo.LpToken != lpMintAddress)
-            {
-                _logger.LogDebug("[Winston] Pool LP token {PoolLp} doesn't match our mint {Mint}",
-                    poolInfo.LpToken, lpMintAddress);
-                // Continue anyway - the mint_authority relationship is still valid
-            }
-
-            // Get symbols for the pool tokens
-            var symbols = new List<string>();
-            foreach (var tokenInfo in poolInfo.TokensInfo.Take(2))
-            {
-                if (string.IsNullOrEmpty(tokenInfo.Token))
-                    continue;
-
-                // Handle WSOL specially
-                if (tokenInfo.Token == "So11111111111111111111111111111111111111112")
+                // Verify this pool's LP token matches our mint
+                if (poolInfo.LpToken != lpMintAddress)
                 {
-                    symbols.Add("SOL");
-                    continue;
+                    _logger.LogDebug("[Winston] Pool LP token {PoolLp} doesn't match our mint {Mint}",
+                        poolInfo.LpToken, lpMintAddress);
+                    // Continue anyway - the mint_authority relationship is still valid
                 }
 
-                // Get token symbol
-                var meta = await _solscanClient.GetTokenMetaAsync(tokenInfo.Token, cancellationToken);
-                if (meta != null && !string.IsNullOrEmpty(meta.Symbol))
+                // Get symbols for the pool tokens
+                var symbols = new List<string>();
+                foreach (var tokenInfo in poolInfo.TokensInfo.Take(2))
                 {
-                    symbols.Add(meta.Symbol);
+                    if (string.IsNullOrEmpty(tokenInfo.Token))
+                        continue;
+
+                    // Handle WSOL specially
+                    if (tokenInfo.Token == "So11111111111111111111111111111111111111112")
+                    {
+                        symbols.Add("SOL");
+                        continue;
+                    }
+
+                    // Get token symbol
+                    var meta = await _solscanClient.GetTokenMetaAsync(tokenInfo.Token, cancellationToken);
+                    if (meta != null && !string.IsNullOrEmpty(meta.Symbol))
+                    {
+                        symbols.Add(meta.Symbol);
+                    }
+                    else
+                    {
+                        // Use shortened address as fallback
+                        symbols.Add(tokenInfo.Token.Length > 8
+                            ? $"{tokenInfo.Token[..4]}..{tokenInfo.Token[^4..]}"
+                            : tokenInfo.Token);
+                    }
                 }
-                else
+
+                if (symbols.Count >= 2)
                 {
-                    // Use shortened address as fallback
-                    symbols.Add(tokenInfo.Token.Length > 8
-                        ? $"{tokenInfo.Token[..4]}..{tokenInfo.Token[^4..]}"
-                        : tokenInfo.Token);
+                    var lpSymbol = $"{symbols[0]}-{symbols[1]} LP";
+                    _logger.LogDebug("[Winston] Resolved LP token {Mint} -> {Symbol}", lpMintAddress, lpSymbol);
+                    return lpSymbol;
                 }
             }
-
-            if (symbols.Count >= 2)
+            else
             {
-                var lpSymbol = $"{symbols[0]}-{symbols[1]} LP";
-                _logger.LogDebug("[Winston] Resolved LP token {Mint} -> {Symbol}", lpMintAddress, lpSymbol);
-                return lpSymbol;
+                _logger.LogDebug("[Winston] No pool info found for mint_authority {MintAuth}, trying authority label...", mintAuthority);
+            }
+
+            // Step 2: If market/info didn't work, check mint_authority's account_label
+            // Meteora vault authorities have labels like "Meteora (WSOL) Vault Authority"
+            // We can parse this to construct "Meteora (WSOL) LP Token"
+            var mintAuthMeta = await _solscanClient.GetAccountMetadataAsync(mintAuthority, cancellationToken);
+            if (mintAuthMeta != null && !string.IsNullOrEmpty(mintAuthMeta.AccountLabel))
+            {
+                var lpLabel = ParseLpLabelFromAuthority(mintAuthMeta.AccountLabel);
+                if (!string.IsNullOrEmpty(lpLabel))
+                {
+                    _logger.LogDebug("[Winston] Parsed LP label from authority: {Label}", lpLabel);
+                    return lpLabel;
+                }
             }
         }
         catch (Exception ex)
         {
             _logger.LogWarning("[Winston] Error resolving LP token {Mint}: {Error}", lpMintAddress, ex.Message);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Parse LP token label from mint authority's account_label.
+    /// Examples:
+    ///   "Meteora (WSOL) Vault Authority" -> "Meteora (WSOL) LP Token"
+    ///   "Raydium (USDC) Vault" -> "Raydium (USDC) LP Token"
+    /// </summary>
+    private static string? ParseLpLabelFromAuthority(string authorityLabel)
+    {
+        // Common patterns for vault/authority labels
+        // Pattern: "Protocol (Token) Vault Authority" or "Protocol (Token) Vault"
+        var patterns = new[]
+        {
+            " Vault Authority",
+            " Vault Owner",
+            " Vault",
+            " Authority"
+        };
+
+        foreach (var pattern in patterns)
+        {
+            if (authorityLabel.EndsWith(pattern, StringComparison.OrdinalIgnoreCase))
+            {
+                var baseLabel = authorityLabel[..^pattern.Length];
+                return $"{baseLabel} LP Token";
+            }
         }
 
         return null;
