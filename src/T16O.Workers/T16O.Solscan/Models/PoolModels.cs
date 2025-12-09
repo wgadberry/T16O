@@ -5,12 +5,18 @@ namespace T16O.Solscan.Models;
 /// </summary>
 public class SolscanPoolInfo
 {
+    public string? PoolAddress { get; set; }
     public string? Address { get; set; }
     public string? ProgramId { get; set; }
     public string? Creator { get; set; }
     public string? CreateTxHash { get; set; }
     public long? CreateBlockTime { get; set; }
     public List<SolscanPoolTokenInfo>? TokensInfo { get; set; }
+
+    /// <summary>
+    /// The LP token mint address for this pool.
+    /// </summary>
+    public string? LpToken { get; set; }
 }
 
 /// <summary>

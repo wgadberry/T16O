@@ -493,19 +493,104 @@ public class WinstonWorkerService : BackgroundService
 
             // Step 4: Get the token metadata for the mint
             var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintAddress, cancellationToken);
-            if (tokenMeta == null || string.IsNullOrEmpty(tokenMeta.Symbol))
+            if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
             {
-                _logger.LogDebug("[Winston] Token meta not found for mint {Mint}", mintAddress);
-                return null;
+                return (mintAddress, tokenMeta.Symbol);
             }
 
-            return (mintAddress, tokenMeta.Symbol);
+            // Step 5: If no symbol, check if it's an LP token via mint_authority -> market/info
+            _logger.LogDebug("[Winston] Token meta has no symbol for {Mint}, checking if LP token...", mintAddress);
+
+            var lpSymbol = await ResolveLpTokenSymbolAsync(mintAddress, tokenMeta?.MintAuthority, cancellationToken);
+            if (!string.IsNullOrEmpty(lpSymbol))
+            {
+                return (mintAddress, lpSymbol);
+            }
+
+            _logger.LogDebug("[Winston] Could not resolve symbol for mint {Mint}", mintAddress);
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning("[Winston] Error resolving ATA {Address}: {Error}", ataAddress, ex.Message);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Resolve LP token symbol by looking up the pool via mint_authority.
+    /// LP tokens have their mint_authority set to the pool address.
+    /// We call /market/info on the pool to get tokens_info, then resolve symbols.
+    /// </summary>
+    private async Task<string?> ResolveLpTokenSymbolAsync(
+        string lpMintAddress,
+        string? mintAuthority,
+        CancellationToken cancellationToken)
+    {
+        if (_solscanClient == null || string.IsNullOrEmpty(mintAuthority))
+            return null;
+
+        try
+        {
+            // Call market/info using mint_authority (which is the pool address for LP tokens)
+            var poolInfo = await _solscanClient.GetPoolInfoAsync(mintAuthority, cancellationToken);
+
+            if (poolInfo?.TokensInfo == null || poolInfo.TokensInfo.Count < 2)
+            {
+                _logger.LogDebug("[Winston] No pool info found for mint_authority {MintAuth}", mintAuthority);
+                return null;
+            }
+
+            // Verify this pool's LP token matches our mint
+            if (poolInfo.LpToken != lpMintAddress)
+            {
+                _logger.LogDebug("[Winston] Pool LP token {PoolLp} doesn't match our mint {Mint}",
+                    poolInfo.LpToken, lpMintAddress);
+                // Continue anyway - the mint_authority relationship is still valid
+            }
+
+            // Get symbols for the pool tokens
+            var symbols = new List<string>();
+            foreach (var tokenInfo in poolInfo.TokensInfo.Take(2))
+            {
+                if (string.IsNullOrEmpty(tokenInfo.Token))
+                    continue;
+
+                // Handle WSOL specially
+                if (tokenInfo.Token == "So11111111111111111111111111111111111111112")
+                {
+                    symbols.Add("SOL");
+                    continue;
+                }
+
+                // Get token symbol
+                var meta = await _solscanClient.GetTokenMetaAsync(tokenInfo.Token, cancellationToken);
+                if (meta != null && !string.IsNullOrEmpty(meta.Symbol))
+                {
+                    symbols.Add(meta.Symbol);
+                }
+                else
+                {
+                    // Use shortened address as fallback
+                    symbols.Add(tokenInfo.Token.Length > 8
+                        ? $"{tokenInfo.Token[..4]}..{tokenInfo.Token[^4..]}"
+                        : tokenInfo.Token);
+                }
+            }
+
+            if (symbols.Count >= 2)
+            {
+                var lpSymbol = $"{symbols[0]}-{symbols[1]} LP";
+                _logger.LogDebug("[Winston] Resolved LP token {Mint} -> {Symbol}", lpMintAddress, lpSymbol);
+                return lpSymbol;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[Winston] Error resolving LP token {Mint}: {Error}", lpMintAddress, ex.Message);
+        }
+
+        return null;
     }
 
     /// <summary>
