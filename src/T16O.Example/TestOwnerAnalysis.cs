@@ -317,17 +317,16 @@ public static class TestOwnerAnalysis
         Console.WriteLine($"\nTotal unique addresses to process: {addressesToProcess.Count}");
         Console.WriteLine();
 
-        // Process each address
-        int addressIndex = 0;
+        // Process addresses in parallel (5 concurrent)
         int totalAddresses = addressesToProcess.Count;
         int grandTotalSignatures = 0;
+        int processedCount = 0;
+        var lockObj = new object();
 
-        foreach (var address in addressesToProcess)
+        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 5 };
+
+        await Parallel.ForEachAsync(addressesToProcess, parallelOptions, async (address, ct) =>
         {
-            addressIndex++;
-            Console.WriteLine($"\n=== Processing Address {addressIndex}/{totalAddresses} ===");
-            Console.WriteLine($"Address: {address}");
-
             int batchNumber = 0;
             int addressPublished = 0;
 
@@ -353,37 +352,39 @@ public static class TestOwnerAnalysis
                         var json = JsonSerializer.Serialize(request);
                         var body = Encoding.UTF8.GetBytes(json);
 
-                        var properties = channel.CreateBasicProperties();
-                        properties.Persistent = true;
-                        properties.Priority = request.Priority;
-                        properties.ContentType = "application/json";
-                        properties.Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                        // Lock for thread-safe RabbitMQ publishing
+                        lock (lockObj)
+                        {
+                            var properties = channel.CreateBasicProperties();
+                            properties.Persistent = true;
+                            properties.Priority = request.Priority;
+                            properties.ContentType = "application/json";
+                            properties.Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
-                        channel.BasicPublish(
-                            exchange: rabbitConfig.RpcExchange,
-                            routingKey: RabbitMqConfig.RoutingKeys.OwnerFetchBatch,
-                            basicProperties: properties,
-                            body: body);
+                            channel.BasicPublish(
+                                exchange: rabbitConfig.RpcExchange,
+                                routingKey: RabbitMqConfig.RoutingKeys.OwnerFetchBatch,
+                                basicProperties: properties,
+                                body: body);
+                        }
 
-                        addressPublished += signatureList.Count;
-                        Console.WriteLine($"  [Batch {batchNumber}] Published {signatureList.Count} signatures");
+                        Interlocked.Add(ref addressPublished, signatureList.Count);
 
                         return Task.CompletedTask;
                     },
                     maxSignatures: maxSignatures,
                     filterFailed: true);
 
-                grandTotalSignatures += addressPublished;
-                Console.WriteLine($"  Completed: {addressPublished} signatures in {batchNumber} batches");
+                var current = Interlocked.Increment(ref processedCount);
+                Interlocked.Add(ref grandTotalSignatures, addressPublished);
+                Console.WriteLine($"[{current}/{totalAddresses}] {address.Substring(0, 8)}... - {addressPublished} sigs in {batchNumber} batches");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  Error processing address: {ex.Message}");
+                var current = Interlocked.Increment(ref processedCount);
+                Console.WriteLine($"[{current}/{totalAddresses}] {address.Substring(0, 8)}... - Error: {ex.Message}");
             }
-
-            // Small delay between addresses to avoid rate limiting
-            await Task.Delay(50);
-        }
+        });
 
         Console.WriteLine($"\n=== Holder Analysis Complete ===");
         Console.WriteLine($"Processed {totalAddresses} addresses");

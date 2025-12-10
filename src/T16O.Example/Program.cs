@@ -44,7 +44,7 @@ class Program
             var maxSigs = args.Length > 2 && int.TryParse(args[2], out var m) ? m : 1000;
             var depth = args.Length > 3 && int.TryParse(args[3], out var d) ? d : 0;
             var priority = args.Length > 4 && byte.TryParse(args[4], out var p) ? p : RabbitMqConfig.Priority.Batch;
-            var apiKey = args.Length > 5 ? args[5] : null;
+            var apiKey = args.Length > 5 && args[5] != "null" && args[5] != "-" ? args[5] : null;
             var getHolderTokenAccountSigs = args.Length > 6 && args[6] == "1";
             var getHolderOwnerSigs = args.Length > 7 && args[7] == "1";
             await TestOwnerAnalysis.Run(ownerAddress, maxSigs, depth, priority, apiKey, getHolderTokenAccountSigs, getHolderOwnerSigs);
