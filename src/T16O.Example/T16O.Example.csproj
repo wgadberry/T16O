@@ -3,8 +3,15 @@
   <ItemGroup>
     <ProjectReference Include="..\T16O.Services\T16O.Services.csproj" />
     <ProjectReference Include="..\T16O.Models\T16O.Models.csproj" />
+    <ProjectReference Include="..\T16O.Workers\T16O.Solscan\T16O.Solscan.csproj" />
     <ProjectReference Include="..\..\Solnet\src\Solnet.Rpc\Solnet.Rpc.csproj" />
     <ProjectReference Include="..\..\Solnet\src\Solnet.Wallet\Solnet.Wallet.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.0" />
   </ItemGroup>
 
   <PropertyGroup>

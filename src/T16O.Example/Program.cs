@@ -33,9 +33,11 @@ class Program
         }
 
         // Run owner analysis
-        // Usage: owner <address> <maxSigs> <depth> <priority> [api-key]
+        // Usage: owner <address> <maxSigs> <depth> <priority> [api-key] [get-holder-token-account-sigs] [get-holder-owner-sigs]
         // Priority: 10=realtime, 5=normal, 1=batch (default)
         // api-key: Optional API key for request tracking flow
+        // get-holder-token-account-sigs: 1 = fetch all holders and process signatures for each holder's token account (ATA)
+        // get-holder-owner-sigs: 1 = fetch all holders and process signatures for each holder's owner wallet
         if (args.Length > 0 && args[0] == "owner")
         {
             var ownerAddress = args.Length > 1 ? args[1] : null;
@@ -43,7 +45,9 @@ class Program
             var depth = args.Length > 3 && int.TryParse(args[3], out var d) ? d : 0;
             var priority = args.Length > 4 && byte.TryParse(args[4], out var p) ? p : RabbitMqConfig.Priority.Batch;
             var apiKey = args.Length > 5 ? args[5] : null;
-            await TestOwnerAnalysis.Run(ownerAddress, maxSigs, depth, priority, apiKey);
+            var getHolderTokenAccountSigs = args.Length > 6 && args[6] == "1";
+            var getHolderOwnerSigs = args.Length > 7 && args[7] == "1";
+            await TestOwnerAnalysis.Run(ownerAddress, maxSigs, depth, priority, apiKey, getHolderTokenAccountSigs, getHolderOwnerSigs);
             return;
         }
 

@@ -14,7 +14,11 @@ public class SolscanTokenMeta
     public string? Creator { get; set; }
     public string? CreateTx { get; set; }
     public long? CreatedTime { get; set; }
-    public SolscanTokenMetadata? Metadata { get; set; }
+    /// <summary>
+    /// Metadata can be either an object or a string (raw JSON).
+    /// Using object? to handle both cases without deserialization errors.
+    /// </summary>
+    public object? Metadata { get; set; }
     public string? MetadataUri { get; set; }
     public string? MintAuthority { get; set; }
     public string? FreezeAuthority { get; set; }
@@ -139,4 +143,53 @@ public class SolscanAmountInfo
     public decimal? Amount2 { get; set; }
 
     public List<SolscanRouter>? Routers { get; set; }
+}
+
+/// <summary>
+/// Token holder from /token/holders API.
+/// </summary>
+public class SolscanTokenHolder
+{
+    /// <summary>
+    /// Token account address (ATA).
+    /// </summary>
+    public string? Address { get; set; }
+
+    /// <summary>
+    /// Wallet owner address.
+    /// </summary>
+    public string? Owner { get; set; }
+
+    /// <summary>
+    /// Token amount (raw, needs decimals adjustment).
+    /// </summary>
+    public decimal? Amount { get; set; }
+
+    /// <summary>
+    /// Token decimals.
+    /// </summary>
+    public int? Decimals { get; set; }
+
+    /// <summary>
+    /// Holder rank by amount.
+    /// </summary>
+    public int? Rank { get; set; }
+}
+
+/// <summary>
+/// Response from /token/holders API with pagination.
+/// </summary>
+public class SolscanTokenHoldersResponse
+{
+    public bool Success { get; set; }
+    public SolscanTokenHoldersData? Data { get; set; }
+}
+
+/// <summary>
+/// Data wrapper for token holders response.
+/// </summary>
+public class SolscanTokenHoldersData
+{
+    public int Total { get; set; }
+    public List<SolscanTokenHolder>? Items { get; set; }
 }

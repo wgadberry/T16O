@@ -198,6 +198,72 @@ public class SolscanClient : ISolscanClient
         return response?.Data;
     }
 
+    public async Task<List<SolscanTokenHolder>> GetTokenHoldersAsync(
+        string mintAddress,
+        int page = 1,
+        int pageSize = 40,
+        CancellationToken cancellationToken = default)
+    {
+        // Coerce to valid page size
+        var validPageSize = CoerceToValidLimit(pageSize);
+
+        var queryParams = new Dictionary<string, string>
+        {
+            { "address", mintAddress },
+            { "page", page.ToString() },
+            { "page_size", validPageSize.ToString() }
+        };
+
+        var response = await GetAsync<SolscanTokenHoldersData>(
+            "/token/holders",
+            queryParams,
+            cancellationToken);
+
+        return response?.Success == true && response.Data?.Items != null
+            ? response.Data.Items
+            : new List<SolscanTokenHolder>();
+    }
+
+    public async Task<List<SolscanTokenHolder>> GetAllTokenHoldersAsync(
+        string mintAddress,
+        int maxHolders = 0,
+        CancellationToken cancellationToken = default)
+    {
+        var allHolders = new List<SolscanTokenHolder>();
+        var page = 1;
+        const int pageSize = 40;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var holders = await GetTokenHoldersAsync(mintAddress, page, pageSize, cancellationToken);
+
+            if (holders.Count == 0)
+                break;
+
+            allHolders.AddRange(holders);
+
+            Console.WriteLine($"[SolscanClient] Fetched {holders.Count} holders (page {page}, total: {allHolders.Count})");
+
+            // Check if we've hit the limit
+            if (maxHolders > 0 && allHolders.Count >= maxHolders)
+            {
+                allHolders = allHolders.Take(maxHolders).ToList();
+                break;
+            }
+
+            // If we got fewer than pageSize, we've reached the end
+            if (holders.Count < pageSize)
+                break;
+
+            page++;
+
+            // Rate limit between pages
+            await Task.Delay(100, cancellationToken);
+        }
+
+        return allHolders;
+    }
+
     /// <summary>
     /// Get DeFi activities for an account, optionally filtered by block time range.
     /// </summary>

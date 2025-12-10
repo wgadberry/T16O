@@ -121,6 +121,33 @@ public interface ISolscanClient
         string address,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Gets token holders for a mint address with pagination.
+    /// Endpoint: GET /v2.0/token/holders
+    /// </summary>
+    /// <param name="mintAddress">The token mint address.</param>
+    /// <param name="page">Page number (1-based).</param>
+    /// <param name="pageSize">Number of items per page (10, 20, 30, 40).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of token holders.</returns>
+    Task<List<SolscanTokenHolder>> GetTokenHoldersAsync(
+        string mintAddress,
+        int page = 1,
+        int pageSize = 40,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all token holders for a mint address by paginating through all pages.
+    /// </summary>
+    /// <param name="mintAddress">The token mint address.</param>
+    /// <param name="maxHolders">Maximum number of holders to fetch (0 = unlimited).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of all token holders.</returns>
+    Task<List<SolscanTokenHolder>> GetAllTokenHoldersAsync(
+        string mintAddress,
+        int maxHolders = 0,
+        CancellationToken cancellationToken = default);
+
     #endregion
 
     #region Pool/Market APIs
