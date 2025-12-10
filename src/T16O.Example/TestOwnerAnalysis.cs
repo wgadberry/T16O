@@ -273,8 +273,8 @@ public static class TestOwnerAnalysis
         // Initialize Solscan client
         var solscanClient = new SolscanClient(SolscanApiToken);
 
-        // Fetch all holders
-        var holders = await solscanClient.GetAllTokenHoldersAsync(mintAddress, maxHolders: 0);
+        // Fetch top 50 holders by size
+        var holders = await solscanClient.GetAllTokenHoldersAsync(mintAddress, maxHolders: 50);
 
         if (holders.Count == 0)
         {

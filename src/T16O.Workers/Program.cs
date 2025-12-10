@@ -142,10 +142,13 @@ if (winstonEnabled)
     if (intervalSeconds <= 0) intervalSeconds = 3600; // Default 1 hour
     var patternLimit = builder.Configuration.GetValue<int>("Workers:Winston:PatternLimit");
     if (patternLimit <= 0) patternLimit = 100; // Default 100 patterns
+    var maxConcurrentResolutions = builder.Configuration.GetValue<int>("Workers:Winston:MaxConcurrentResolutions");
+    if (maxConcurrentResolutions <= 0) maxConcurrentResolutions = 5; // Default 5 concurrent
     var sqlSourceDirectory = pathResolver.Resolve(builder.Configuration["Workers:Winston:SqlSourceDirectory"] ?? "{Sql}");
     var sqlOutputDirectory = pathResolver.Resolve(builder.Configuration["Workers:Winston:SqlOutputDirectory"] ?? "{Sql}");
     Console.WriteLine($"[DEBUG] Winston SqlSourceDirectory: {sqlSourceDirectory}");
     Console.WriteLine($"[DEBUG] Winston SqlOutputDirectory: {sqlOutputDirectory}");
+    Console.WriteLine($"[DEBUG] Winston MaxConcurrentResolutions: {maxConcurrentResolutions}");
 
     builder.Services.AddHostedService(sp =>
         new WinstonWorkerService(
@@ -153,6 +156,7 @@ if (winstonEnabled)
             sp.GetRequiredService<SolanaConfig>().AssetRpcUrls,
             intervalSeconds,
             patternLimit,
+            maxConcurrentResolutions,
             sqlSourceDirectory,
             sqlOutputDirectory,
             sp.GetRequiredService<AssetFetcherOptions>(),

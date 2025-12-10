@@ -145,7 +145,10 @@ BEGIN
             INSERT INTO addresses (address, address_type, label_source_method) VALUES (v_mint_address, 'mint', 'token_meta');
             SET v_mint_id = LAST_INSERT_ID();
         ELSE
-            UPDATE addresses SET address_type = 'mint' WHERE id = v_mint_id AND address_type IS NULL;
+            UPDATE addresses
+            SET address_type = 'mint',
+                label_source_method = COALESCE(label_source_method, 'token_meta')
+            WHERE id = v_mint_id AND address_type IS NULL;
         END IF;
 
         -- Ensure token account (ATA) exists and set type
@@ -207,7 +210,10 @@ BEGIN
             INSERT INTO addresses (address, address_type, label_source_method) VALUES (v_mint_address, 'mint', 'token_meta');
             SET v_mint_id = LAST_INSERT_ID();
         ELSE
-            UPDATE addresses SET address_type = 'mint' WHERE id = v_mint_id AND address_type IS NULL;
+            UPDATE addresses
+            SET address_type = 'mint',
+                label_source_method = COALESCE(label_source_method, 'token_meta')
+            WHERE id = v_mint_id AND address_type IS NULL;
         END IF;
 
         -- Ensure token account (ATA) exists and set type

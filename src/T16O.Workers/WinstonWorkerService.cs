@@ -31,6 +31,7 @@ public class WinstonWorkerService : BackgroundService
     private readonly string[] _assetRpcUrls;
     private readonly int _intervalSeconds;
     private readonly int _patternLimit;
+    private readonly int _maxConcurrentResolutions;
     private readonly string _sqlSourceDirectory;
     private readonly string _sqlOutputDirectory;
     private readonly ILogger<WinstonWorkerService> _logger;
@@ -42,6 +43,7 @@ public class WinstonWorkerService : BackgroundService
         string[] assetRpcUrls,
         int intervalSeconds,
         int patternLimit,
+        int maxConcurrentResolutions,
         string sqlSourceDirectory,
         string sqlOutputDirectory,
         AssetFetcherOptions assetFetcherOptions,
@@ -51,6 +53,7 @@ public class WinstonWorkerService : BackgroundService
         _assetRpcUrls = assetRpcUrls;
         _intervalSeconds = intervalSeconds;
         _patternLimit = patternLimit;
+        _maxConcurrentResolutions = maxConcurrentResolutions > 0 ? maxConcurrentResolutions : 5;
         _sqlSourceDirectory = sqlSourceDirectory;
         _sqlOutputDirectory = sqlOutputDirectory;
         _assetFetcherOptions = assetFetcherOptions;
@@ -353,7 +356,7 @@ public class WinstonWorkerService : BackgroundService
             LEFT JOIN addresses parent ON a.parent_id = parent.id
             WHERE a.address_type = 'ata'
               AND (a.label IS NULL OR a.label = '')
-            ORDER BY ID -- RAND()
+            ORDER BY RAND()
             LIMIT 5000";
 
         await using (var cmd = new MySqlCommand(sql, connection))
@@ -378,13 +381,20 @@ public class WinstonWorkerService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("[Winston] Found {Count} addresses needing label resolution", addressesToResolve.Count);
+        _logger.LogInformation("[Winston] Found {Count} addresses needing label resolution (concurrency: {Concurrency})",
+            addressesToResolve.Count, _maxConcurrentResolutions);
 
         var resolvedCount = 0;
-        foreach (var (id, address, addressType, parentMintAddress, parentLabel) in addressesToResolve)
+        var processedCount = 0;
+        var parallelOptions = new ParallelOptions
         {
-            if (cancellationToken.IsCancellationRequested)
-                break;
+            MaxDegreeOfParallelism = _maxConcurrentResolutions,
+            CancellationToken = cancellationToken
+        };
+
+        await Parallel.ForEachAsync(addressesToResolve, parallelOptions, async (item, ct) =>
+        {
+            var (id, address, addressType, parentMintAddress, parentLabel) = item;
 
             try
             {
@@ -409,13 +419,13 @@ public class WinstonWorkerService : BackgroundService
                 else
                 {
                     // Fetch account metadata once - used by multiple resolution methods
-                    var accountMeta = await _solscanClient.GetAccountMetadataAsync(address, cancellationToken);
+                    var accountMeta = await _solscanClient!.GetAccountMetadataAsync(address, ct);
 
                     // Priority 2: Try funding_tx resolution (highest success rate)
                     if (accountMeta?.FundedBy?.TxHash != null)
                     {
                         var txDetail = await _solscanClient.GetTransactionDetailAsync(
-                            accountMeta.FundedBy.TxHash, cancellationToken);
+                            accountMeta.FundedBy.TxHash, ct);
                         var ataBalChange = txDetail?.TokenBalChange?.FirstOrDefault(tbc =>
                             tbc.Address == address);
                         var mintFromTx = ataBalChange?.GetTokenMint();
@@ -423,7 +433,7 @@ public class WinstonWorkerService : BackgroundService
                         if (!string.IsNullOrEmpty(mintFromTx))
                         {
                             resolvedMintAddress = mintFromTx;
-                            var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintFromTx, cancellationToken);
+                            var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintFromTx, ct);
                             if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
                             {
                                 label = tokenMeta.Symbol;
@@ -434,7 +444,7 @@ public class WinstonWorkerService : BackgroundService
                             else
                             {
                                 // Try LP token resolution if no symbol
-                                var lpResolved = await ResolveLpTokenSymbolAsync(mintFromTx, tokenMeta?.MintAuthority, cancellationToken);
+                                var lpResolved = await ResolveLpTokenSymbolAsync(mintFromTx, tokenMeta?.MintAuthority, ct);
                                 if (lpResolved.HasValue)
                                 {
                                     label = lpResolved.Value.symbol;
@@ -455,7 +465,7 @@ public class WinstonWorkerService : BackgroundService
                     // Priority 4: Try token_meta if we have a parent mint address (from DB or discovered)
                     if (string.IsNullOrEmpty(label) && !string.IsNullOrEmpty(resolvedMintAddress))
                     {
-                        var tokenMeta = await _solscanClient.GetTokenMetaAsync(resolvedMintAddress, cancellationToken);
+                        var tokenMeta = await _solscanClient.GetTokenMetaAsync(resolvedMintAddress, ct);
                         if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
                         {
                             label = tokenMeta.Symbol;
@@ -470,7 +480,7 @@ public class WinstonWorkerService : BackgroundService
                         var defiResolved = await ResolveAtaViaDefiActivitiesAsync(
                             accountMeta.FundedBy.FundedBy,
                             accountMeta.FundedBy.BlockTime.Value,
-                            cancellationToken);
+                            ct);
 
                         if (defiResolved != null)
                         {
@@ -481,11 +491,13 @@ public class WinstonWorkerService : BackgroundService
                     }
                 }
 
-                // Update the address with the resolved label
+                // Update the address with the resolved label (each task uses its own connection)
                 if (!string.IsNullOrEmpty(label) && !string.IsNullOrEmpty(labelSourceMethod))
                 {
-                    await UpdateAddressLabelAsync(address, label, resolvedMintAddress, labelSourceMethod, connection, cancellationToken);
-                    resolvedCount++;
+                    await using var taskConnection = new MySqlConnection(_connectionString);
+                    await taskConnection.OpenAsync(ct);
+                    await UpdateAddressLabelAsync(address, label, resolvedMintAddress, labelSourceMethod, taskConnection, ct);
+                    Interlocked.Increment(ref resolvedCount);
                 }
             }
             catch (Exception ex)
@@ -493,9 +505,13 @@ public class WinstonWorkerService : BackgroundService
                 _logger.LogWarning("[Winston] Failed to resolve address {Address}: {Error}", address, ex.Message);
             }
 
-            // Rate limit to avoid hitting API limits
-            await Task.Delay(100, cancellationToken);
-        }
+            var current = Interlocked.Increment(ref processedCount);
+            if (current % 100 == 0)
+            {
+                _logger.LogInformation("[Winston] Progress: {Processed}/{Total} addresses processed, {Resolved} resolved",
+                    current, addressesToResolve.Count, resolvedCount);
+            }
+        });
 
         _logger.LogInformation("[Winston] Resolved {Resolved}/{Total} address labels",
             resolvedCount, addressesToResolve.Count);
