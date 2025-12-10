@@ -142,7 +142,7 @@ BEGIN
         -- Ensure mint exists and set type
         SELECT id INTO v_mint_id FROM addresses WHERE address = v_mint_address;
         IF v_mint_id IS NULL THEN
-            INSERT INTO addresses (address, address_type) VALUES (v_mint_address, 'mint');
+            INSERT INTO addresses (address, address_type, label_source_method) VALUES (v_mint_address, 'mint', 'token_meta');
             SET v_mint_id = LAST_INSERT_ID();
         ELSE
             UPDATE addresses SET address_type = 'mint' WHERE id = v_mint_id AND address_type IS NULL;
@@ -204,7 +204,7 @@ BEGIN
         -- Ensure mint exists and set type
         SELECT id INTO v_mint_id FROM addresses WHERE address = v_mint_address;
         IF v_mint_id IS NULL THEN
-            INSERT INTO addresses (address, address_type) VALUES (v_mint_address, 'mint');
+            INSERT INTO addresses (address, address_type, label_source_method) VALUES (v_mint_address, 'mint', 'token_meta');
             SET v_mint_id = LAST_INSERT_ID();
         ELSE
             UPDATE addresses SET address_type = 'mint' WHERE id = v_mint_id AND address_type IS NULL;

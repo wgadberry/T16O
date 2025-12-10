@@ -353,8 +353,8 @@ public class WinstonWorkerService : BackgroundService
             LEFT JOIN addresses parent ON a.parent_id = parent.id
             WHERE a.address_type = 'ata'
               AND (a.label IS NULL OR a.label = '')
-            ORDER BY a.id DESC
-            LIMIT 50";
+            ORDER BY ID -- RAND()
+            LIMIT 5000";
 
         await using (var cmd = new MySqlCommand(sql, connection))
         {
@@ -390,61 +390,101 @@ public class WinstonWorkerService : BackgroundService
             {
                 string? label = null;
                 string? resolvedMintAddress = parentMintAddress;
+                string? labelSourceMethod = null;
 
-                // If parent already has a label, just copy it
+                // Resolution priority based on success rates:
+                // 1. parent_label (no API call, instant)
+                // 2. funding_tx (4321 successes - highest)
+                // 3. account_label (1685 successes - from same API call as funding_tx)
+                // 4. token_meta (1266 successes - if parent mint discovered)
+                // 5. defi_activities, lp_pool_info, lp_authority_label (fallbacks)
+
+                // Priority 1: If parent already has a label, just copy it
                 if (!string.IsNullOrEmpty(parentLabel))
                 {
                     label = parentLabel;
+                    labelSourceMethod = "parent_label";
                     _logger.LogDebug("[Winston] Using parent label for {Address}: {Label}", address, label);
                 }
-                // If parent mint is known but no label, fetch the mint's metadata
-                else if (!string.IsNullOrEmpty(parentMintAddress))
-                {
-                    var tokenMeta = await _solscanClient.GetTokenMetaAsync(parentMintAddress, cancellationToken);
-                    if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
-                    {
-                        label = tokenMeta.Symbol;
-                        _logger.LogDebug("[Winston] Resolved parent mint {Mint} -> {Label}", parentMintAddress, label);
-                    }
-                }
-                // No parent mint known - need to look up via account metadata and funding tx
                 else
                 {
-                    // First check if account_label is available directly
+                    // Fetch account metadata once - used by multiple resolution methods
                     var accountMeta = await _solscanClient.GetAccountMetadataAsync(address, cancellationToken);
-                    if (accountMeta != null && !string.IsNullOrEmpty(accountMeta.AccountLabel))
-                    {
-                        label = accountMeta.AccountLabel;
-                        _logger.LogDebug("[Winston] Using account_label for {Address}: {Label}", address, label);
 
-                        // Still try to get the mint address from funding tx for parent_id
-                        if (!string.IsNullOrEmpty(accountMeta.FundedBy?.TxHash))
+                    // Priority 2: Try funding_tx resolution (highest success rate)
+                    if (accountMeta?.FundedBy?.TxHash != null)
+                    {
+                        var txDetail = await _solscanClient.GetTransactionDetailAsync(
+                            accountMeta.FundedBy.TxHash, cancellationToken);
+                        var ataBalChange = txDetail?.TokenBalChange?.FirstOrDefault(tbc =>
+                            tbc.Address == address);
+                        var mintFromTx = ataBalChange?.GetTokenMint();
+
+                        if (!string.IsNullOrEmpty(mintFromTx))
                         {
-                            var txDetail = await _solscanClient.GetTransactionDetailAsync(
-                                accountMeta.FundedBy.TxHash, cancellationToken);
-                            var ataBalChange = txDetail?.TokenBalChange?.FirstOrDefault(tbc =>
-                                tbc.Address == address);
-                            resolvedMintAddress = ataBalChange?.GetTokenMint();
+                            resolvedMintAddress = mintFromTx;
+                            var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintFromTx, cancellationToken);
+                            if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
+                            {
+                                label = tokenMeta.Symbol;
+                                labelSourceMethod = "funding_tx";
+                                _logger.LogDebug("[Winston] Resolved via funding_tx {Address} -> {Mint} ({Label})",
+                                    address, mintFromTx, label);
+                            }
+                            else
+                            {
+                                // Try LP token resolution if no symbol
+                                var lpResolved = await ResolveLpTokenSymbolAsync(mintFromTx, tokenMeta?.MintAuthority, cancellationToken);
+                                if (lpResolved.HasValue)
+                                {
+                                    label = lpResolved.Value.symbol;
+                                    labelSourceMethod = lpResolved.Value.sourceMethod;
+                                }
+                            }
                         }
                     }
-                    else
+
+                    // Priority 3: Try account_label (from already-fetched accountMeta)
+                    if (string.IsNullOrEmpty(label) && accountMeta != null && !string.IsNullOrEmpty(accountMeta.AccountLabel))
                     {
-                        // Fall back to funding tx resolution
-                        var resolved = await ResolveAtaViaFundingTxAsync(address, cancellationToken);
-                        if (resolved.HasValue)
+                        label = accountMeta.AccountLabel;
+                        labelSourceMethod = "account_label";
+                        _logger.LogDebug("[Winston] Using account_label for {Address}: {Label}", address, label);
+                    }
+
+                    // Priority 4: Try token_meta if we have a parent mint address (from DB or discovered)
+                    if (string.IsNullOrEmpty(label) && !string.IsNullOrEmpty(resolvedMintAddress))
+                    {
+                        var tokenMeta = await _solscanClient.GetTokenMetaAsync(resolvedMintAddress, cancellationToken);
+                        if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
                         {
-                            label = resolved.Value.symbol;
-                            resolvedMintAddress = resolved.Value.mintAddress;
-                            _logger.LogDebug("[Winston] Resolved burned ATA {Address} -> mint {Mint} ({Label})",
-                                address, resolvedMintAddress, label);
+                            label = tokenMeta.Symbol;
+                            labelSourceMethod = "token_meta";
+                            _logger.LogDebug("[Winston] Resolved via token_meta {Mint} -> {Label}", resolvedMintAddress, label);
+                        }
+                    }
+
+                    // Priority 5: Try defi_activities as fallback
+                    if (string.IsNullOrEmpty(label) && accountMeta?.FundedBy?.BlockTime != null && accountMeta.FundedBy.FundedBy != null)
+                    {
+                        var defiResolved = await ResolveAtaViaDefiActivitiesAsync(
+                            accountMeta.FundedBy.FundedBy,
+                            accountMeta.FundedBy.BlockTime.Value,
+                            cancellationToken);
+
+                        if (defiResolved != null)
+                        {
+                            label = defiResolved.Value.symbol;
+                            resolvedMintAddress = defiResolved.Value.mintAddress;
+                            labelSourceMethod = defiResolved.Value.sourceMethod;
                         }
                     }
                 }
 
                 // Update the address with the resolved label
-                if (!string.IsNullOrEmpty(label))
+                if (!string.IsNullOrEmpty(label) && !string.IsNullOrEmpty(labelSourceMethod))
                 {
-                    await UpdateAddressLabelAsync(address, label, resolvedMintAddress, connection, cancellationToken);
+                    await UpdateAddressLabelAsync(address, label, resolvedMintAddress, labelSourceMethod, connection, cancellationToken);
                     resolvedCount++;
                 }
             }
@@ -464,8 +504,9 @@ public class WinstonWorkerService : BackgroundService
     /// <summary>
     /// Resolve an ATA's symbol by looking up its funding transaction.
     /// For burned ATAs, the token_bal_change in the funding tx reveals the underlying mint.
+    /// Returns (mintAddress, symbol, sourceMethod) where sourceMethod indicates how the label was resolved.
     /// </summary>
-    private async Task<(string mintAddress, string symbol)?> ResolveAtaViaFundingTxAsync(
+    private async Task<(string mintAddress, string symbol, string sourceMethod)?> ResolveAtaViaFundingTxAsync(
         string ataAddress,
         CancellationToken cancellationToken)
     {
@@ -535,16 +576,16 @@ public class WinstonWorkerService : BackgroundService
             var tokenMeta = await _solscanClient.GetTokenMetaAsync(mintAddress, cancellationToken);
             if (tokenMeta != null && !string.IsNullOrEmpty(tokenMeta.Symbol))
             {
-                return (mintAddress, tokenMeta.Symbol);
+                return (mintAddress, tokenMeta.Symbol, "funding_tx");
             }
 
             // Step 5: If no symbol, check if it's an LP token via mint_authority -> market/info
             _logger.LogDebug("[Winston] Token meta has no symbol for {Mint}, checking if LP token...", mintAddress);
 
-            var lpSymbol = await ResolveLpTokenSymbolAsync(mintAddress, tokenMeta?.MintAuthority, cancellationToken);
-            if (!string.IsNullOrEmpty(lpSymbol))
+            var lpResolved = await ResolveLpTokenSymbolAsync(mintAddress, tokenMeta?.MintAuthority, cancellationToken);
+            if (lpResolved.HasValue)
             {
-                return (mintAddress, lpSymbol);
+                return (mintAddress, lpResolved.Value.symbol, lpResolved.Value.sourceMethod);
             }
 
             _logger.LogDebug("[Winston] Could not resolve symbol for mint {Mint}", mintAddress);
@@ -561,8 +602,9 @@ public class WinstonWorkerService : BackgroundService
     /// Resolve ATA via defi/activities API.
     /// Looks up activities for the funder at the funding block time to find tokens involved.
     /// The metadata includes token symbols, so we can identify what token the ATA was for.
+    /// Returns (mintAddress, symbol, sourceMethod).
     /// </summary>
-    private async Task<(string mintAddress, string symbol)?> ResolveAtaViaDefiActivitiesAsync(
+    private async Task<(string mintAddress, string symbol, string sourceMethod)?> ResolveAtaViaDefiActivitiesAsync(
         string funderAddress,
         long blockTime,
         CancellationToken cancellationToken)
@@ -609,7 +651,7 @@ public class WinstonWorkerService : BackgroundService
                         {
                             _logger.LogDebug("[Winston] Resolved via defi activities: {Mint} -> {Symbol}",
                                 tokenMint, tokenInfo.TokenSymbol);
-                            return (tokenMint!, tokenInfo.TokenSymbol);
+                            return (tokenMint!, tokenInfo.TokenSymbol, "defi_activities");
                         }
                     }
                 }
@@ -628,8 +670,9 @@ public class WinstonWorkerService : BackgroundService
     /// Resolve LP token symbol by looking up the pool via mint_authority.
     /// LP tokens have their mint_authority set to the pool address.
     /// We call /market/info on the pool to get tokens_info, then resolve symbols.
+    /// Returns (symbol, sourceMethod) where sourceMethod is either 'lp_pool_info' or 'lp_authority_label'.
     /// </summary>
-    private async Task<string?> ResolveLpTokenSymbolAsync(
+    private async Task<(string symbol, string sourceMethod)?> ResolveLpTokenSymbolAsync(
         string lpMintAddress,
         string? mintAuthority,
         CancellationToken cancellationToken)
@@ -685,7 +728,7 @@ public class WinstonWorkerService : BackgroundService
                 {
                     var lpSymbol = $"{symbols[0]}-{symbols[1]} LP";
                     _logger.LogDebug("[Winston] Resolved LP token {Mint} -> {Symbol}", lpMintAddress, lpSymbol);
-                    return lpSymbol;
+                    return (lpSymbol, "lp_pool_info");
                 }
             }
             else
@@ -703,7 +746,7 @@ public class WinstonWorkerService : BackgroundService
                 if (!string.IsNullOrEmpty(lpLabel))
                 {
                     _logger.LogDebug("[Winston] Parsed LP label from authority: {Label}", lpLabel);
-                    return lpLabel;
+                    return (lpLabel, "lp_authority_label");
                 }
             }
         }
@@ -746,12 +789,26 @@ public class WinstonWorkerService : BackgroundService
     }
 
     /// <summary>
-    /// Update an address with its resolved label and parent mint.
+    /// Update an address with its resolved label, parent mint, and source method.
     /// </summary>
+    /// <param name="labelSourceMethod">
+    /// How the label was resolved:
+    /// - parent_label: Copied from parent address (mint) label
+    /// - token_meta: Solscan /token/meta API via known parent mint
+    /// - account_label: Solscan /account/metadata account_label field
+    /// - funding_tx: Funding transaction token_bal_change + /token/meta
+    /// - defi_activities: Solscan /defi/activities swap metadata
+    /// - lp_pool_info: LP token via /market/info pool tokens
+    /// - lp_authority_label: Parsed from mint_authority account_label
+    /// - account_transactions: ATA /account/transactions + /token/meta
+    /// - manual: Manually set by user/admin
+    /// - known_program: Known Solana program address
+    /// </param>
     private async Task UpdateAddressLabelAsync(
         string address,
         string label,
         string? parentMintAddress,
+        string labelSourceMethod,
         MySqlConnection connection,
         CancellationToken cancellationToken)
     {
@@ -772,9 +829,9 @@ public class WinstonWorkerService : BackgroundService
             }
             else
             {
-                // Create the mint address
+                // Create the mint address - default source method to 'token_meta' for mints
                 await using var insertCmd = new MySqlCommand(
-                    "INSERT INTO addresses (address, address_type, label) VALUES (@addr, 'mint', @label); SELECT LAST_INSERT_ID();",
+                    "INSERT INTO addresses (address, address_type, label, label_source_method) VALUES (@addr, 'mint', @label, 'token_meta'); SELECT LAST_INSERT_ID();",
                     connection);
                 insertCmd.Parameters.AddWithValue("@addr", parentMintAddress);
                 insertCmd.Parameters.AddWithValue("@label", label);
@@ -782,14 +839,15 @@ public class WinstonWorkerService : BackgroundService
             }
         }
 
-        // Update the ATA with label and parent
+        // Update the ATA with label, parent, and source method
         var updateSql = parentId.HasValue
-            ? "UPDATE addresses SET label = @label, parent_id = COALESCE(parent_id, @parentId) WHERE address = @addr"
-            : "UPDATE addresses SET label = @label WHERE address = @addr";
+            ? "UPDATE addresses SET label = @label, parent_id = COALESCE(parent_id, @parentId), label_source_method = @sourceMethod WHERE address = @addr"
+            : "UPDATE addresses SET label = @label, label_source_method = @sourceMethod WHERE address = @addr";
 
         await using var updateCmd = new MySqlCommand(updateSql, connection);
         updateCmd.Parameters.AddWithValue("@addr", address);
         updateCmd.Parameters.AddWithValue("@label", label);
+        updateCmd.Parameters.AddWithValue("@sourceMethod", labelSourceMethod);
         if (parentId.HasValue)
         {
             updateCmd.Parameters.AddWithValue("@parentId", parentId.Value);
@@ -797,8 +855,8 @@ public class WinstonWorkerService : BackgroundService
 
         await updateCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        _logger.LogDebug("[Winston] Updated address {Address} with label '{Label}'{ParentInfo}",
-            address, label, parentId.HasValue ? $" and parent_id {parentId}" : "");
+        _logger.LogDebug("[Winston] Updated address {Address} with label '{Label}' (source: {Source}){ParentInfo}",
+            address, label, labelSourceMethod, parentId.HasValue ? $" and parent_id {parentId}" : "");
     }
 
     private async Task<Dictionary<string, (string? name, string? symbol)>> FetchMintInformationAsync(

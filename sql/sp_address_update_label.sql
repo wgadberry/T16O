@@ -26,8 +26,8 @@ BEGIN
 
         IF v_parent_id IS NULL THEN
             -- Create the mint address if it doesn't exist
-            INSERT INTO addresses (address, address_type)
-            VALUES (p_parent_mint_address, 'mint');
+            INSERT INTO addresses (address, address_type, label_source_method)
+            VALUES (p_parent_mint_address, 'mint', 'token_meta');
             SET v_parent_id = LAST_INSERT_ID();
         END IF;
     END IF;
