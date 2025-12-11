@@ -3,6 +3,10 @@
 Solscan Transaction JSON Shredder
 Flattens decoded transaction JSON into normalized MySQL tables
 
+Supports two Solscan API response formats:
+- /transaction/decoded (transfers, activities, swaps)
+- /transaction/detail (balance changes, signers, account keys)
+
 Uses MySQL functions for ensure-or-create pattern:
 - fn_tx_ensure_address(addr, type) -> tx_address.id
 - fn_tx_ensure_program(addr, name, type) -> tx_program.id
@@ -68,6 +72,15 @@ def safe_int(value: Any) -> Optional[int]:
 def parse_iso_datetime(iso_str: str) -> datetime:
     """Parse ISO datetime string to datetime object"""
     return datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+
+
+def detect_json_format(tx_data: dict) -> str:
+    """Detect whether JSON is from decoded or detail endpoint"""
+    if 'sol_bal_change' in tx_data or 'token_bal_change' in tx_data:
+        return 'detail'
+    if 'transfers' in tx_data or 'activities' in tx_data:
+        return 'decoded'
+    return 'unknown'
 
 
 class TxShredder:
@@ -180,10 +193,15 @@ def extract_agg_swap(summaries: list) -> dict:
     return result
 
 
-def insert_transaction(tx_data: dict, shredder: TxShredder, cursor) -> int:
+def insert_transaction(tx_data: dict, shredder: TxShredder, cursor, json_format: str) -> int:
     """Insert main tx record and return tx.id"""
 
     agg = extract_agg_swap(tx_data.get('summaries', []))
+
+    # Handle block_time_utc - detail format doesn't have 'time' field
+    block_time_utc = None
+    if tx_data.get('time'):
+        block_time_utc = parse_iso_datetime(tx_data.get('time'))
 
     cursor.execute("""
         INSERT INTO tx
@@ -200,7 +218,7 @@ def insert_transaction(tx_data: dict, shredder: TxShredder, cursor) -> int:
         tx_data.get('tx_hash'),
         tx_data.get('block_id'),
         tx_data.get('block_time'),
-        parse_iso_datetime(tx_data.get('time')) if tx_data.get('time') else None,
+        block_time_utc,
         tx_data.get('fee'),
         tx_data.get('priority_fee'),
         shredder.ensure_program(agg['agg_program_id']),
@@ -329,6 +347,92 @@ def insert_activities(tx_id: int, tx_data: dict, shredder: TxShredder, cursor):
         ))
 
 
+def insert_signers(tx_id: int, tx_data: dict, shredder: TxShredder, cursor) -> int:
+    """Insert signer records from list_signer or signer array"""
+    signers = tx_data.get('list_signer') or tx_data.get('signer') or []
+    if isinstance(signers, str):
+        signers = [signers]
+
+    for idx, signer_addr in enumerate(signers):
+        cursor.execute("""
+            INSERT INTO tx_signer (tx_id, signer_id, signer_index)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE signer_id = VALUES(signer_id)
+        """, (
+            tx_id,
+            shredder.ensure_address(signer_addr, 'wallet'),
+            idx,
+        ))
+
+    return len(signers)
+
+
+def insert_sol_balance_changes(tx_id: int, tx_data: dict, shredder: TxShredder, cursor) -> int:
+    """Insert SOL balance change records"""
+    changes = tx_data.get('sol_bal_change', [])
+
+    for change in changes:
+        addr = change.get('address')
+        if not addr:
+            continue
+
+        cursor.execute("""
+            INSERT INTO tx_sol_balance_change
+            (tx_id, address_id, pre_balance, post_balance, change_amount)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                pre_balance = VALUES(pre_balance),
+                post_balance = VALUES(post_balance),
+                change_amount = VALUES(change_amount)
+        """, (
+            tx_id,
+            shredder.ensure_address(addr, 'unknown'),
+            safe_int(change.get('pre_balance')) or 0,
+            safe_int(change.get('post_balance')) or 0,
+            safe_int(change.get('change_amount')) or 0,
+        ))
+
+    return len(changes)
+
+
+def insert_token_balance_changes(tx_id: int, tx_data: dict, shredder: TxShredder, cursor) -> int:
+    """Insert token balance change records"""
+    changes = tx_data.get('token_bal_change', [])
+
+    for change in changes:
+        token_account = change.get('address')
+        token_addr = change.get('token_address')
+        owner = change.get('owner')
+
+        if not token_account or not token_addr:
+            continue
+
+        cursor.execute("""
+            INSERT INTO tx_token_balance_change
+            (tx_id, token_account_id, owner_id, token_id, decimals,
+             pre_balance, post_balance, change_amount, change_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                owner_id = VALUES(owner_id),
+                pre_balance = VALUES(pre_balance),
+                post_balance = VALUES(post_balance),
+                change_amount = VALUES(change_amount),
+                change_type = VALUES(change_type)
+        """, (
+            tx_id,
+            shredder.ensure_address(token_account, 'ata'),
+            shredder.ensure_address(owner, 'wallet'),
+            shredder.ensure_token(token_addr, decimals=change.get('decimals')),
+            change.get('decimals') or 0,
+            safe_int(change.get('pre_balance')) or 0,
+            safe_int(change.get('post_balance')) or 0,
+            safe_int(change.get('change_amount')) or 0,
+            change.get('change_type', 'inc'),
+        ))
+
+    return len(changes)
+
+
 def insert_tokens_from_metadata(metadata: dict, shredder: TxShredder):
     """Insert/update token metadata from JSON metadata section"""
     for token_addr, token_info in metadata.get('tokens', {}).items():
@@ -346,41 +450,71 @@ def process_transaction(tx_data: dict, metadata: dict, conn) -> dict:
     cursor = conn.cursor()
     shredder = TxShredder(cursor)
 
+    # Detect format
+    json_format = detect_json_format(tx_data)
+
     # First, ensure all tokens from metadata exist with full info
     insert_tokens_from_metadata(metadata, shredder)
 
     # Insert main transaction
-    tx_id = insert_transaction(tx_data, shredder, cursor)
+    tx_id = insert_transaction(tx_data, shredder, cursor, json_format)
 
-    # Insert child records
-    insert_transfers(tx_id, tx_data, shredder, cursor)
-    insert_swaps(tx_id, tx_data, shredder, cursor)
-    insert_activities(tx_id, tx_data, shredder, cursor)
+    # Initialize stats
+    stats = {
+        'tx_id': tx_id,
+        'tx_hash': tx_data.get('tx_hash'),
+        'format': json_format,
+        'transfers': 0,
+        'swaps': 0,
+        'activities': 0,
+        'signers': 0,
+        'sol_changes': 0,
+        'token_changes': 0,
+        'tokens': len(metadata.get('tokens', {})),
+        'programs': 0,
+        'pools': 0,
+    }
+
+    # Insert child records based on format
+    if json_format == 'decoded':
+        insert_transfers(tx_id, tx_data, shredder, cursor)
+        insert_swaps(tx_id, tx_data, shredder, cursor)
+        insert_activities(tx_id, tx_data, shredder, cursor)
+
+        stats['transfers'] = len(tx_data.get('transfers', []))
+        stats['swaps'] = sum(1 for a in tx_data.get('activities', [])
+                            if a.get('activity_type') in ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP'))
+        stats['activities'] = sum(1 for a in tx_data.get('activities', [])
+                                 if a.get('activity_type') not in ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP'))
+
+    elif json_format == 'detail':
+        stats['signers'] = insert_signers(tx_id, tx_data, shredder, cursor)
+        stats['sol_changes'] = insert_sol_balance_changes(tx_id, tx_data, shredder, cursor)
+        stats['token_changes'] = insert_token_balance_changes(tx_id, tx_data, shredder, cursor)
+
+    stats['programs'] = len(shredder._program_cache)
+    stats['pools'] = len(shredder._pool_cache)
 
     conn.commit()
     cursor.close()
 
-    return {
-        'tx_id': tx_id,
-        'tx_hash': tx_data.get('tx_hash'),
-        'transfers': len(tx_data.get('transfers', [])),
-        'swaps': sum(1 for a in tx_data.get('activities', [])
-                     if a.get('activity_type') in ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP')),
-        'activities': sum(1 for a in tx_data.get('activities', [])
-                         if a.get('activity_type') not in ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP')),
-        'tokens': len(metadata.get('tokens', {})),
-        'programs': len(shredder._program_cache),
-        'pools': len(shredder._pool_cache),
-    }
+    return stats
 
 
 def print_summary(stats: dict) -> None:
     """Print summary of processed transaction"""
     print(f"\n{'='*60}")
-    print(f"Transaction: {stats['tx_hash'][:20]}... (id={stats['tx_id']})")
-    print(f"Transfers: {stats['transfers']}")
-    print(f"Swaps: {stats['swaps']}")
-    print(f"Activities: {stats['activities']}")
+    print(f"Transaction: {stats['tx_hash'][:20]}... (id={stats['tx_id']}) [{stats['format']}]")
+
+    if stats['format'] == 'decoded':
+        print(f"Transfers: {stats['transfers']}")
+        print(f"Swaps: {stats['swaps']}")
+        print(f"Activities: {stats['activities']}")
+    elif stats['format'] == 'detail':
+        print(f"Signers: {stats['signers']}")
+        print(f"SOL Balance Changes: {stats['sol_changes']}")
+        print(f"Token Balance Changes: {stats['token_changes']}")
+
     print(f"Tokens: {stats['tokens']}")
     print(f"Programs: {stats['programs']}")
     print(f"Pools: {stats['pools']}")
@@ -413,14 +547,26 @@ def main():
         tx_list = [tx_list]
 
     metadata = data.get('metadata', {})
+
+    # Detect format from first tx
+    if tx_list:
+        json_format = detect_json_format(tx_list[0])
+        print(f"Detected format: {json_format}")
+
     print(f"Found {len(tx_list)} transaction(s)")
 
     if args.dry_run:
         # Just show counts
         for i, tx_data in enumerate(tx_list):
-            print(f"\n[{i+1}/{len(tx_list)}] {tx_data.get('tx_hash', 'unknown')[:20]}...")
-            print(f"  Transfers: {len(tx_data.get('transfers', []))}")
-            print(f"  Activities: {len(tx_data.get('activities', []))}")
+            fmt = detect_json_format(tx_data)
+            print(f"\n[{i+1}/{len(tx_list)}] {tx_data.get('tx_hash', 'unknown')[:20]}... [{fmt}]")
+            if fmt == 'decoded':
+                print(f"  Transfers: {len(tx_data.get('transfers', []))}")
+                print(f"  Activities: {len(tx_data.get('activities', []))}")
+            elif fmt == 'detail':
+                print(f"  SOL Changes: {len(tx_data.get('sol_bal_change', []))}")
+                print(f"  Token Changes: {len(tx_data.get('token_bal_change', []))}")
+                print(f"  Signers: {len(tx_data.get('list_signer', tx_data.get('signer', [])))}")
         print("\nDry run - no database insert")
         return 0
 
