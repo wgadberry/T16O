@@ -205,7 +205,7 @@ def insert_transaction(tx_data: dict, shredder: TxShredder, cursor, json_format:
 
     cursor.execute("""
         INSERT INTO tx
-        (tx_hash, block_id, block_time, block_time_utc, fee, priority_fee,
+        (signature, block_id, block_time, block_time_utc, fee, priority_fee,
          agg_program_id, agg_account_id, agg_token_in_id, agg_token_out_id,
          agg_amount_in, agg_amount_out, agg_decimals_in, agg_decimals_out,
          agg_fee_amount, agg_fee_token_id, tx_json)
@@ -215,7 +215,7 @@ def insert_transaction(tx_data: dict, shredder: TxShredder, cursor, json_format:
             tx_json = VALUES(tx_json),
             id = LAST_INSERT_ID(id)
     """, (
-        tx_data.get('tx_hash'),
+        tx_data.get('tx_hash'),  # API field is tx_hash, DB column is signature
         tx_data.get('block_id'),
         tx_data.get('block_time'),
         block_time_utc,
@@ -462,7 +462,7 @@ def process_transaction(tx_data: dict, metadata: dict, conn) -> dict:
     # Initialize stats
     stats = {
         'tx_id': tx_id,
-        'tx_hash': tx_data.get('tx_hash'),
+        'signature': tx_data.get('tx_hash'),
         'format': json_format,
         'transfers': 0,
         'swaps': 0,
@@ -504,7 +504,7 @@ def process_transaction(tx_data: dict, metadata: dict, conn) -> dict:
 def print_summary(stats: dict) -> None:
     """Print summary of processed transaction"""
     print(f"\n{'='*60}")
-    print(f"Transaction: {stats['tx_hash'][:20]}... (id={stats['tx_id']}) [{stats['format']}]")
+    print(f"Transaction: {stats['signature'][:20]}... (id={stats['tx_id']}) [{stats['format']}]")
 
     if stats['format'] == 'decoded':
         print(f"Transfers: {stats['transfers']}")
@@ -559,7 +559,7 @@ def main():
         # Just show counts
         for i, tx_data in enumerate(tx_list):
             fmt = detect_json_format(tx_data)
-            print(f"\n[{i+1}/{len(tx_list)}] {tx_data.get('tx_hash', 'unknown')[:20]}... [{fmt}]")
+            print(f"\n[{i+1}/{len(tx_list)}] {tx_data.get('tx_hash', 'unknown')[:20]}... [{fmt}]")  # API field is tx_hash
             if fmt == 'decoded':
                 print(f"  Transfers: {len(tx_data.get('transfers', []))}")
                 print(f"  Activities: {len(tx_data.get('activities', []))}")

@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS `tx` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `tx_hash` varchar(88) NOT NULL,
+  `signature` varchar(88) NOT NULL,
   `block_id` bigint unsigned DEFAULT NULL,
   `block_time` bigint unsigned DEFAULT NULL,
   `block_time_utc` datetime DEFAULT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS `tx` (
   `tx_state` varchar(16)  DEFAULT 'primed',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_tx_hash` (`tx_hash`),
+  UNIQUE KEY `uk_signature` (`signature`),
   KEY `idx_block_time` (`block_time`),
   KEY `idx_signer` (`signer_id`),
   KEY `idx_agg_account` (`agg_account_id`),

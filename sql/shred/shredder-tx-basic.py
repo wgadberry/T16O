@@ -121,8 +121,8 @@ class TxBasicShredder:
 def insert_transaction(tx_data: dict, shredder: TxBasicShredder, cursor) -> Optional[int]:
     """Insert main tx record and return tx.id"""
 
-    tx_hash = tx_data.get('tx_hash')
-    if not tx_hash:
+    signature = tx_data.get('tx_hash')
+    if not signature:
         return None
 
     # Get primary signer (first in list)
@@ -134,7 +134,7 @@ def insert_transaction(tx_data: dict, shredder: TxBasicShredder, cursor) -> Opti
 
     cursor.execute("""
         INSERT INTO tx
-        (tx_hash, block_id, block_time, block_time_utc, fee, signer_id)
+        (signature, block_id, block_time, block_time_utc, fee, signer_id)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             block_id = VALUES(block_id),
@@ -143,7 +143,7 @@ def insert_transaction(tx_data: dict, shredder: TxBasicShredder, cursor) -> Opti
             signer_id = VALUES(signer_id),
             id = LAST_INSERT_ID(id)
     """, (
-        tx_hash,
+        signature,
         tx_data.get('slot'),  # slot is the block_id
         tx_data.get('block_time'),
         block_time_utc,
@@ -213,7 +213,7 @@ def process_transaction(tx_data: dict, shredder: TxBasicShredder, cursor, conn) 
 
     return {
         'tx_id': tx_id,
-        'tx_hash': tx_data.get('tx_hash'),
+        'signature': tx_data.get('tx_hash'),
         'status': tx_data.get('status'),
         'signers': signer_count,
         'programs': program_count,
@@ -223,7 +223,7 @@ def process_transaction(tx_data: dict, shredder: TxBasicShredder, cursor, conn) 
 def print_tx_summary(stats: dict, idx: int, total: int) -> None:
     """Print summary for a processed transaction"""
     status_icon = "+" if stats['status'] == 'Success' else "x"
-    print(f"  [{status_icon}] {idx}/{total} {stats['tx_hash'][:16]}... (id={stats['tx_id']}) signers={stats['signers']} programs={stats['programs']}")
+    print(f"  [{status_icon}] {idx}/{total} {stats['signature'][:16]}... (id={stats['tx_id']}) signers={stats['signers']} programs={stats['programs']}")
 
 
 def main():
