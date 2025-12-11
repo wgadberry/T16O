@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS `tx_address` (
   `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `address` char(44) NOT NULL,
+  `address` varchar(44) NOT NULL,
   `address_type` enum('program','pool','mint','vault','wallet','ata','unknown') DEFAULT NULL,
   `parent_id` int unsigned DEFAULT NULL,
   `program_id` int unsigned DEFAULT NULL,
