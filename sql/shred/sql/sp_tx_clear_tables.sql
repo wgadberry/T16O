@@ -17,7 +17,7 @@ BEGIN
     TRUNCATE TABLE tx_activity;
     TRUNCATE TABLE tx_token;
     TRUNCATE TABLE tx_instruction;
-    TRUNCATE TABLE tx_transaction_signer;
+    TRUNCATE TABLE tx_signer;
     TRUNCATE TABLE tx_sol_balance_change;
     TRUNCATE TABLE tx_token_balance_change;
     TRUNCATE TABLE tx_token_holder;

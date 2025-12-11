@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS `tx` (
   `agg_fee_amount` bigint unsigned DEFAULT NULL,
   `agg_fee_token_id` bigint DEFAULT NULL COMMENT 'FK to tx_token - fee token',
   `tx_json` json DEFAULT NULL,
+  `tx_state` varchar(16)  DEFAULT 'primed',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_tx_hash` (`tx_hash`),
