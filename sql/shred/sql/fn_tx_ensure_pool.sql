@@ -24,29 +24,29 @@ BEGIN
     -- Ensure pool address exists first
     SET v_address_id = fn_tx_ensure_address(p_pool_address, 'pool');
 
-    -- Try to find existing pool
-    SELECT id INTO v_pool_id FROM tx_pool WHERE address_id = v_address_id LIMIT 1;
-
-    -- If not found, create dependencies and insert
-    IF v_pool_id IS NULL THEN
-        -- Ensure program exists (if provided)
-        IF p_program_address IS NOT NULL THEN
-            SET v_program_id = fn_tx_ensure_program(p_program_address, NULL, 'dex');
-        END IF;
-
-        -- Ensure tokens exist (if provided) - minimal metadata, will be updated later
-        IF p_token1_address IS NOT NULL THEN
-            SET v_token1_id = fn_tx_ensure_token(p_token1_address, NULL, NULL, NULL, NULL);
-        END IF;
-
-        IF p_token2_address IS NOT NULL THEN
-            SET v_token2_id = fn_tx_ensure_token(p_token2_address, NULL, NULL, NULL, NULL);
-        END IF;
-
-        INSERT INTO tx_pool (address_id, program_id, token1_id, token2_id, first_seen_tx_id)
-        VALUES (v_address_id, v_program_id, v_token1_id, v_token2_id, p_first_seen_tx_id);
-        SET v_pool_id = LAST_INSERT_ID();
+    -- Ensure dependencies exist (if provided)
+    IF p_program_address IS NOT NULL THEN
+        SET v_program_id = fn_tx_ensure_program(p_program_address, NULL, 'dex');
     END IF;
+
+    IF p_token1_address IS NOT NULL THEN
+        SET v_token1_id = fn_tx_ensure_token(p_token1_address, NULL, NULL, NULL, NULL);
+    END IF;
+
+    IF p_token2_address IS NOT NULL THEN
+        SET v_token2_id = fn_tx_ensure_token(p_token2_address, NULL, NULL, NULL, NULL);
+    END IF;
+
+    -- Atomic upsert - handles race conditions
+    INSERT INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, first_seen_tx_id)
+    VALUES (v_address_id, v_program_id, v_token1_id, v_token2_id, p_first_seen_tx_id)
+    ON DUPLICATE KEY UPDATE
+        id = LAST_INSERT_ID(id),
+        program_id = COALESCE(VALUES(program_id), program_id),
+        token1_id = COALESCE(VALUES(token1_id), token1_id),
+        token2_id = COALESCE(VALUES(token2_id), token2_id);
+
+    SET v_pool_id = LAST_INSERT_ID();
 
     RETURN v_pool_id;
 END //

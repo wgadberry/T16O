@@ -165,7 +165,7 @@ class BulkShredder:
             INSERT INTO tx_transfer
             (tx_id, ins_index, outer_ins_index, transfer_type,
              program_id, outer_program_id, token_id, decimals, amount,
-             source_id, source_owner_id, destination_id, destination_owner_id,
+             source_address_id, source_owner_address_id, destination_address_id, destination_owner_address_id,
              base_token_id, base_decimals, base_amount)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, self._transfer_buffer)
@@ -182,10 +182,10 @@ class BulkShredder:
         self.cursor.executemany("""
             INSERT INTO tx_swap
             (tx_id, ins_index, outer_ins_index, name, activity_type,
-             program_id, outer_program_id, amm_id, account_id,
+             program_id, outer_program_id, amm_id, account_address_id,
              token_1_id, token_2_id, amount_1, amount_2, decimals_1, decimals_2,
-             token_account_1_1_id, token_account_1_2_id, token_account_2_1_id, token_account_2_2_id,
-             owner_1_id, owner_2_id, fee_amount, fee_token_id, side)
+             token_account_1_1_address_id, token_account_1_2_address_id, token_account_2_1_address_id, token_account_2_2_address_id,
+             owner_1_address_id, owner_2_address_id, fee_amount, fee_token_id, side)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, self._swap_buffer)
 
@@ -201,8 +201,8 @@ class BulkShredder:
         self.cursor.executemany("""
             INSERT INTO tx_activity
             (tx_id, ins_index, outer_ins_index, name, activity_type,
-             program_id, outer_program_id, data_json)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+             program_id, outer_program_id, account_address_id, data_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, self._activity_buffer)
 
         count = len(self._activity_buffer)
@@ -215,9 +215,9 @@ class BulkShredder:
             return 0
 
         self.cursor.executemany("""
-            INSERT INTO tx_signer (tx_id, signer_id, signer_index)
+            INSERT INTO tx_signer (tx_id, signer_address_id, signer_index)
             VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE signer_id = VALUES(signer_id)
+            ON DUPLICATE KEY UPDATE signer_address_id = VALUES(signer_address_id)
         """, self._signer_buffer)
 
         count = len(self._signer_buffer)
@@ -250,11 +250,11 @@ class BulkShredder:
 
         self.cursor.executemany("""
             INSERT INTO tx_token_balance_change
-            (tx_id, token_account_id, owner_id, token_id, decimals,
+            (tx_id, token_account_address_id, owner_address_id, token_id, decimals,
              pre_balance, post_balance, change_amount, change_type)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
-                owner_id = VALUES(owner_id),
+                owner_address_id = VALUES(owner_address_id),
                 pre_balance = VALUES(pre_balance),
                 post_balance = VALUES(post_balance),
                 change_amount = VALUES(change_amount),
@@ -308,8 +308,54 @@ def extract_agg_swap(summaries: list) -> dict:
     return result
 
 
-def process_decoded_tx(tx_data: dict, tx_id: int, metadata: dict, shredder: BulkShredder):
+def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
+    """Update tx record with decoded data (agg fields, priority_fee, tx_json)"""
+    agg = extract_agg_swap(tx_data.get('summaries', []))
+
+    # Parse block_time_utc from 'time' field
+    block_time_utc = None
+    if tx_data.get('time'):
+        block_time_utc = parse_iso_datetime(tx_data.get('time'))
+
+    cursor.execute("""
+        UPDATE tx SET
+            priority_fee = COALESCE(%s, priority_fee),
+            block_time_utc = COALESCE(%s, block_time_utc),
+            agg_program_id = %s,
+            agg_account_address_id = %s,
+            agg_token_in_id = %s,
+            agg_token_out_id = %s,
+            agg_amount_in = %s,
+            agg_amount_out = %s,
+            agg_decimals_in = %s,
+            agg_decimals_out = %s,
+            agg_fee_amount = %s,
+            agg_fee_token_id = %s,
+            tx_json = %s
+        WHERE id = %s
+    """, (
+        tx_data.get('priority_fee'),
+        block_time_utc,
+        shredder.ensure_program(agg['agg_program_id']),
+        shredder.ensure_address(agg['agg_account'], 'wallet'),
+        shredder.ensure_token(agg['agg_token_in']),
+        shredder.ensure_token(agg['agg_token_out']),
+        agg['agg_amount_in'],
+        agg['agg_amount_out'],
+        agg['agg_decimals_in'],
+        agg['agg_decimals_out'],
+        agg['agg_fee_amount'],
+        shredder.ensure_token(agg['agg_fee_token']),
+        orjson.dumps(tx_data).decode('utf-8'),
+        tx_id,
+    ))
+
+
+def process_decoded_tx(tx_data: dict, tx_id: int, metadata: dict, shredder: BulkShredder, cursor):
     """Process decoded transaction data (transfers, activities, swaps)"""
+
+    # Update tx record with agg fields, priority_fee, tx_json
+    update_tx_with_decoded_data(tx_data, tx_id, shredder, cursor)
 
     # Insert tokens from metadata first
     for token_addr, token_info in metadata.get('tokens', {}).items():
@@ -388,11 +434,12 @@ def process_decoded_tx(tx_data: dict, tx_id: int, metadata: dict, shredder: Bulk
                 activity_type,
                 shredder.ensure_program(a.get('program_id')),
                 shredder.ensure_program(a.get('outer_program_id')),
+                shredder.ensure_address(data.get('account'), 'wallet'),
                 orjson.dumps(data).decode('utf-8'),
             ))
 
 
-def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder):
+def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
     """Process detail transaction data (balance changes, signers)"""
 
     # Buffer signers
@@ -400,12 +447,21 @@ def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder):
     if isinstance(signers, str):
         signers = [signers]
 
+    first_signer_id = None
     for idx, signer_addr in enumerate(signers):
+        signer_id = shredder.ensure_address(signer_addr, 'wallet')
+        if idx == 0:
+            first_signer_id = signer_id
         shredder._signer_buffer.append((
             tx_id,
-            shredder.ensure_address(signer_addr, 'wallet'),
+            signer_id,
             idx,
         ))
+
+    # Update tx.signer_address_id with first signer
+    if first_signer_id:
+        cursor.execute("UPDATE tx SET signer_address_id = %s WHERE id = %s AND signer_address_id IS NULL",
+                      (first_signer_id, tx_id))
 
     # Buffer SOL balance changes
     for change in tx_data.get('sol_bal_change', []):
@@ -468,7 +524,7 @@ def process_message(body: bytes, cursor, conn) -> dict:
         sig = tx.get('tx_hash')
         tx_id = sig_to_txid.get(sig)
         if tx_id:
-            process_decoded_tx(tx, tx_id, metadata, shredder)
+            process_decoded_tx(tx, tx_id, metadata, shredder, cursor)
             stats['decoded'] += 1
 
     # Process detail transactions
@@ -480,7 +536,7 @@ def process_message(body: bytes, cursor, conn) -> dict:
             cursor.execute("SELECT id FROM tx WHERE id = %s AND block_id = %s", (tid, block_id))
             row = cursor.fetchone()
             if row:
-                process_detail_tx(tx, row[0], shredder)
+                process_detail_tx(tx, row[0], shredder, cursor)
                 stats['detail'] += 1
                 break
 

@@ -134,13 +134,13 @@ def insert_transaction(tx_data: dict, shredder: TxBasicShredder, cursor) -> Opti
 
     cursor.execute("""
         INSERT INTO tx
-        (signature, block_id, block_time, block_time_utc, fee, signer_id)
+        (signature, block_id, block_time, block_time_utc, fee, signer_address_id)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             block_id = VALUES(block_id),
             block_time = VALUES(block_time),
             fee = VALUES(fee),
-            signer_id = VALUES(signer_id),
+            signer_address_id = VALUES(signer_address_id),
             id = LAST_INSERT_ID(id)
     """, (
         signature,
@@ -160,9 +160,9 @@ def insert_signers(tx_id: int, tx_data: dict, shredder: TxBasicShredder, cursor)
 
     for idx, signer_addr in enumerate(signers):
         cursor.execute("""
-            INSERT INTO tx_signer (tx_id, signer_id, signer_index)
+            INSERT INTO tx_signer (tx_id, signer_address_id, signer_index)
             VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE signer_id = VALUES(signer_id)
+            ON DUPLICATE KEY UPDATE signer_address_id = VALUES(signer_address_id)
         """, (
             tx_id,
             shredder.ensure_address(signer_addr, 'wallet'),

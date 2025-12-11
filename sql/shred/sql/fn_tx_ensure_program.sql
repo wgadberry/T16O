@@ -19,18 +19,14 @@ BEGIN
     -- Ensure address exists first
     SET v_address_id = fn_tx_ensure_address(p_address, 'program');
 
-    -- Try to find existing program
-    SELECT id INTO v_program_id FROM tx_program WHERE address_id = v_address_id LIMIT 1;
+    -- Atomic upsert - handles race conditions
+    INSERT INTO tx_program (program_address_id, name, program_type)
+    VALUES (v_address_id, p_name, COALESCE(p_program_type, 'other'))
+    ON DUPLICATE KEY UPDATE
+        id = LAST_INSERT_ID(id),
+        name = COALESCE(VALUES(name), name);
 
-    -- If not found, insert
-    IF v_program_id IS NULL THEN
-        INSERT INTO tx_program (address_id, name, program_type)
-        VALUES (v_address_id, p_name, COALESCE(p_program_type, 'other'));
-        SET v_program_id = LAST_INSERT_ID();
-    ELSEIF p_name IS NOT NULL THEN
-        -- Update name if provided and program exists
-        UPDATE tx_program SET name = COALESCE(p_name, name) WHERE id = v_program_id;
-    END IF;
+    SET v_program_id = LAST_INSERT_ID();
 
     RETURN v_program_id;
 END //

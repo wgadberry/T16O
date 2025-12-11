@@ -10,13 +10,16 @@ CREATE TABLE IF NOT EXISTS `tx_activity` (
   `activity_type` varchar(50) DEFAULT NULL,
   `program_id` bigint unsigned DEFAULT NULL COMMENT 'FK to tx_program',
   `outer_program_id` bigint unsigned DEFAULT NULL COMMENT 'FK to tx_program',
+  `account_address_id` int unsigned DEFAULT NULL COMMENT 'FK to tx_address - actor wallet',
   `data_json` json DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_tx` (`tx_id`),
   KEY `idx_activity_type` (`activity_type`),
   KEY `idx_program` (`program_id`),
+  KEY `idx_account` (`account_address_id`),
   KEY `idx_tx_ins` (`tx_id`, `ins_index`),
   CONSTRAINT `tx_activity_ibfk_tx` FOREIGN KEY (`tx_id`) REFERENCES `tx` (`id`) ON DELETE CASCADE,
   CONSTRAINT `tx_activity_ibfk_program` FOREIGN KEY (`program_id`) REFERENCES `tx_program` (`id`),
-  CONSTRAINT `tx_activity_ibfk_outer_program` FOREIGN KEY (`outer_program_id`) REFERENCES `tx_program` (`id`)
+  CONSTRAINT `tx_activity_ibfk_outer_program` FOREIGN KEY (`outer_program_id`) REFERENCES `tx_program` (`id`),
+  CONSTRAINT `tx_activity_ibfk_account` FOREIGN KEY (`account_address_id`) REFERENCES `tx_address` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

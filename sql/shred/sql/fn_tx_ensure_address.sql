@@ -14,15 +14,12 @@ DETERMINISTIC
 BEGIN
     DECLARE v_id INT UNSIGNED;
 
-    -- Try to find existing
-    SELECT id INTO v_id FROM tx_address WHERE address = p_address LIMIT 1;
+    -- Atomic upsert - handles race conditions
+    INSERT INTO tx_address (address, address_type)
+    VALUES (p_address, p_address_type)
+    ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id);
 
-    -- If not found, insert
-    IF v_id IS NULL THEN
-        INSERT INTO tx_address (address, address_type)
-        VALUES (p_address, p_address_type);
-        SET v_id = LAST_INSERT_ID();
-    END IF;
+    SET v_id = LAST_INSERT_ID();
 
     RETURN v_id;
 END //
