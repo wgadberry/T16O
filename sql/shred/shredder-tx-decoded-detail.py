@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
 """
 Solscan Transaction Decoded+Detail Fetcher
-Fetches decoded and detail data for primed transactions and saves combined JSON to disk.
+Fetches decoded and detail data for primed transactions using parallel API calls.
+Publishes enriched data to RabbitMQ for downstream processing.
 
 Workflow:
 1. Query DB for transactions where tx_state = 'primed' (batch of 20)
 2. Update tx_state to 'processing'
-3. Call /transaction/actions/multi API (decoded data)
-4. Call /transaction/detail/multi API (detail data)
-5. Combine responses and save to files/tx/drop/episode_tx__{uuid}.ready
-6. Update tx_state to 'ready'
-7. Loop until no more primed transactions or max batches reached
+3. Call /transaction/actions/multi AND /transaction/detail/multi in PARALLEL
+4. Combine responses and publish to RabbitMQ (or save to disk as fallback)
+5. Update tx_state to 'ready'
+6. Loop until no more primed transactions or max batches reached
 
 Usage:
     python shredder-tx-decoded-detail.py [--max-batches 10] [--batch-size 20]
     python shredder-tx-decoded-detail.py --dry-run
+    python shredder-tx-decoded-detail.py --no-rabbitmq  # File-only mode
 """
 
 import argparse
+import asyncio
 import uuid
 import os
 import orjson
-import requests
 import time
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
+
+# Async HTTP client
+try:
+    import aiohttp
+    HAS_AIOHTTP = True
+except ImportError:
+    HAS_AIOHTTP = False
 
 # MySQL connector
 try:
@@ -33,19 +41,26 @@ try:
 except ImportError:
     HAS_MYSQL = False
 
+# RabbitMQ client
+try:
+    import pika
+    HAS_PIKA = True
+except ImportError:
+    HAS_PIKA = False
+
 # Solscan API config
 SOLSCAN_API_BASE = "https://pro-api.solscan.io/v2.0"
 SOLSCAN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
 
-# Output directory
+# Output directory (fallback when RabbitMQ not available)
 DROP_DIR = os.path.join(os.path.dirname(__file__), "files", "tx", "drop")
 
-
-def create_api_session() -> requests.Session:
-    """Create a requests session with persistent connection and auth header"""
-    session = requests.Session()
-    session.headers.update({"token": SOLSCAN_API_TOKEN})
-    return session
+# RabbitMQ config
+RABBITMQ_HOST = 'localhost'
+RABBITMQ_PORT = 5692
+RABBITMQ_USER = 'admin'
+RABBITMQ_PASS = 'admin123'
+RABBITMQ_QUEUE = 'tx.enriched'
 
 
 def get_primed_transactions(cursor, batch_size: int) -> List[Dict]:
@@ -80,31 +95,41 @@ def build_multi_url(endpoint: str, signatures: List[str]) -> str:
     return f"{SOLSCAN_API_BASE}/{endpoint}?{tx_params}"
 
 
-def fetch_decoded(session: requests.Session, signatures: List[str]) -> Optional[dict]:
-    """Fetch decoded/actions data for multiple transactions"""
-    url = build_multi_url("transaction/actions/multi", signatures)
-
-    response = session.get(url)
-    response.raise_for_status()
-    return response.json()
-
-
-def fetch_detail(session: requests.Session, signatures: List[str]) -> Optional[dict]:
-    """Fetch detail data for multiple transactions"""
-    url = build_multi_url("transaction/detail/multi", signatures)
-
-    response = session.get(url)
-    response.raise_for_status()
-    return response.json()
+async def fetch_endpoint(session: aiohttp.ClientSession, endpoint: str, signatures: List[str]) -> dict:
+    """Fetch data from a Solscan endpoint asynchronously"""
+    url = build_multi_url(endpoint, signatures)
+    async with session.get(url) as response:
+        response.raise_for_status()
+        return await response.json()
 
 
-def combine_responses(decoded_response: dict, detail_response: dict) -> dict:
+async def fetch_decoded_and_detail_parallel(signatures: List[str]) -> Tuple[dict, dict]:
+    """Fetch both decoded and detail data in parallel"""
+    headers = {"token": SOLSCAN_API_TOKEN}
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # Launch both requests in parallel
+        decoded_task = asyncio.create_task(
+            fetch_endpoint(session, "transaction/actions/multi", signatures)
+        )
+        detail_task = asyncio.create_task(
+            fetch_endpoint(session, "transaction/detail/multi", signatures)
+        )
+
+        # Wait for both to complete
+        decoded_response, detail_response = await asyncio.gather(decoded_task, detail_task)
+
+    return decoded_response, detail_response
+
+
+def combine_responses(decoded_response: dict, detail_response: dict, tx_ids: List[int]) -> dict:
     """Combine decoded and detail responses into unified format"""
     return {
         "tx": [
             {"decoded": decoded_response},
             {"detail": detail_response}
         ],
+        "tx_ids": tx_ids,
         "created_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     }
 
@@ -124,16 +149,53 @@ def save_combined_json(combined: dict, drop_dir: str) -> str:
     return filepath
 
 
-def process_batch(
+def publish_to_rabbitmq(channel, combined: dict) -> bool:
+    """Publish combined JSON to RabbitMQ queue"""
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_QUEUE,
+            body=orjson.dumps(combined),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Persistent message
+                content_type='application/json'
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"  RabbitMQ publish error: {e}")
+        return False
+
+
+def setup_rabbitmq(host: str, port: int, user: str, password: str) -> Tuple[Optional[pika.BlockingConnection], Optional[pika.channel.Channel]]:
+    """Setup RabbitMQ connection and channel"""
+    try:
+        credentials = pika.PlainCredentials(user, password)
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(host=host, port=port, credentials=credentials)
+        )
+        channel = connection.channel()
+
+        # Declare queue (idempotent)
+        channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+
+        return connection, channel
+    except Exception as e:
+        print(f"Warning: Could not connect to RabbitMQ: {e}")
+        return None, None
+
+
+async def process_batch_async(
     cursor,
     conn,
-    session: requests.Session,
     batch_size: int,
     drop_dir: str,
+    rabbitmq_channel,
+    use_rabbitmq: bool,
     dry_run: bool = False
 ) -> Tuple[int, bool]:
     """
-    Process a single batch of transactions.
+    Process a single batch of transactions with parallel API calls.
 
     Returns:
         Tuple of (count processed, has more data)
@@ -159,24 +221,35 @@ def process_batch(
     print(f"  Updated {len(tx_ids)} transactions to 'processing'")
 
     try:
-        # Step 3: Fetch decoded data
-        print(f"  Fetching decoded data...")
-        decoded_response = fetch_decoded(session, signatures)
+        # Step 3 & 4: Fetch decoded AND detail data in PARALLEL
+        print(f"  Fetching decoded + detail data (parallel)...")
+        start_time = time.time()
+
+        decoded_response, detail_response = await fetch_decoded_and_detail_parallel(signatures)
+
+        elapsed = time.time() - start_time
+        print(f"  API calls completed in {elapsed:.2f}s")
 
         if not decoded_response.get('success'):
             raise Exception("Decoded API returned unsuccessful response")
 
-        # Step 4: Fetch detail data
-        print(f"  Fetching detail data...")
-        detail_response = fetch_detail(session, signatures)
-
         if not detail_response.get('success'):
             raise Exception("Detail API returned unsuccessful response")
 
-        # Step 5: Combine and save
-        combined = combine_responses(decoded_response, detail_response)
-        filepath = save_combined_json(combined, drop_dir)
-        print(f"  Saved to: {os.path.basename(filepath)}")
+        # Step 5: Combine responses
+        combined = combine_responses(decoded_response, detail_response, tx_ids)
+
+        # Publish to RabbitMQ or save to file
+        if use_rabbitmq and rabbitmq_channel:
+            if publish_to_rabbitmq(rabbitmq_channel, combined):
+                print(f"  Published to RabbitMQ queue: {RABBITMQ_QUEUE}")
+            else:
+                # Fallback to file
+                filepath = save_combined_json(combined, drop_dir)
+                print(f"  RabbitMQ failed, saved to: {os.path.basename(filepath)}")
+        else:
+            filepath = save_combined_json(combined, drop_dir)
+            print(f"  Saved to: {os.path.basename(filepath)}")
 
         # Step 6: Update state to 'ready'
         update_tx_state(cursor, conn, tx_ids, 'ready')
@@ -192,37 +265,15 @@ def process_batch(
         raise
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Fetch decoded+detail data for primed transactions and save to disk'
-    )
-    parser.add_argument('--max-batches', type=int, default=0,
-                        help='Maximum batches to process (0 = unlimited)')
-    parser.add_argument('--batch-size', type=int, default=20,
-                        help='Transactions per batch (default: 20)')
-    parser.add_argument('--db-host', default='localhost', help='MySQL host')
-    parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
-    parser.add_argument('--db-user', default='root', help='MySQL user')
-    parser.add_argument('--db-pass', default='rootpassword', help='MySQL password')
-    parser.add_argument('--db-name', default='t16o_db', help='MySQL database')
-    parser.add_argument('--drop-dir', default=DROP_DIR, help='Output directory for JSON files')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Show what would be processed without making changes')
-    parser.add_argument('--delay', type=float, default=0.5,
-                        help='Delay between batches in seconds')
+async def main_async(args):
+    """Async main function"""
 
-    args = parser.parse_args()
-
-    if not HAS_MYSQL:
-        print("Error: mysql-connector-python not installed")
-        print("Install with: pip install mysql-connector-python")
-        return 1
-
-    print(f"Shredder TX Decoded+Detail Fetcher")
+    print(f"Shredder TX Decoded+Detail Fetcher (Async)")
     print(f"{'='*50}")
     print(f"Batch size: {args.batch_size}")
     print(f"Max batches: {args.max_batches if args.max_batches > 0 else 'unlimited'}")
     print(f"Drop directory: {args.drop_dir}")
+    print(f"RabbitMQ: {'disabled' if args.no_rabbitmq else f'{args.rabbitmq_host}:{args.rabbitmq_port}'}")
     if args.dry_run:
         print(f"MODE: DRY RUN")
     print()
@@ -230,8 +281,6 @@ def main():
     # Connect to DB
     print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
     conn = mysql.connector.connect(
- 	pool_name="t16o_db_pool",
-        pool_size=10,
         host=args.db_host,
         port=args.db_port,
         user=args.db_user,
@@ -240,8 +289,22 @@ def main():
     )
     cursor = conn.cursor()
 
-    # Create persistent HTTP session
-    api_session = create_api_session()
+    # Setup RabbitMQ (optional)
+    rabbitmq_conn = None
+    rabbitmq_channel = None
+    use_rabbitmq = not args.no_rabbitmq and HAS_PIKA
+
+    if use_rabbitmq:
+        print(f"Connecting to RabbitMQ {args.rabbitmq_host}:{args.rabbitmq_port}...")
+        rabbitmq_conn, rabbitmq_channel = setup_rabbitmq(
+            args.rabbitmq_host, args.rabbitmq_port,
+            args.rabbitmq_user, args.rabbitmq_pass
+        )
+        if rabbitmq_channel:
+            print(f"  Connected, queue: {RABBITMQ_QUEUE}")
+        else:
+            print(f"  Failed to connect, falling back to file output")
+            use_rabbitmq = False
 
     # Processing loop
     batch_num = 0
@@ -259,9 +322,11 @@ def main():
             print(f"\n--- Batch {batch_num} ---")
 
             try:
-                count, has_more = process_batch(
-                    cursor, conn, api_session,
-                    args.batch_size, args.drop_dir, args.dry_run
+                count, has_more = await process_batch_async(
+                    cursor, conn,
+                    args.batch_size, args.drop_dir,
+                    rabbitmq_channel, use_rabbitmq,
+                    args.dry_run
                 )
             except Exception as e:
                 print(f"Batch failed: {e}")
@@ -275,18 +340,66 @@ def main():
 
             # Rate limiting between batches
             if not args.dry_run:
-                time.sleep(args.delay)
+                await asyncio.sleep(args.delay)
 
     finally:
-        api_session.close()
         cursor.close()
         conn.close()
+        if rabbitmq_conn:
+            rabbitmq_conn.close()
 
     print(f"\n{'='*50}")
     print(f"Done! Processed {total_processed} transactions in {batch_num} batch(es)")
     print(f"{'='*50}")
 
     return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Fetch decoded+detail data for primed transactions (parallel API calls)'
+    )
+    parser.add_argument('--max-batches', type=int, default=0,
+                        help='Maximum batches to process (0 = unlimited)')
+    parser.add_argument('--batch-size', type=int, default=20,
+                        help='Transactions per batch (default: 20)')
+    parser.add_argument('--db-host', default='localhost', help='MySQL host')
+    parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
+    parser.add_argument('--db-user', default='root', help='MySQL user')
+    parser.add_argument('--db-pass', default='rootpassword', help='MySQL password')
+    parser.add_argument('--db-name', default='t16o_db', help='MySQL database')
+    parser.add_argument('--drop-dir', default=DROP_DIR, help='Output directory for JSON files')
+    parser.add_argument('--rabbitmq-host', default=RABBITMQ_HOST, help='RabbitMQ host')
+    parser.add_argument('--rabbitmq-port', type=int, default=RABBITMQ_PORT, help='RabbitMQ port')
+    parser.add_argument('--rabbitmq-user', default=RABBITMQ_USER, help='RabbitMQ user')
+    parser.add_argument('--rabbitmq-pass', default=RABBITMQ_PASS, help='RabbitMQ password')
+    parser.add_argument('--no-rabbitmq', action='store_true',
+                        help='Disable RabbitMQ, use file output only')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Show what would be processed without making changes')
+    parser.add_argument('--delay', type=float, default=0.5,
+                        help='Delay between batches in seconds')
+
+    args = parser.parse_args()
+
+    # Check dependencies
+    if not HAS_MYSQL:
+        print("Error: mysql-connector-python not installed")
+        print("Install with: pip install mysql-connector-python")
+        return 1
+
+    if not HAS_AIOHTTP:
+        print("Error: aiohttp not installed")
+        print("Install with: pip install aiohttp")
+        return 1
+
+    if not args.no_rabbitmq and not HAS_PIKA:
+        print("Warning: pika not installed, RabbitMQ disabled")
+        print("Install with: pip install pika")
+        args.no_rabbitmq = True
+
+    # Run async main
+    return asyncio.run(main_async(args))
 
 
 if __name__ == '__main__':

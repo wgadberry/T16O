@@ -1,10 +1,15 @@
 # shredder-tx-decoded-detail.py
 
-Fetches decoded and detail data from Solscan API for primed transactions and saves combined JSON files to disk.
+Fetches decoded and detail data from Solscan API for primed transactions using **parallel async API calls**. Publishes enriched data to RabbitMQ (or saves to disk as fallback).
 
 ## Overview
 
 This script is part of the transaction shredding pipeline. It processes transactions that have been initially captured by `shredder-tx-basic.py` (state: `primed`) and enriches them with full decoded and detail data from Solscan.
+
+**Key Features:**
+- Parallel API calls using `asyncio` + `aiohttp` (2x faster)
+- RabbitMQ integration for downstream processing
+- File fallback when RabbitMQ unavailable
 
 ## Workflow
 
@@ -158,10 +163,29 @@ If an error occurs during API calls or file saving:
 ## Dependencies
 
 ```bash
-pip install mysql-connector-python requests orjson
+pip install mysql-connector-python aiohttp orjson pika
 ```
 
 ## Related Scripts
 
 - `shredder-tx-basic.py` - Creates initial `primed` transactions from account history
-- `shredder.py` - Processes the combined JSON files (downstream consumer)
+- `shredder-consumer.py` - Consumes from RabbitMQ and shreds into DB with bulk inserts
+- `shredder.py` - Processes JSON files directly (legacy/standalone mode)
+
+## Architecture
+
+```
+┌──────────────────┐     ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│ shredder-tx-     │     │ shredder-tx-    │     │    RabbitMQ      │     │ shredder-       │
+│ basic.py         │────►│ decoded-detail  │────►│  tx.enriched     │────►│ consumer.py     │
+│                  │     │ (async/parallel)│     │                  │     │ (bulk inserts)  │
+└──────────────────┘     └─────────────────┘     └──────────────────┘     └─────────────────┘
+        │                        │                                                │
+        │                        │                                                │
+        ▼                        ▼                                                ▼
+   ┌─────────┐              ┌─────────┐                                     ┌─────────┐
+   │ MySQL   │              │ Solscan │                                     │ MySQL   │
+   │ tx_state│              │  API    │                                     │ (bulk)  │
+   │ =primed │              └─────────┘                                     └─────────┘
+   └─────────┘
+```
