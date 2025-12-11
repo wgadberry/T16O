@@ -81,14 +81,18 @@ def extract_agg_swap(summaries: list) -> dict:
     return result
 
 
-def shred_transaction(data: dict) -> dict:
+def shred_transaction(tx_data: dict, metadata: dict = None) -> dict:
     """
-    Shred a transaction JSON into flat table rows
+    Shred a single transaction JSON into flat table rows
+
+    Args:
+        tx_data: The transaction object (element from data array)
+        metadata: Optional metadata dict (tokens, etc)
 
     Returns dict with keys: tx, transfers, swaps, activities, tokens
     """
-    tx_data = data.get('data', {})
-    metadata = data.get('metadata', {})
+    if metadata is None:
+        metadata = {}
 
     tx_hash = tx_data.get('tx_hash')
 
@@ -103,7 +107,8 @@ def shred_transaction(data: dict) -> dict:
         'block_time_utc': parse_iso_datetime(tx_data.get('time')) if tx_data.get('time') else None,
         'fee': tx_data.get('fee'),
         'priority_fee': tx_data.get('priority_fee'),
-        **agg_swap
+        **agg_swap,
+        'tx_json': orjson.dumps(tx_data).decode('utf-8'),
     }
 
     # Transfers
@@ -203,25 +208,25 @@ def insert_to_mysql(shredded: dict, conn) -> None:
 
     # Insert main tx record
     cursor.execute("""
-        INSERT INTO tx_decoded
+        INSERT INTO tx
         (tx_hash, block_id, block_time, block_time_utc, fee, priority_fee,
          agg_program_id, agg_account, agg_token_in, agg_token_out,
          agg_amount_in, agg_amount_out, agg_decimals_in, agg_decimals_out,
-         agg_fee_amount, agg_fee_token)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE block_id = VALUES(block_id)
+         agg_fee_amount, agg_fee_token, tx_json)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE block_id = VALUES(block_id), tx_json = VALUES(tx_json)
     """, (
         tx['tx_hash'], tx['block_id'], tx['block_time'], tx['block_time_utc'],
         tx['fee'], tx['priority_fee'], tx['agg_program_id'], tx['agg_account'],
         tx['agg_token_in'], tx['agg_token_out'], tx['agg_amount_in'],
         tx['agg_amount_out'], tx['agg_decimals_in'], tx['agg_decimals_out'],
-        tx['agg_fee_amount'], tx['agg_fee_token']
+        tx['agg_fee_amount'], tx['agg_fee_token'], tx['tx_json']
     ))
 
     # Insert transfers
     for t in shredded['transfers']:
         cursor.execute("""
-            INSERT INTO tx_decoded_transfers
+            INSERT INTO tx_transfers
             (tx_hash, ins_index, outer_ins_index, transfer_type, program_id, outer_program_id,
              token_address, decimals, amount, source, source_owner, destination, destination_owner,
              base_token_address, base_decimals, base_amount)
@@ -236,7 +241,7 @@ def insert_to_mysql(shredded: dict, conn) -> None:
     # Insert swaps
     for s in shredded['swaps']:
         cursor.execute("""
-            INSERT INTO tx_decoded_swaps
+            INSERT INTO tx_swaps
             (tx_hash, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id,
              amm_id, account, token_1, token_2, amount_1, amount_2, decimals_1, decimals_2,
              token_account_1_1, token_account_1_2, token_account_2_1, token_account_2_2,
@@ -254,7 +259,7 @@ def insert_to_mysql(shredded: dict, conn) -> None:
     # Insert non-swap activities
     for a in shredded['activities']:
         cursor.execute("""
-            INSERT INTO tx_decoded_activities
+            INSERT INTO tx_activity
             (tx_hash, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, data_json)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
@@ -265,7 +270,7 @@ def insert_to_mysql(shredded: dict, conn) -> None:
     # Insert/update token metadata
     for t in shredded['tokens']:
         cursor.execute("""
-            INSERT INTO tx_decoded_tokens (token_address, token_name, token_symbol, token_icon)
+            INSERT INTO tx_tokens (token_address, token_name, token_symbol, token_icon)
             VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 token_name = VALUES(token_name),
@@ -320,35 +325,49 @@ def main():
         print("Error: JSON indicates unsuccessful response")
         return 1
 
-    # Shred into flat tables
-    shredded = shred_transaction(data)
+    # Get transaction data - handle both single object and array
+    tx_list = data.get('data', [])
+    if isinstance(tx_list, dict):
+        # Single transaction object (legacy format)
+        tx_list = [tx_list]
 
-    # Print summary
-    print_summary(shredded)
+    metadata = data.get('metadata', {})
+
+    print(f"Found {len(tx_list)} transaction(s)")
+
+    # Connect to DB if not dry run
+    conn = None
+    if not args.dry_run:
+        if not HAS_MYSQL:
+            print("Error: mysql-connector-python not installed")
+            print("Install with: pip install mysql-connector-python")
+            return 1
+
+        print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
+        conn = mysql.connector.connect(
+            host=args.db_host,
+            port=args.db_port,
+            user=args.db_user,
+            password=args.db_pass,
+            database=args.db_name
+        )
+
+    # Process each transaction
+    for i, tx_data in enumerate(tx_list):
+        shredded = shred_transaction(tx_data, metadata)
+        print_summary(shredded)
+
+        if conn:
+            insert_to_mysql(shredded, conn)
+            print(f"  [{i+1}/{len(tx_list)}] Inserted")
+
+    if conn:
+        conn.close()
 
     if args.dry_run:
         print("Dry run - no database insert")
-        return 0
 
-    if not HAS_MYSQL:
-        print("Error: mysql-connector-python not installed")
-        print("Install with: pip install mysql-connector-python")
-        return 1
-
-    # Connect and insert
-    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
-    conn = mysql.connector.connect(
-        host=args.db_host,
-        port=args.db_port,
-        user=args.db_user,
-        password=args.db_pass,
-        database=args.db_name
-    )
-
-    insert_to_mysql(shredded, conn)
-    conn.close()
-
-    print("Done!")
+    print(f"\nDone! Processed {len(tx_list)} transaction(s)")
     return 0
 
 

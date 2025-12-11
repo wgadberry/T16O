@@ -34,8 +34,8 @@ BEGIN
 
     -- Update the address with label and parent
     UPDATE addresses
-    SET label = COALESCE(p_label, label),
-        parent_id = COALESCE(v_parent_id, parent_id)
+    SET label = COALESCE(p_label, label, label_source_method),
+        parent_id = COALESCE(v_parent_id, parent_id, 'token_meta')
     WHERE id = v_address_id;
 
     SELECT v_address_id AS id, v_parent_id AS parent_id;

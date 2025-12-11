@@ -1,0 +1,11 @@
+-- Winston Worker - sp_party_merge Update
+-- Generated: 2025-12-06 02:57:27 UTC
+--
+-- ERROR: Could not read sp_party_merge.sql template from:
+--   C:\Users\wgadb\source\repos\T16O\sql\T16O.Workers\sql\sp_party_merge.sql
+--
+-- Suggested additions (add manually to sp_party_merge):
+
+-- WHEN v_log_messages LIKE '%Instruction: WithdrawWithheldTokensFromMint%' THEN 'withdraw'
+-- WHEN v_log_messages LIKE '%Instruction: Sell%' THEN 'sell'
+-- WHEN v_log_messages LIKE '%Instruction: WithdrawWithheldTokensFromAccounts%' THEN 'withdraw'

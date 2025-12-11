@@ -234,7 +234,7 @@ public class SimpleTestMint
             Console.WriteLine("\n🗄️  Testing database write...");
             try
             {
-                var connectionString = "Server=localhost;Port=3306;Database=t16o;User=root;Password=rootpassword;Connection Timeout=900;Default Command Timeout=900;";
+                var connectionString = "Server=localhost;Port=3307;Database=t16o;User=root;Password=rootpassword;Connection Timeout=900;Default Command Timeout=900;";
                 var writer = new T16O.Services.TransactionWriter(connectionString);
                 await writer.UpsertTransactionAsync(tx);
                 Console.WriteLine("✅ Database write complete!");

@@ -2,7 +2,7 @@ DROP PROCEDURE IF EXISTS sp_tx_merge;
 
 DELIMITER //
 
-CREATE PROCEDURE sp_tx_merge(
+CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_tx_merge`(
     IN p_signature VARCHAR(88),
     IN p_slot BIGINT UNSIGNED,
     IN p_status VARCHAR(32),
@@ -39,7 +39,7 @@ BEGIN
     DECLARE v_extended_attributes JSON;
     DECLARE v_success BOOLEAN;
 
-    -- Extract fields from transaction JSON
+    
     IF p_transaction_json IS NOT NULL AND JSON_VALID(p_transaction_json) THEN
         SET v_log_messages = JSON_EXTRACT(p_transaction_json, '$.meta.logMessages');
         SET v_pre_balances = JSON_EXTRACT(p_transaction_json, '$.meta.preBalances');
@@ -53,88 +53,40 @@ BEGIN
         SET v_version = JSON_UNQUOTE(JSON_EXTRACT(p_transaction_json, '$.version'));
         SET v_recent_blockhash = JSON_UNQUOTE(JSON_EXTRACT(p_transaction_json, '$.transaction.message.recentBlockhash'));
         SET v_rewards = JSON_EXTRACT(p_transaction_json, '$.meta.rewards');
-
-        -- Get fee payer (first account key)
         SET v_fee_payer_address = JSON_UNQUOTE(JSON_EXTRACT(v_account_keys, '$[0]'));
     END IF;
 
-    -- Build extended attributes
     SET v_extended_attributes = JSON_OBJECT(
         'mint_address', p_mint_address,
         'owner', p_owner,
         'token_account', p_token_account
     );
 
-    -- Determine success from status
     SET v_success = (p_status = 'success');
 
-    -- Ensure fee payer address exists and get ID (use INSERT IGNORE to handle race conditions)
+    
     IF v_fee_payer_address IS NOT NULL THEN
-        INSERT IGNORE INTO addresses (address, address_type) VALUES (v_fee_payer_address, 'wallet');
+        INSERT IGNORE INTO addresses (address, address_type, label_source_method) VALUES (v_fee_payer_address, 'wallet', 'token_meta');
         SELECT id INTO v_fee_payer_id FROM addresses WHERE address = v_fee_payer_address;
     END IF;
 
-    -- Insert or update transaction
+    
     INSERT INTO transactions (
-        signature,
-        slot,
-        block_time,
-        block_time_utc,
-        status,
-        success,
-        err,
-        fee_lamports,
-        compute_units_consumed,
-        fee_payer_id,
-        transaction_type,
-        version,
-        recent_blockhash,
-        transaction_json,
-        transaction_bin,
-        compression_type,
-        original_size,
-        programs,
-        instructions,
-        account_keys,
-        log_messages,
-        pre_balances,
-        post_balances,
-        pre_token_balances,
-        post_token_balances,
-        inner_instructions,
-        loaded_addresses,
-        rewards,
-        extended_attributes
+        signature, slot, block_time, block_time_utc, status, success, err,
+        fee_lamports, compute_units_consumed, fee_payer_id, transaction_type,
+        version, recent_blockhash, transaction_json, transaction_bin,
+        compression_type, original_size, programs, instructions, account_keys,
+        log_messages, pre_balances, post_balances, pre_token_balances,
+        post_token_balances, inner_instructions, loaded_addresses,
+        rewards, extended_attributes
     ) VALUES (
-        p_signature,
-        p_slot,
-        p_block_time,
-        p_block_time_utc,
-        p_status,
-        v_success,
-        p_err,
-        p_fee_lamports,
-        v_compute_units_consumed,
-        v_fee_payer_id,
-        p_transaction_type,
-        v_version,
-        v_recent_blockhash,
-        p_transaction_json,
-        p_transaction_bin,
-        p_compression_type,
-        p_original_size,
-        p_programs,
-        p_instructions,
-        v_account_keys,
-        v_log_messages,
-        v_pre_balances,
-        v_post_balances,
-        v_pre_token_balances,
-        v_post_token_balances,
-        v_inner_instructions,
-        v_loaded_addresses,
-        v_rewards,
-        v_extended_attributes
+        p_signature, p_slot, p_block_time, p_block_time_utc, p_status, v_success, p_err,
+        p_fee_lamports, v_compute_units_consumed, v_fee_payer_id, p_transaction_type,
+        v_version, v_recent_blockhash, p_transaction_json, p_transaction_bin,
+        p_compression_type, p_original_size, p_programs, p_instructions, v_account_keys,
+        v_log_messages, v_pre_balances, v_post_balances, v_pre_token_balances,
+        v_post_token_balances, v_inner_instructions, v_loaded_addresses,
+        v_rewards, v_extended_attributes
     )
     ON DUPLICATE KEY UPDATE
         slot = VALUES(slot),

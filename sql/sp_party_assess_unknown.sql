@@ -29,7 +29,8 @@ BEGIN
 
     -- Sample transactions across different mints for better diversity
     -- Takes up to 10 transactions per mint, up to 10000 total
-    INSERT INTO tmp_unknown_txs (tx_id, signature, log_messages, programs, inner_instructions, instructions, account_keys)
+    -- Uses INSERT IGNORE to handle duplicate tx_ids (same tx can have multiple unknown party records)
+    INSERT IGNORE INTO tmp_unknown_txs (tx_id, signature, log_messages, programs, inner_instructions, instructions, account_keys)
     SELECT t.id, t.signature, t.log_messages, t.programs, t.inner_instructions, t.instructions, t.account_keys
     FROM (
         SELECT

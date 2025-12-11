@@ -1,5 +1,3 @@
-DROP PROCEDURE IF EXISTS sp_address_activity;
-
 DELIMITER $$
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_address_activity`(
     IN p_address CHAR(44)
@@ -95,7 +93,7 @@ BEGIN
             LEFT JOIN addresses cp_owner ON cp.owner_id = cp_owner.id
             WHERE p.owner_id = v_address_id
             ORDER BY t.block_time DESC, t.id, p.account_index
-            -- LIMIT 200
+            
         ) AS activity;
 
         
@@ -124,7 +122,7 @@ BEGIN
             WHERE p.owner_id = v_address_id
             GROUP BY mint.id
             ORDER BY tx_count DESC
-            -- LIMIT 50
+            
         ) AS tokens;
 
         
@@ -152,7 +150,7 @@ BEGIN
             LEFT JOIN addresses cp_owner ON cp.owner_id = cp_owner.id
             WHERE p.owner_id = v_address_id
             ORDER BY t.block_time DESC, t.id, p.account_index
-            -- LIMIT 100
+            
         ) AS txs;
 
         
@@ -179,7 +177,7 @@ BEGIN
               AND cp_owner.address_type NOT IN ('program')
             GROUP BY cp_owner.id
             ORDER BY shared_tx_count DESC
-            -- LIMIT 25
+            
         ) AS cps;
 
         
@@ -202,7 +200,7 @@ BEGIN
             WHERE p.owner_id = v_address_id
             GROUP BY prog.id
             ORDER BY tx_count DESC
-            -- LIMIT 15
+            
         ) AS progs;
 
         

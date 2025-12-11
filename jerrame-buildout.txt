@@ -1,0 +1,29 @@
+-- Build DB
+\repos\T16O\sql\t16o_db_build.sql
+
+--Rabbit MQ Admin Site
+http://localhost:15672/#/
+
+-- Rabbit MQ - Get By "owner", in this case, the owner is the SOLTIT mint address
+-- Max Sigs: 100000
+-- Depth: 0   (if >0 doesn't work, I need to spend more time)
+-- Priority: 5 (Normal) 
+\repos\T16O> dotnet run --project src/T16O.Example -- owner J2UXqJ1HYRwjCviLEqkY9mhoEPJ5UnoHEnbeijCweREV 100000 0 5
+
+
+-- Fire RabbitMQ Workers
+\repos\T16O\src\T16O.Workers> dotnet run
+-- Run Latest .dll build
+\repos\T16O\src\T16O.Workers> dotnet bin\Debug\net9.0\T16O.Workers.dll
+-- Run Latest .dll build silently
+\repos\T16O\src\T16O.Workers> dotnet bin\Debug\net9.0\T16O.Workers.dll | Out-Null
+
+
+-- Start Transaction Tester Site
+-- Test with: http://localhost:5259/TransactionTest
+-- "Force" needs to be fixed after refactor
+\repos\T16O\src\T16O.Site> dotnet run
+
+
+
+
