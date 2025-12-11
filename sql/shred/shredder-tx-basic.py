@@ -4,7 +4,7 @@ Solscan Basic Transaction Shredder
 Fetches account transactions from Solscan API and shreds into normalized MySQL tables.
 
 Endpoint: /v2.0/account/transactions
-Creates records for: tx, tx_signer, tx_program (via parsed_instructions & program_ids)
+Creates records for: tx, tx_signer, tx_program (via sp_tx_prime stored procedure)
 
 Usage:
     python shredder-tx-basic.py <address> [--before <signature>] [--limit 20] [--max-tx-count 100]
@@ -12,10 +12,10 @@ Usage:
 """
 
 import argparse
+import json
 import requests
 import time
-from datetime import datetime
-from typing import Any, Optional, Dict, List
+from typing import Optional
 
 # MySQL connector
 try:
@@ -27,30 +27,6 @@ except ImportError:
 # Solscan API config
 SOLSCAN_API_BASE = "https://pro-api.solscan.io/v2.0"
 SOLSCAN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
-
-
-def safe_int(value: Any) -> Optional[int]:
-    """Safely convert value to int, handling strings and None"""
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
-
-
-def parse_iso_datetime(iso_str: str) -> Optional[datetime]:
-    """Parse ISO datetime string to datetime object"""
-    if not iso_str:
-        return None
-    try:
-        return datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
-    except (ValueError, AttributeError):
-        return None
 
 
 def create_api_session() -> requests.Session:
@@ -80,143 +56,37 @@ def fetch_transactions(session: requests.Session, address: str, before: str = No
     return response.json()
 
 
-class TxBasicShredder:
-    """Transaction shredder for basic transaction data"""
+def process_transaction_via_sproc(tx_data: dict, cursor, conn) -> Optional[dict]:
+    """Process a single transaction via sp_tx_prime stored procedure
 
-    def __init__(self, cursor):
-        self.cursor = cursor
-        self._address_cache: Dict[str, int] = {}
-        self._program_cache: Dict[str, int] = {}
-
-    def clear_cache(self):
-        """Clear all caches"""
-        self._address_cache.clear()
-        self._program_cache.clear()
-
-    def ensure_address(self, addr: str, addr_type: str = 'unknown') -> Optional[int]:
-        """Get or create address, return tx_address.id"""
-        if not addr:
-            return None
-        if addr in self._address_cache:
-            return self._address_cache[addr]
-
-        self.cursor.execute("SELECT fn_tx_ensure_address(%s, %s)", (addr, addr_type))
-        result = self.cursor.fetchone()[0]
-        self._address_cache[addr] = result
-        return result
-
-    def ensure_program(self, addr: str, name: str = None) -> Optional[int]:
-        """Get or create program, return tx_program.id"""
-        if not addr:
-            return None
-        if addr in self._program_cache:
-            return self._program_cache[addr]
-
-        self.cursor.execute("SELECT fn_tx_ensure_program(%s, %s, %s)", (addr, name, 'other'))
-        result = self.cursor.fetchone()[0]
-        self._program_cache[addr] = result
-        return result
-
-
-def insert_transaction(tx_data: dict, shredder: TxBasicShredder, cursor) -> Optional[int]:
-    """Insert main tx record and return tx.id"""
-
+    Single database call replaces multiple round trips:
+    - fn_tx_ensure_address for each signer
+    - fn_tx_ensure_program for each program
+    - INSERT tx
+    - INSERT tx_signer for each signer
+    """
     signature = tx_data.get('tx_hash')
     if not signature:
         return None
 
-    # Get primary signer (first in list)
-    signers = tx_data.get('signer', [])
-    primary_signer_id = shredder.ensure_address(signers[0], 'wallet') if signers else None
+    # Convert to JSON string for the stored procedure
+    json_payload = json.dumps(tx_data)
 
-    # Parse block_time_utc from time field
-    block_time_utc = parse_iso_datetime(tx_data.get('time'))
-
-    cursor.execute("""
-        INSERT INTO tx
-        (signature, block_id, block_time, block_time_utc, fee, signer_address_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            block_id = VALUES(block_id),
-            block_time = VALUES(block_time),
-            fee = VALUES(fee),
-            signer_address_id = VALUES(signer_address_id),
-            id = LAST_INSERT_ID(id)
-    """, (
-        signature,
-        tx_data.get('slot'),  # slot is the block_id
-        tx_data.get('block_time'),
-        block_time_utc,
-        tx_data.get('fee'),
-        primary_signer_id,
-    ))
-
-    return cursor.lastrowid
-
-
-def insert_signers(tx_id: int, tx_data: dict, shredder: TxBasicShredder, cursor) -> int:
-    """Insert signer records"""
-    signers = tx_data.get('signer', [])
-
-    for idx, signer_addr in enumerate(signers):
-        cursor.execute("""
-            INSERT INTO tx_signer (tx_id, signer_address_id, signer_index)
-            VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE signer_address_id = VALUES(signer_address_id)
-        """, (
-            tx_id,
-            shredder.ensure_address(signer_addr, 'wallet'),
-            idx,
-        ))
-
-    return len(signers)
-
-
-def insert_programs(tx_data: dict, shredder: TxBasicShredder) -> int:
-    """Ensure all programs exist in tx_program table"""
-
-    # First, build a name lookup from parsed_instructions
-    # e.g., {"JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "jupiter"}
-    program_names = {}
-    for instr in tx_data.get('parsed_instructions', []):
-        prog_addr = instr.get('program_id')
-        prog_name = instr.get('program')
-        if prog_addr and prog_name:
-            program_names[prog_addr] = prog_name
-
-    # Now ensure all programs from program_ids, using names from parsed_instructions
-    program_count = 0
-    for prog_addr in tx_data.get('program_ids', []):
-        name = program_names.get(prog_addr)
-        shredder.ensure_program(prog_addr, name)
-        program_count += 1
-
-    return program_count
-
-
-def process_transaction(tx_data: dict, shredder: TxBasicShredder, cursor, conn) -> dict:
-    """Process a single transaction"""
-
-    # Ensure all programs exist first
-    program_count = insert_programs(tx_data, shredder)
-
-    # Insert main transaction
-    tx_id = insert_transaction(tx_data, shredder, cursor)
-
-    if not tx_id:
-        return None
-
-    # Insert signers
-    signer_count = insert_signers(tx_id, tx_data, shredder, cursor)
+    # Call stored procedure with user variable for OUT param
+    cursor.execute("SET @tx_id = 0")
+    cursor.execute("CALL sp_tx_prime(%s, @tx_id)", (json_payload,))
+    cursor.execute("SELECT @tx_id")
+    result = cursor.fetchone()
+    tx_id = result[0] if result else None
 
     conn.commit()
 
     return {
         'tx_id': tx_id,
-        'signature': tx_data.get('tx_hash'),
+        'signature': signature,
         'status': tx_data.get('status'),
-        'signers': signer_count,
-        'programs': program_count,
+        'signers': len(tx_data.get('signer', [])),
+        'programs': len(tx_data.get('program_ids', [])),
     }
 
 
@@ -230,7 +100,7 @@ def main():
     parser = argparse.ArgumentParser(description='Fetch and shred Solscan account transactions')
     parser.add_argument('address', help='Solana account address to fetch transactions for')
     parser.add_argument('--before', help='Transaction signature to fetch transactions before (for pagination)')
-    parser.add_argument('--limit', type=int, default=20, help='Number of transactions per API call (max 50)')
+    parser.add_argument('--limit', type=int, default=40, help='Number of transactions per API call (10, 20, 30, or 40)')
     parser.add_argument('--max-tx-count', type=int, default=100, help='Maximum total transactions to fetch')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
@@ -238,7 +108,7 @@ def main():
     parser.add_argument('--db-pass', default='rootpassword', help='MySQL password')
     parser.add_argument('--db-name', default='t16o_db', help='MySQL database')
     parser.add_argument('--dry-run', action='store_true', help='Fetch and print only, no DB insert')
-    parser.add_argument('--delay', type=float, default=0.3, help='Delay between API calls in seconds')
+    parser.add_argument('--delay', type=float, default=0.0, help='Delay between API calls in seconds')
 
     args = parser.parse_args()
 
@@ -254,13 +124,10 @@ def main():
     # Connect to DB if not dry run
     conn = None
     cursor = None
-    shredder = None
 
     if not args.dry_run:
         print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
         conn = mysql.connector.connect(
-	    pool_name="t16o_db_pool",
-            pool_size=10,
             host=args.db_host,
             port=args.db_port,
             user=args.db_user,
@@ -268,7 +135,6 @@ def main():
             database=args.db_name
         )
         cursor = conn.cursor()
-        shredder = TxBasicShredder(cursor)
 
     # Create persistent HTTP session for API calls
     api_session = create_api_session()
@@ -316,7 +182,7 @@ def main():
                     status_icon = "+" if tx_data.get('status') == 'Success' else "x"
                     print(f"  [{status_icon}] {total_fetched} {tx_data.get('tx_hash', 'unknown')[:16]}... signers={len(tx_data.get('signer', []))} programs={len(tx_data.get('program_ids', []))}")
                 else:
-                    stats = process_transaction(tx_data, shredder, cursor, conn)
+                    stats = process_transaction_via_sproc(tx_data, cursor, conn)
                     if stats:
                         total_inserted += 1
                         print_tx_summary(stats, total_fetched, args.max_tx_count)
@@ -330,7 +196,7 @@ def main():
                 break
 
             # Rate limiting
-            if total_fetched < args.max_tx_count:
+            if total_fetched < args.max_tx_count and args.delay > 0:
                 time.sleep(args.delay)
 
     finally:
