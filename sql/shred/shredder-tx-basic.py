@@ -56,44 +56,41 @@ def fetch_transactions(session: requests.Session, address: str, before: str = No
     return response.json()
 
 
-def process_transaction_via_sproc(tx_data: dict, cursor, conn) -> Optional[dict]:
-    """Process a single transaction via sp_tx_prime stored procedure
+def process_batch_via_sproc(transactions: list, cursor, conn) -> int:
+    """Process a batch of transactions via sp_tx_prime_batch stored procedure
 
-    Single database call replaces multiple round trips:
-    - fn_tx_ensure_address for each signer
-    - fn_tx_ensure_program for each program
-    - INSERT tx
-    - INSERT tx_signer for each signer
+    Single database call processes entire batch:
+    - Parses JSON array in MySQL
+    - Creates all tx, tx_signer, tx_program records
+    - Returns count of transactions processed
     """
-    signature = tx_data.get('tx_hash')
-    if not signature:
-        return None
+    if not transactions:
+        return 0
 
-    # Convert to JSON string for the stored procedure
-    json_payload = json.dumps(tx_data)
+    # Convert to JSON array string for the stored procedure
+    json_payload = json.dumps(transactions)
 
-    # Call stored procedure with user variable for OUT param
-    cursor.execute("SET @tx_id = 0")
-    cursor.execute("CALL sp_tx_prime(%s, @tx_id)", (json_payload,))
-    cursor.execute("SELECT @tx_id")
+    # Call batch stored procedure
+    cursor.execute("SET @count = 0")
+    cursor.execute("CALL sp_tx_prime_batch(%s, @count)", (json_payload,))
+    cursor.execute("SELECT @count")
     result = cursor.fetchone()
-    tx_id = result[0] if result else None
+    count = result[0] if result else 0
 
     conn.commit()
 
-    return {
-        'tx_id': tx_id,
-        'signature': signature,
-        'status': tx_data.get('status'),
-        'signers': len(tx_data.get('signer', [])),
-        'programs': len(tx_data.get('program_ids', [])),
-    }
+    return count
 
 
-def print_tx_summary(stats: dict, idx: int, total: int) -> None:
-    """Print summary for a processed transaction"""
-    status_icon = "+" if stats['status'] == 'Success' else "x"
-    print(f"  [{status_icon}] {idx}/{total} {stats['signature'][:16]}... (id={stats['tx_id']}) signers={stats['signers']} programs={stats['programs']}")
+def print_batch_summary(transactions: list, start_idx: int, total: int) -> None:
+    """Print summary for a batch of transactions"""
+    for i, tx in enumerate(transactions):
+        idx = start_idx + i + 1
+        status_icon = "+" if tx.get('status') == 'Success' else "x"
+        sig = tx.get('tx_hash', 'unknown')[:16]
+        signers = len(tx.get('signer', []))
+        programs = len(tx.get('program_ids', []))
+        print(f"  [{status_icon}] {idx}/{total} {sig}... signers={signers} programs={programs}")
 
 
 def main():
@@ -171,24 +168,23 @@ def main():
 
             print(f"Fetched {len(transactions)} transactions")
 
-            # Process each transaction
-            for i, tx_data in enumerate(transactions):
-                if total_fetched >= args.max_tx_count:
-                    break
+            # Trim to max_tx_count if needed
+            remaining = args.max_tx_count - total_fetched
+            batch = transactions[:remaining] if remaining < len(transactions) else transactions
 
-                total_fetched += 1
+            if args.dry_run:
+                print_batch_summary(batch, total_fetched, args.max_tx_count)
+            else:
+                # Process entire batch in single stored procedure call
+                count = process_batch_via_sproc(batch, cursor, conn)
+                total_inserted += count
+                print_batch_summary(batch, total_fetched, args.max_tx_count)
 
-                if args.dry_run:
-                    status_icon = "+" if tx_data.get('status') == 'Success' else "x"
-                    print(f"  [{status_icon}] {total_fetched} {tx_data.get('tx_hash', 'unknown')[:16]}... signers={len(tx_data.get('signer', []))} programs={len(tx_data.get('program_ids', []))}")
-                else:
-                    stats = process_transaction_via_sproc(tx_data, cursor, conn)
-                    if stats:
-                        total_inserted += 1
-                        print_tx_summary(stats, total_fetched, args.max_tx_count)
+            total_fetched += len(batch)
 
-                # Update before for next pagination
-                before = tx_data.get('tx_hash')
+            # Update before for next pagination (last tx in batch)
+            if batch:
+                before = batch[-1].get('tx_hash')
 
             # Check if we got fewer than requested (end of data)
             if len(transactions) < fetch_limit:
