@@ -129,10 +129,18 @@ class BulkShredder:
 
     def ensure_token(self, addr: str, name: str = None, symbol: str = None,
                      icon: str = None, decimals: int = None) -> Optional[int]:
-        """Get or create token, return tx_token.id"""
+        """Get or create token, return tx_token.id
+
+        Always calls DB if metadata provided (to update NULLs via COALESCE).
+        Only uses cache for bare address lookups.
+        """
         if not addr:
             return None
-        if addr in self._token_cache:
+
+        has_metadata = any([name, symbol, icon, decimals is not None])
+
+        # Only use cache if no metadata to update
+        if addr in self._token_cache and not has_metadata:
             return self._token_cache[addr]
 
         self.cursor.execute("SELECT fn_tx_ensure_token(%s, %s, %s, %s, %s)",
@@ -309,7 +317,7 @@ def extract_agg_swap(summaries: list) -> dict:
 
 
 def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
-    """Update tx record with decoded data (agg fields, priority_fee, tx_json)"""
+    """Update tx record with decoded data (block_id, agg fields, priority_fee, tx_json)"""
     agg = extract_agg_swap(tx_data.get('summaries', []))
 
     # Parse block_time_utc from 'time' field
@@ -317,8 +325,12 @@ def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredde
     if tx_data.get('time'):
         block_time_utc = parse_iso_datetime(tx_data.get('time'))
 
+    # block_id is in decoded data
+    block_id = tx_data.get('block_id')
+
     cursor.execute("""
         UPDATE tx SET
+            block_id = COALESCE(%s, block_id),
             priority_fee = COALESCE(%s, priority_fee),
             block_time_utc = COALESCE(%s, block_time_utc),
             agg_program_id = %s,
@@ -334,6 +346,7 @@ def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredde
             tx_json = %s
         WHERE id = %s
     """, (
+        block_id,
         tx_data.get('priority_fee'),
         block_time_utc,
         shredder.ensure_program(agg['agg_program_id']),
@@ -440,9 +453,12 @@ def process_decoded_tx(tx_data: dict, tx_id: int, metadata: dict, shredder: Bulk
 
 
 def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
-    """Process detail transaction data (balance changes, signers)"""
+    """Process detail transaction data (balance changes, signers, block_id)"""
 
-    # Buffer signers
+    # Extract block_id from detail data
+    block_id = tx_data.get('block_id')
+
+    # Buffer signers - handle string, array, or list_signer
     signers = tx_data.get('list_signer') or tx_data.get('signer') or []
     if isinstance(signers, str):
         signers = [signers]
@@ -458,10 +474,14 @@ def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor)
             idx,
         ))
 
-    # Update tx.signer_address_id with first signer
-    if first_signer_id:
-        cursor.execute("UPDATE tx SET signer_address_id = %s WHERE id = %s AND signer_address_id IS NULL",
-                      (first_signer_id, tx_id))
+    # Update tx record with block_id and first signer
+    if block_id or first_signer_id:
+        cursor.execute("""
+            UPDATE tx SET
+                block_id = COALESCE(%s, block_id),
+                signer_address_id = COALESCE(%s, signer_address_id)
+            WHERE id = %s
+        """, (block_id, first_signer_id, tx_id))
 
     # Buffer SOL balance changes
     for change in tx_data.get('sol_bal_change', []):
@@ -508,16 +528,24 @@ def process_message(body: bytes, cursor, conn) -> dict:
 
     stats = {'decoded': 0, 'detail': 0}
 
-    # Build signature -> tx_id mapping
-    # First get existing tx_ids from signatures
+    # Build signature -> tx_id mapping from both decoded and detail data
     sig_to_txid = {}
+    all_sigs = set()
     for tx in decoded_txs:
         sig = tx.get('tx_hash')
         if sig:
-            cursor.execute("SELECT id FROM tx WHERE signature = %s", (sig,))
-            row = cursor.fetchone()
-            if row:
-                sig_to_txid[sig] = row[0]
+            all_sigs.add(sig)
+    for tx in detail_txs:
+        sig = tx.get('tx_hash')
+        if sig:
+            all_sigs.add(sig)
+
+    # Batch lookup all signatures
+    for sig in all_sigs:
+        cursor.execute("SELECT id FROM tx WHERE signature = %s", (sig,))
+        row = cursor.fetchone()
+        if row:
+            sig_to_txid[sig] = row[0]
 
     # Process decoded transactions
     for tx in decoded_txs:
@@ -527,18 +555,13 @@ def process_message(body: bytes, cursor, conn) -> dict:
             process_decoded_tx(tx, tx_id, metadata, shredder, cursor)
             stats['decoded'] += 1
 
-    # Process detail transactions
+    # Process detail transactions - detail data has tx_hash field
     for tx in detail_txs:
-        # Detail format doesn't have tx_hash directly, match by block_id
-        block_id = tx.get('block_id')
-        # Find matching tx_id
-        for sig, tid in sig_to_txid.items():
-            cursor.execute("SELECT id FROM tx WHERE id = %s AND block_id = %s", (tid, block_id))
-            row = cursor.fetchone()
-            if row:
-                process_detail_tx(tx, row[0], shredder, cursor)
-                stats['detail'] += 1
-                break
+        sig = tx.get('tx_hash')
+        tx_id = sig_to_txid.get(sig)
+        if tx_id:
+            process_detail_tx(tx, tx_id, shredder, cursor)
+            stats['detail'] += 1
 
     # Flush all bulk inserts
     flush_stats = shredder.flush_all()

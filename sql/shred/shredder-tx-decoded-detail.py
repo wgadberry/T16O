@@ -6,11 +6,10 @@ Publishes enriched data to RabbitMQ for downstream processing.
 
 Workflow:
 1. Query DB for transactions where tx_state = 'primed' (batch of 20)
-2. Update tx_state to 'processing'
-3. Call /transaction/actions/multi AND /transaction/detail/multi in PARALLEL
-4. Combine responses and publish to RabbitMQ (or save to disk as fallback)
-5. Update tx_state to 'ready'
-6. Loop until no more primed transactions or max batches reached
+2. Call /transaction/actions/multi AND /transaction/detail/multi in PARALLEL
+3. Combine responses and publish to RabbitMQ (or save to disk as fallback)
+4. Update tx_state to 'ready'
+5. Loop until no more primed transactions or max batches reached
 
 Usage:
     python shredder-tx-decoded-detail.py [--max-batches 10] [--batch-size 20]
@@ -77,16 +76,30 @@ def get_primed_transactions(cursor, batch_size: int) -> List[Dict]:
     return [{'id': row[0], 'block_id': row[1], 'signature': row[2]} for row in rows]
 
 
-def update_tx_state(cursor, conn, tx_ids: List[int], state: str) -> None:
-    """Update tx_state for given transaction IDs"""
+def update_tx_state(cursor, conn, tx_ids: List[int], state: str, max_retries: int = 3) -> None:
+    """Update tx_state for given transaction IDs with deadlock retry"""
     if not tx_ids:
         return
 
     placeholders = ','.join(['%s'] * len(tx_ids))
-    cursor.execute(f"""
-        UPDATE tx SET tx_state = %s WHERE id IN ({placeholders})
-    """, [state] + tx_ids)
-    conn.commit()
+
+    for attempt in range(max_retries):
+        try:
+            cursor.execute(f"""
+                UPDATE tx SET tx_state = %s WHERE id IN ({placeholders})
+            """, [state] + tx_ids)
+            conn.commit()
+            return
+        except Exception as e:
+            error_code = getattr(e, 'errno', None)
+            if error_code == 1213 and attempt < max_retries - 1:
+                # Deadlock - rollback and retry
+                conn.rollback()
+                print(f"  Deadlock detected, retry {attempt + 1}/{max_retries}...")
+                time.sleep(0.1 * (attempt + 1))  # Backoff
+                continue
+            else:
+                raise
 
 
 def build_multi_url(endpoint: str, signatures: List[str]) -> str:
@@ -216,10 +229,6 @@ async def process_batch_async(
             print(f"    [{tx['id']}] {tx['signature'][:20]}... block={tx['block_id']}")
         return len(transactions), len(transactions) == batch_size
 
-    # Step 2: Update state to 'processing'
-    update_tx_state(cursor, conn, tx_ids, 'processing')
-    print(f"  Updated {len(tx_ids)} transactions to 'processing'")
-
     try:
         # Step 3 & 4: Fetch decoded AND detail data in PARALLEL
         print(f"  Fetching decoded + detail data (parallel)...")
@@ -258,10 +267,8 @@ async def process_batch_async(
         return len(transactions), len(transactions) == batch_size
 
     except Exception as e:
-        # Revert state back to 'primed' on error
+        # State remains 'primed' on error (no revert needed)
         print(f"  ERROR: {e}")
-        print(f"  Reverting {len(tx_ids)} transactions to 'primed'")
-        update_tx_state(cursor, conn, tx_ids, 'primed')
         raise
 
 
