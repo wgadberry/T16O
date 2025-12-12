@@ -56,13 +56,14 @@ def fetch_transactions(session: requests.Session, address: str, before: str = No
     return response.json()
 
 
-def process_batch_via_sproc(transactions: list, cursor, conn) -> int:
+def process_batch_via_sproc(transactions: list, cursor, conn, max_retries: int = 3) -> int:
     """Process a batch of transactions via sp_tx_prime_batch stored procedure
 
     Single database call processes entire batch:
     - Parses JSON array in MySQL
     - Creates all tx, tx_signer, tx_program records
     - Returns count of transactions processed
+    - Retries on deadlock (error 1213)
     """
     if not transactions:
         return 0
@@ -70,16 +71,30 @@ def process_batch_via_sproc(transactions: list, cursor, conn) -> int:
     # Convert to JSON array string for the stored procedure
     json_payload = json.dumps(transactions)
 
-    # Call batch stored procedure
-    cursor.execute("SET @count = 0")
-    cursor.execute("CALL sp_tx_prime_batch(%s, @count)", (json_payload,))
-    cursor.execute("SELECT @count")
-    result = cursor.fetchone()
-    count = result[0] if result else 0
+    for attempt in range(max_retries):
+        try:
+            # Call batch stored procedure
+            cursor.execute("SET @count = 0")
+            cursor.execute("CALL sp_tx_prime_batch(%s, @count)", (json_payload,))
+            cursor.execute("SELECT @count")
+            result = cursor.fetchone()
+            count = result[0] if result else 0
 
-    conn.commit()
+            conn.commit()
+            return count
 
-    return count
+        except Exception as e:
+            error_code = getattr(e, 'errno', None)
+            if error_code == 1213 and attempt < max_retries - 1:
+                # Deadlock - rollback and retry
+                conn.rollback()
+                print(f"  Deadlock detected, retry {attempt + 1}/{max_retries}...")
+                time.sleep(0.1 * (attempt + 1))  # Backoff
+                continue
+            else:
+                raise
+
+    return 0
 
 
 def print_batch_summary(transactions: list, start_idx: int, total: int) -> None:
@@ -105,7 +120,7 @@ def main():
     parser.add_argument('--db-pass', default='rootpassword', help='MySQL password')
     parser.add_argument('--db-name', default='t16o_db', help='MySQL database')
     parser.add_argument('--dry-run', action='store_true', help='Fetch and print only, no DB insert')
-    parser.add_argument('--delay', type=float, default=0.0, help='Delay between API calls in seconds')
+    parser.add_argument('--delay', type=float, default=0.5, help='Delay between API calls in seconds')
 
     args = parser.parse_args()
 

@@ -16,7 +16,7 @@ Usage:
 import argparse
 import json
 import pickle
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 # MySQL connector
@@ -117,11 +117,15 @@ def build_graph(cursor, token_filter: Optional[str] = None,
         if amount is not None and decimals is not None:
             human_amount = amount / (10 ** decimals)
 
+        # Convert block_time to UTC string
+        block_time_utc = datetime.fromtimestamp(block_time, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S') if block_time else ''
+
         # Add edge
         G.add_edge(from_addr, to_addr,
                    edge_id=edge_id,
                    tx_signature=tx_sig,
                    block_time=block_time,
+                   block_time_utc=block_time_utc,
                    token_symbol=token_symbol or 'SOL',
                    token_mint=token_mint,
                    amount_raw=amount,
@@ -224,6 +228,37 @@ def print_graph_summary(G: nx.MultiDiGraph):
             print(f"    {funder} funded {count} wallets")
     else:
         print(f"  No common funders detected in graph")
+
+
+def sanitize_for_gexf(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    """Create a copy of graph with None values replaced for GEXF export"""
+    H = nx.MultiDiGraph()
+
+    # Copy nodes with sanitized attributes
+    for node, attrs in G.nodes(data=True):
+        clean_attrs = {'label': str(node)}  # Set label to node ID (address)
+        for k, v in attrs.items():
+            if v is None:
+                clean_attrs[k] = ''
+            elif isinstance(v, (set, list)):
+                clean_attrs[k] = ','.join(str(x) for x in v)
+            else:
+                clean_attrs[k] = v
+        H.add_node(node, **clean_attrs)
+
+    # Copy edges with sanitized attributes
+    for u, v, key, attrs in G.edges(keys=True, data=True):
+        clean_attrs = {}
+        for k, val in attrs.items():
+            if val is None:
+                clean_attrs[k] = ''
+            elif isinstance(val, (set, list)):
+                clean_attrs[k] = ','.join(str(x) for x in val)
+            else:
+                clean_attrs[k] = val
+        H.add_edge(u, v, key=key, **clean_attrs)
+
+    return H
 
 
 def export_to_json(G: nx.MultiDiGraph, filepath: str):
@@ -376,7 +411,8 @@ def main():
 
     if args.gexf:
         print(f"\nExporting to GEXF: {args.gexf}...")
-        nx.write_gexf(G, args.gexf)
+        clean_graph = sanitize_for_gexf(G)
+        nx.write_gexf(clean_graph, args.gexf)
         print(f"  Exported! Open in Gephi for visualization.")
 
     if args.json:

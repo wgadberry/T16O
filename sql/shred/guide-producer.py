@@ -216,11 +216,15 @@ def setup_rabbitmq(host: str, port: int, user: str, password: str):
         pika.ConnectionParameters(host=host, port=port, credentials=credentials)
     )
     channel = connection.channel()
-    channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+    channel.queue_declare(
+        queue=RABBITMQ_QUEUE,
+        durable=True,
+        arguments={'x-max-priority': 10}
+    )
     return connection, channel
 
 
-def publish_batch(channel, signatures: List[str]) -> bool:
+def publish_batch(channel, signatures: List[str], priority: int = 5) -> bool:
     """Publish a batch of signatures to RabbitMQ"""
     try:
         message = {"signatures": signatures}
@@ -230,7 +234,8 @@ def publish_batch(channel, signatures: List[str]) -> bool:
             body=orjson.dumps(message),
             properties=pika.BasicProperties(
                 delivery_mode=2,  # Persistent
-                content_type='application/json'
+                content_type='application/json',
+                priority=priority
             )
         )
         return True
@@ -310,6 +315,7 @@ def main():
     parser.add_argument('--rabbitmq-port', type=int, default=RABBITMQ_PORT, help='RabbitMQ port')
     parser.add_argument('--rabbitmq-user', default=RABBITMQ_USER, help='RabbitMQ user')
     parser.add_argument('--rabbitmq-pass', default=RABBITMQ_PASS, help='RabbitMQ password')
+    parser.add_argument('--priority', type=int, default=5, help='Message priority 1-10 (default: 5)')
     parser.add_argument('--filter-existing', action='store_true',
                         help='Filter out signatures already in tx_guide (requires DB)')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
@@ -420,7 +426,7 @@ def main():
                     print(f"    First: {batch[0][:20]}...")
                     print(f"    Last:  {batch[-1][:20]}...")
                 else:
-                    if publish_batch(rabbitmq_channel, batch):
+                    if publish_batch(rabbitmq_channel, batch, args.priority):
                         addr_batches += 1
                         addr_signatures += len(batch)
 

@@ -11,6 +11,7 @@ BEGIN
     SET FOREIGN_KEY_CHECKS = 0;
 
     -- Clear child tables first (FK dependencies)
+    TRUNCATE TABLE tx_hound;
     TRUNCATE TABLE tx_party;
     TRUNCATE TABLE tx_transfer;
     TRUNCATE TABLE tx_swap;

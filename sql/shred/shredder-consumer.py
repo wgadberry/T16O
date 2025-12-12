@@ -317,7 +317,7 @@ def extract_agg_swap(summaries: list) -> dict:
 
 
 def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
-    """Update tx record with decoded data (block_id, agg fields, priority_fee, tx_json)"""
+    """Update tx record with decoded data (block_id, agg fields, priority_fee)"""
     agg = extract_agg_swap(tx_data.get('summaries', []))
 
     # Parse block_time_utc from 'time' field
@@ -342,8 +342,7 @@ def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredde
             agg_decimals_in = %s,
             agg_decimals_out = %s,
             agg_fee_amount = %s,
-            agg_fee_token_id = %s,
-            tx_json = %s
+            agg_fee_token_id = %s
         WHERE id = %s
     """, (
         block_id,
@@ -359,7 +358,6 @@ def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredde
         agg['agg_decimals_out'],
         agg['agg_fee_amount'],
         shredder.ensure_token(agg['agg_fee_token']),
-        orjson.dumps(tx_data).decode('utf-8'),
         tx_id,
     ))
 

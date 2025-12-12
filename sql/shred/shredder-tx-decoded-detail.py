@@ -4,8 +4,10 @@ Solscan Transaction Decoded+Detail Fetcher
 Fetches decoded and detail data for primed transactions using parallel API calls.
 Publishes enriched data to RabbitMQ for downstream processing.
 
+Supports multiple concurrent workers using FOR UPDATE SKIP LOCKED.
+
 Workflow:
-1. Query DB for transactions where tx_state = 'primed' (batch of 20)
+1. Claim batch of 'primed' transactions (marks as 'processing', uses SKIP LOCKED)
 2. Call /transaction/actions/multi AND /transaction/detail/multi in PARALLEL
 3. Combine responses and publish to RabbitMQ (or save to disk as fallback)
 4. Update tx_state to 'ready'
@@ -15,6 +17,11 @@ Usage:
     python shredder-tx-decoded-detail.py [--max-batches 10] [--batch-size 20]
     python shredder-tx-decoded-detail.py --dry-run
     python shredder-tx-decoded-detail.py --no-rabbitmq  # File-only mode
+
+    # Run multiple workers in parallel:
+    python shredder-tx-decoded-detail.py --worker-id 1 &
+    python shredder-tx-decoded-detail.py --worker-id 2 &
+    python shredder-tx-decoded-detail.py --worker-id 3 &
 """
 
 import argparse
@@ -62,18 +69,34 @@ RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE = 'tx.enriched'
 
 
-def get_primed_transactions(cursor, batch_size: int) -> List[Dict]:
-    """Get batch of primed transactions from DB"""
+def get_primed_transactions(cursor, conn, batch_size: int) -> List[Dict]:
+    """Get batch of primed transactions from DB using FOR UPDATE SKIP LOCKED.
+
+    This allows multiple workers to run concurrently without conflicts.
+    Each worker claims its own batch of rows that other workers will skip.
+    """
     cursor.execute("""
         SELECT id, block_id, signature
         FROM tx
         WHERE tx_state = 'primed'
         ORDER BY block_id
         LIMIT %s
+        FOR UPDATE SKIP LOCKED
     """, (batch_size,))
 
     rows = cursor.fetchall()
-    return [{'id': row[0], 'block_id': row[1], 'signature': row[2]} for row in rows]
+    transactions = [{'id': row[0], 'block_id': row[1], 'signature': row[2]} for row in rows]
+
+    # Immediately mark as 'processing' to release the lock but claim the rows
+    if transactions:
+        tx_ids = [t['id'] for t in transactions]
+        placeholders = ','.join(['%s'] * len(tx_ids))
+        cursor.execute(f"""
+            UPDATE tx SET tx_state = 'processing' WHERE id IN ({placeholders})
+        """, tx_ids)
+        conn.commit()
+
+    return transactions
 
 
 def update_tx_state(cursor, conn, tx_ids: List[int], state: str, max_retries: int = 3) -> None:
@@ -116,23 +139,29 @@ async def fetch_endpoint(session: aiohttp.ClientSession, endpoint: str, signatur
         return await response.json()
 
 
-async def fetch_decoded_and_detail_parallel(signatures: List[str]) -> Tuple[dict, dict]:
-    """Fetch both decoded and detail data in parallel"""
-    headers = {"token": SOLSCAN_API_TOKEN}
+async def fetch_decoded_and_detail_parallel(session: aiohttp.ClientSession, signatures: List[str]) -> Tuple[dict, dict]:
+    """Fetch both decoded and detail data in parallel using existing session"""
+    # Launch both requests in parallel
+    decoded_task = asyncio.create_task(
+        fetch_endpoint(session, "transaction/actions/multi", signatures)
+    )
+    detail_task = asyncio.create_task(
+        fetch_endpoint(session, "transaction/detail/multi", signatures)
+    )
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # Launch both requests in parallel
-        decoded_task = asyncio.create_task(
-            fetch_endpoint(session, "transaction/actions/multi", signatures)
-        )
-        detail_task = asyncio.create_task(
-            fetch_endpoint(session, "transaction/detail/multi", signatures)
-        )
-
-        # Wait for both to complete
-        decoded_response, detail_response = await asyncio.gather(decoded_task, detail_task)
+    # Wait for both to complete
+    decoded_response, detail_response = await asyncio.gather(decoded_task, detail_task)
 
     return decoded_response, detail_response
+
+
+def create_api_session() -> aiohttp.ClientSession:
+    """Create a reusable aiohttp session with connection pooling"""
+    headers = {"token": SOLSCAN_API_TOKEN}
+    # Increase connection pool size for better throughput
+    connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+    timeout = aiohttp.ClientTimeout(total=30)
+    return aiohttp.ClientSession(headers=headers, connector=connector, timeout=timeout)
 
 
 def combine_responses(decoded_response: dict, detail_response: dict, tx_ids: List[int]) -> dict:
@@ -201,6 +230,7 @@ def setup_rabbitmq(host: str, port: int, user: str, password: str) -> Tuple[Opti
 async def process_batch_async(
     cursor,
     conn,
+    api_session: aiohttp.ClientSession,
     batch_size: int,
     drop_dir: str,
     rabbitmq_channel,
@@ -213,8 +243,8 @@ async def process_batch_async(
     Returns:
         Tuple of (count processed, has more data)
     """
-    # Step 1: Get primed transactions
-    transactions = get_primed_transactions(cursor, batch_size)
+    # Step 1: Get and claim primed transactions (marks as 'processing')
+    transactions = get_primed_transactions(cursor, conn, batch_size)
 
     if not transactions:
         return 0, False
@@ -222,11 +252,13 @@ async def process_batch_async(
     tx_ids = [tx['id'] for tx in transactions]
     signatures = [tx['signature'] for tx in transactions]
 
-    print(f"  Found {len(transactions)} primed transactions")
+    print(f"  Claimed {len(transactions)} transactions (processing)")
 
     if dry_run:
         for tx in transactions:
             print(f"    [{tx['id']}] {tx['signature'][:20]}... block={tx['block_id']}")
+        # Revert to primed in dry-run mode
+        update_tx_state(cursor, conn, tx_ids, 'primed')
         return len(transactions), len(transactions) == batch_size
 
     try:
@@ -234,7 +266,7 @@ async def process_batch_async(
         print(f"  Fetching decoded + detail data (parallel)...")
         start_time = time.time()
 
-        decoded_response, detail_response = await fetch_decoded_and_detail_parallel(signatures)
+        decoded_response, detail_response = await fetch_decoded_and_detail_parallel(api_session, signatures)
 
         elapsed = time.time() - start_time
         print(f"  API calls completed in {elapsed:.2f}s")
@@ -267,16 +299,22 @@ async def process_batch_async(
         return len(transactions), len(transactions) == batch_size
 
     except Exception as e:
-        # State remains 'primed' on error (no revert needed)
+        # Revert to 'primed' on error so another worker can retry
         print(f"  ERROR: {e}")
+        print(f"  Reverting {len(tx_ids)} transactions to 'primed'")
+        update_tx_state(cursor, conn, tx_ids, 'primed')
         raise
 
 
 async def main_async(args):
     """Async main function"""
 
-    print(f"Shredder TX Decoded+Detail Fetcher (Async)")
+    worker_prefix = f"[W{args.worker_id}] " if args.worker_id > 0 else ""
+
+    print(f"{worker_prefix}Shredder TX Decoded+Detail Fetcher (Async)")
     print(f"{'='*50}")
+    if args.worker_id > 0:
+        print(f"Worker ID: {args.worker_id}")
     print(f"Batch size: {args.batch_size}")
     print(f"Max batches: {args.max_batches if args.max_batches > 0 else 'unlimited'}")
     print(f"Drop directory: {args.drop_dir}")
@@ -317,6 +355,9 @@ async def main_async(args):
     batch_num = 0
     total_processed = 0
 
+    # Create reusable API session with connection pooling
+    api_session = create_api_session()
+
     try:
         while True:
             batch_num += 1
@@ -330,7 +371,7 @@ async def main_async(args):
 
             try:
                 count, has_more = await process_batch_async(
-                    cursor, conn,
+                    cursor, conn, api_session,
                     args.batch_size, args.drop_dir,
                     rabbitmq_channel, use_rabbitmq,
                     args.dry_run
@@ -342,14 +383,16 @@ async def main_async(args):
             total_processed += count
 
             if not has_more:
-                print(f"\nNo more primed transactions")
-                break
+                print(f"\nNo more primed transactions, waiting 30s...")
+                await asyncio.sleep(30)
+                continue
 
             # Rate limiting between batches
             if not args.dry_run:
                 await asyncio.sleep(args.delay)
 
     finally:
+        await api_session.close()
         cursor.close()
         conn.close()
         if rabbitmq_conn:
@@ -386,6 +429,8 @@ def main():
                         help='Show what would be processed without making changes')
     parser.add_argument('--delay', type=float, default=0.5,
                         help='Delay between batches in seconds')
+    parser.add_argument('--worker-id', type=int, default=0,
+                        help='Worker ID for logging (when running multiple workers)')
 
     args = parser.parse_args()
 

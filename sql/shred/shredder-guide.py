@@ -589,7 +589,11 @@ def main():
         )
     )
     channel = connection.channel()
-    channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+    channel.queue_declare(
+        queue=RABBITMQ_QUEUE,
+        durable=True,
+        arguments={'x-max-priority': 10}
+    )
     channel.basic_qos(prefetch_count=args.prefetch)
 
     # Create API session (aiohttp session created synchronously, used async internally)
