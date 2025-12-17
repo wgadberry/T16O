@@ -9,9 +9,11 @@ CREATE TABLE IF NOT EXISTS `tx_address` (
   `program_id` int unsigned DEFAULT NULL,
   `label` varchar(200) DEFAULT NULL,
   `label_source_method` varchar(256) DEFAULT NULL,
+  `init_tx_fetched` tinyint(1) DEFAULT NULL COMMENT 'Flag: initial transactions fetched by address-history-worker',
   `created_utc` datetime DEFAULT (utc_timestamp()),
   PRIMARY KEY (`id`),
   UNIQUE KEY `address` (`address`),
   KEY `idx_program` (`program_id`),
-  KEY `idx_type` (`address_type`)
+  KEY `idx_type` (`address_type`),
+  KEY `idx_init_tx_fetched` (`init_tx_fetched`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
