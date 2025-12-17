@@ -46,16 +46,13 @@ def fetch_token_meta(session: requests.Session, mint_address: str) -> dict:
 
 
 def get_tokens_missing_metadata(cursor, limit: int) -> list:
-    """Get tokens missing symbol, name, or decimals"""
+    """Get tokens where both token_symbol and token_name are NULL"""
     cursor.execute("""
         SELECT t.id, a.address as mint
         FROM tx_token t
         JOIN tx_address a ON a.id = t.mint_address_id
         WHERE t.token_symbol IS NULL
-           OR t.token_symbol = ''
-           OR t.token_name IS NULL
-           OR t.token_name = ''
-           OR t.decimals IS NULL
+          AND t.token_name IS NULL
         LIMIT %s
     """, (limit,))
     return cursor.fetchall()
@@ -78,7 +75,7 @@ def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
 
 def main():
     parser = argparse.ArgumentParser(description='Backfill missing token metadata from Solscan')
-    parser.add_argument('--limit', type=int, default=100, help='Max tokens to process')
+    parser.add_argument('--limit', type=int, default=1000, help='Max tokens to process')
     parser.add_argument('--delay', type=float, default=0.2, help='Delay between API calls (seconds)')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
