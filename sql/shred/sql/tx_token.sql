@@ -4,8 +4,8 @@
 CREATE TABLE IF NOT EXISTS `tx_token` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `mint_address_id` int unsigned NOT NULL COMMENT 'FK to tx_address - token mint',
-  `token_name` varchar(100) DEFAULT NULL,
-  `token_symbol` varchar(20) DEFAULT NULL,
+  `token_name` varchar(128) DEFAULT NULL,
+  `token_symbol` varchar(128) DEFAULT NULL,
   `token_icon` varchar(500) DEFAULT NULL,
   `decimals` tinyint unsigned DEFAULT NULL,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

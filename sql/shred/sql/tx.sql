@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS `tx` (
   KEY `idx_agg_account` (`agg_account_address_id`),
   KEY `idx_agg_token_in` (`agg_token_in_id`),
   KEY `idx_agg_token_out` (`agg_token_out_id`),
+  KEY `idx_type_state` (`type_state`),
   CONSTRAINT `tx_ibfk_signer` FOREIGN KEY (`signer_address_id`) REFERENCES `tx_address` (`id`),
   CONSTRAINT `tx_ibfk_agg_program` FOREIGN KEY (`agg_program_id`) REFERENCES `tx_program` (`id`),
   CONSTRAINT `tx_ibfk_agg_account` FOREIGN KEY (`agg_account_address_id`) REFERENCES `tx_address` (`id`),

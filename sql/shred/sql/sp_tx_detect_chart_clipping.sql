@@ -29,8 +29,8 @@ DROP PROCEDURE IF EXISTS sp_tx_detect_chart_clipping;
 DELIMITER //
 
 CREATE PROCEDURE sp_tx_detect_chart_clipping(
-    IN p_base_token_symbol VARCHAR(20),    -- Base token symbol (e.g., 'WSOL') - optional if mint provided
-    IN p_target_token_symbol VARCHAR(20),  -- Target token symbol (e.g., 'BONK') - optional if mint provided
+    IN p_base_token_symbol VARCHAR(128),   -- Base token symbol (e.g., 'WSOL') - optional if mint provided
+    IN p_target_token_symbol VARCHAR(128), -- Target token symbol (e.g., 'BONK') - optional if mint provided
     IN p_base_token_mint VARCHAR(44),      -- Base token mint address (precise) - optional if symbol provided
     IN p_target_token_mint VARCHAR(44),    -- Target token mint address (precise) - optional if symbol provided
     IN p_buy_amt_base DECIMAL(18,9),       -- Min base token for qualifying buy (e.g., 5.0)

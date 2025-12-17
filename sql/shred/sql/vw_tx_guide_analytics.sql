@@ -96,10 +96,12 @@ SELECT
     SUM(g.amount) / POW(10, MAX(g.decimals)) AS total_volume,
     MIN(g.block_time) AS first_transfer,
     MAX(g.block_time) AS last_transfer,
-    (MAX(g.block_time) - MIN(g.block_time)) / 3600 AS hours_span
+    (MAX(g.block_time) - MIN(g.block_time)) / 3600 AS hours_span,
+    BIT_OR(t.type_state) AS type_state
 FROM tx_guide g
 JOIN tx_address a1 ON g.from_address_id = a1.id
 JOIN tx_address a2 ON g.to_address_id = a2.id
+JOIN tx t ON g.tx_id = t.id
 LEFT JOIN tx_token tk ON g.token_id = tk.id
 WHERE g.edge_type_id IN (SELECT id FROM tx_guide_type WHERE type_code IN ('spl_transfer', 'sol_transfer'))
   AND a1.id != a2.id

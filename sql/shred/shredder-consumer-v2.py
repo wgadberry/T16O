@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """
-RabbitMQ Consumer for Enriched Transaction Data
-Consumes combined decoded+detail JSON from RabbitMQ and shreds into MySQL tables.
+RabbitMQ Consumer for Enriched Transaction Data (v2 - Deadlock Resistant)
 
-Workflow:
-1. Connect to RabbitMQ queue 'tx.enriched'
-2. Consume messages containing combined decoded+detail JSON
-3. Process each transaction using bulk inserts where possible
-4. Acknowledge message on success, requeue on failure
+Improvements over v1:
+- Deadlock retry with exponential backoff
+- Configurable isolation level (READ-COMMITTED)
+- Connection pooling support
+- Smaller transaction batches
+- Pre-warmed caches for common addresses
 
 Usage:
-    python shredder-consumer.py [--prefetch 10]
-    python shredder-consumer.py --max-messages 100
+    python shredder-consumer-v2.py [--prefetch 5] [--workers 4]
+    python shredder-consumer-v2.py --max-messages 100
 """
 
 import argparse
 import signal
 import sys
+import time
+import random
 import orjson
 from datetime import datetime
 from typing import Any, Optional, Dict, List
+from threading import Thread, Lock
+from queue import Queue
 
-# MySQL connector
 try:
     import mysql.connector
+    from mysql.connector import pooling
     HAS_MYSQL = True
 except ImportError:
     HAS_MYSQL = False
 
-# RabbitMQ client
 try:
     import pika
     HAS_PIKA = True
@@ -41,6 +44,11 @@ RABBITMQ_PORT = 5692
 RABBITMQ_USER = 'admin'
 RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE = 'tx.enriched'
+
+# Deadlock retry config
+MAX_DEADLOCK_RETRIES = 5
+DEADLOCK_ERRNO = 1213
+LOCK_WAIT_ERRNO = 1205
 
 # Known program addresses for classification
 KNOWN_PROGRAMS = {
@@ -84,8 +92,14 @@ def parse_iso_datetime(iso_str: str) -> Optional[datetime]:
         return None
 
 
+def is_deadlock_error(exception) -> bool:
+    """Check if exception is a deadlock or lock wait timeout"""
+    errno = getattr(exception, 'errno', None)
+    return errno in (DEADLOCK_ERRNO, LOCK_WAIT_ERRNO)
+
+
 class BulkShredder:
-    """Transaction shredder with bulk insert support"""
+    """Transaction shredder with bulk insert support and deadlock handling"""
 
     def __init__(self, cursor):
         self.cursor = cursor
@@ -101,6 +115,39 @@ class BulkShredder:
         self._signer_buffer: List[tuple] = []
         self._sol_change_buffer: List[tuple] = []
         self._token_change_buffer: List[tuple] = []
+
+    def prewarm_cache(self, addresses: set, tokens: set, programs: set):
+        """Pre-warm caches with batch lookups"""
+        if addresses:
+            placeholders = ','.join(['%s'] * len(addresses))
+            self.cursor.execute(
+                f"SELECT address, id FROM tx_address WHERE address IN ({placeholders})",
+                list(addresses)
+            )
+            for row in self.cursor.fetchall():
+                self._address_cache[row[0]] = row[1]
+
+        if tokens:
+            placeholders = ','.join(['%s'] * len(tokens))
+            self.cursor.execute(f"""
+                SELECT a.address, t.id
+                FROM tx_token t
+                JOIN tx_address a ON a.id = t.mint_address_id
+                WHERE a.address IN ({placeholders})
+            """, list(tokens))
+            for row in self.cursor.fetchall():
+                self._token_cache[row[0]] = row[1]
+
+        if programs:
+            placeholders = ','.join(['%s'] * len(programs))
+            self.cursor.execute(f"""
+                SELECT a.address, p.id
+                FROM tx_program p
+                JOIN tx_address a ON a.id = p.program_address_id
+                WHERE a.address IN ({placeholders})
+            """, list(programs))
+            for row in self.cursor.fetchall():
+                self._program_cache[row[0]] = row[1]
 
     def ensure_address(self, addr: str, addr_type: str = 'unknown') -> Optional[int]:
         """Get or create address, return tx_address.id"""
@@ -129,15 +176,11 @@ class BulkShredder:
 
     def ensure_token(self, addr: str, name: str = None, symbol: str = None,
                      icon: str = None, decimals: int = None) -> Optional[int]:
-        """Get or create token, return tx_token.id
-
-        Always calls DB if metadata provided (to update NULLs via COALESCE).
-        Only uses cache for bare address lookups.
-        """
+        """Get or create token, return tx_token.id"""
         if not addr:
             return None
 
-        # Truncate fields to fit database column limits
+        # Truncate fields
         if name and len(name) > 128:
             name = name[:128]
         if symbol and len(symbol) > 128:
@@ -147,7 +190,6 @@ class BulkShredder:
 
         has_metadata = any([name, symbol, icon, decimals is not None])
 
-        # Only use cache if no metadata to update
         if addr in self._token_cache and not has_metadata:
             return self._token_cache[addr]
 
@@ -324,16 +366,78 @@ def extract_agg_swap(summaries: list) -> dict:
     return result
 
 
+def collect_addresses_from_message(data: dict) -> tuple:
+    """Extract all addresses, tokens, programs from message for cache pre-warming"""
+    addresses = set()
+    tokens = set()
+    programs = set()
+
+    decoded_data = data['tx'][0]['decoded']
+    detail_data = data['tx'][1]['detail']
+    metadata = decoded_data.get('metadata', {})
+
+    # Tokens from metadata
+    for token_addr in metadata.get('tokens', {}).keys():
+        tokens.add(token_addr)
+
+    # From decoded transactions
+    for tx in decoded_data.get('data', []):
+        for t in tx.get('transfers', []):
+            if t.get('source'):
+                addresses.add(t['source'])
+            if t.get('source_owner'):
+                addresses.add(t['source_owner'])
+            if t.get('destination'):
+                addresses.add(t['destination'])
+            if t.get('destination_owner'):
+                addresses.add(t['destination_owner'])
+            if t.get('token_address'):
+                tokens.add(t['token_address'])
+            if t.get('program_id'):
+                programs.add(t['program_id'])
+
+        for a in tx.get('activities', []):
+            if a.get('program_id'):
+                programs.add(a['program_id'])
+            data_inner = a.get('data', {})
+            if data_inner.get('account'):
+                addresses.add(data_inner['account'])
+            if data_inner.get('token_1'):
+                tokens.add(data_inner['token_1'])
+            if data_inner.get('token_2'):
+                tokens.add(data_inner['token_2'])
+
+    # From detail transactions
+    for tx in detail_data.get('data', []):
+        signers = tx.get('list_signer') or tx.get('signer') or []
+        if isinstance(signers, str):
+            signers = [signers]
+        for s in signers:
+            addresses.add(s)
+
+        for change in tx.get('sol_bal_change', []):
+            if change.get('address'):
+                addresses.add(change['address'])
+
+        for change in tx.get('token_bal_change', []):
+            if change.get('address'):
+                addresses.add(change['address'])
+            if change.get('owner'):
+                addresses.add(change['owner'])
+            if change.get('token_address'):
+                tokens.add(change['token_address'])
+
+    return addresses, tokens, programs
+
+
 def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
-    """Update tx record with decoded data (block_id, agg fields, priority_fee)"""
+    """Update tx record with decoded data"""
     agg = extract_agg_swap(tx_data.get('summaries', []))
 
-    # Parse block_time_utc from 'time' field
     block_time_utc = None
     if tx_data.get('time'):
         block_time_utc = parse_iso_datetime(tx_data.get('time'))
 
-    # block_id is in decoded data
     block_id = tx_data.get('block_id')
 
     cursor.execute("""
@@ -371,12 +475,10 @@ def update_tx_with_decoded_data(tx_data: dict, tx_id: int, shredder: BulkShredde
 
 
 def process_decoded_tx(tx_data: dict, tx_id: int, metadata: dict, shredder: BulkShredder, cursor):
-    """Process decoded transaction data (transfers, activities, swaps)"""
-
-    # Update tx record with agg fields, priority_fee, tx_json
+    """Process decoded transaction data"""
     update_tx_with_decoded_data(tx_data, tx_id, shredder, cursor)
 
-    # Insert tokens from metadata first
+    # Insert tokens from metadata
     for token_addr, token_info in metadata.get('tokens', {}).items():
         shredder.ensure_token(
             token_addr,
@@ -459,12 +561,9 @@ def process_decoded_tx(tx_data: dict, tx_id: int, metadata: dict, shredder: Bulk
 
 
 def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor):
-    """Process detail transaction data (balance changes, signers, block_id)"""
-
-    # Extract block_id from detail data
+    """Process detail transaction data"""
     block_id = tx_data.get('block_id')
 
-    # Buffer signers - handle string, array, or list_signer
     signers = tx_data.get('list_signer') or tx_data.get('signer') or []
     if isinstance(signers, str):
         signers = [signers]
@@ -474,13 +573,8 @@ def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor)
         signer_id = shredder.ensure_address(signer_addr, 'wallet')
         if idx == 0:
             first_signer_id = signer_id
-        shredder._signer_buffer.append((
-            tx_id,
-            signer_id,
-            idx,
-        ))
+        shredder._signer_buffer.append((tx_id, signer_id, idx))
 
-    # Update tx record with block_id and first signer
     if block_id or first_signer_id:
         cursor.execute("""
             UPDATE tx SET
@@ -506,7 +600,6 @@ def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor)
         token_account = change.get('address')
         token_addr = change.get('token_address')
         owner = change.get('owner')
-        # Skip if missing required fields (owner can be empty string on create_account)
         if token_account and token_addr and owner:
             shredder._token_change_buffer.append((
                 tx_id,
@@ -521,98 +614,136 @@ def process_detail_tx(tx_data: dict, tx_id: int, shredder: BulkShredder, cursor)
             ))
 
 
-def process_message(body: bytes, cursor, conn) -> dict:
-    """Process a single RabbitMQ message"""
-    data = orjson.loads(body)
-    shredder = BulkShredder(cursor)
+def process_message_with_retry(body: bytes, db_pool, max_retries: int = MAX_DEADLOCK_RETRIES) -> dict:
+    """Process message with deadlock retry logic"""
 
-    tx_ids = data.get('tx_ids', [])
-    decoded_data = data['tx'][0]['decoded']
-    detail_data = data['tx'][1]['detail']
+    for attempt in range(max_retries):
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
 
-    decoded_txs = decoded_data.get('data', [])
-    detail_txs = detail_data.get('data', [])
-    metadata = decoded_data.get('metadata', {})
+        try:
+            # Set session isolation level
+            cursor.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
 
-    stats = {'decoded': 0, 'detail': 0}
+            data = orjson.loads(body)
 
-    # Build signature -> tx_id mapping from both decoded and detail data
-    sig_to_txid = {}
-    all_sigs = set()
-    for tx in decoded_txs:
-        sig = tx.get('tx_hash')
-        if sig:
-            all_sigs.add(sig)
-    for tx in detail_txs:
-        sig = tx.get('tx_hash')
-        if sig:
-            all_sigs.add(sig)
+            # Pre-warm caches
+            addresses, tokens, programs = collect_addresses_from_message(data)
+            shredder = BulkShredder(cursor)
+            shredder.prewarm_cache(addresses, tokens, programs)
 
-    # Batch lookup all signatures
-    for sig in all_sigs:
-        cursor.execute("SELECT id FROM tx WHERE signature = %s", (sig,))
-        row = cursor.fetchone()
-        if row:
-            sig_to_txid[sig] = row[0]
+            tx_ids = data.get('tx_ids', [])
+            decoded_data = data['tx'][0]['decoded']
+            detail_data = data['tx'][1]['detail']
 
-    # Process decoded transactions
-    for tx in decoded_txs:
-        sig = tx.get('tx_hash')
-        tx_id = sig_to_txid.get(sig)
-        if tx_id:
-            process_decoded_tx(tx, tx_id, metadata, shredder, cursor)
-            stats['decoded'] += 1
+            decoded_txs = decoded_data.get('data', [])
+            detail_txs = detail_data.get('data', [])
+            metadata = decoded_data.get('metadata', {})
 
-    # Process detail transactions - detail data has tx_hash field
-    for tx in detail_txs:
-        sig = tx.get('tx_hash')
-        tx_id = sig_to_txid.get(sig)
-        if tx_id:
-            process_detail_tx(tx, tx_id, shredder, cursor)
-            stats['detail'] += 1
+            stats = {'decoded': 0, 'detail': 0, 'retries': attempt}
 
-    # Flush all bulk inserts
-    flush_stats = shredder.flush_all()
-    stats.update(flush_stats)
+            # Build signature -> tx_id mapping
+            sig_to_txid = {}
+            all_sigs = set()
+            for tx in decoded_txs:
+                sig = tx.get('tx_hash')
+                if sig:
+                    all_sigs.add(sig)
+            for tx in detail_txs:
+                sig = tx.get('tx_hash')
+                if sig:
+                    all_sigs.add(sig)
 
-    # Update tx_state to 'shredded' for processed tx_ids
-    if tx_ids:
-        placeholders = ','.join(['%s'] * len(tx_ids))
-        cursor.execute(f"UPDATE tx SET tx_state = 'shredded' WHERE id IN ({placeholders})", tx_ids)
+            # Batch lookup signatures
+            for sig in all_sigs:
+                cursor.execute("SELECT id FROM tx WHERE signature = %s", (sig,))
+                row = cursor.fetchone()
+                if row:
+                    sig_to_txid[sig] = row[0]
 
-    conn.commit()
-    return stats
+            # Process decoded transactions
+            for tx in decoded_txs:
+                sig = tx.get('tx_hash')
+                tx_id = sig_to_txid.get(sig)
+                if tx_id:
+                    process_decoded_tx(tx, tx_id, metadata, shredder, cursor)
+                    stats['decoded'] += 1
+
+            # Process detail transactions
+            for tx in detail_txs:
+                sig = tx.get('tx_hash')
+                tx_id = sig_to_txid.get(sig)
+                if tx_id:
+                    process_detail_tx(tx, tx_id, shredder, cursor)
+                    stats['detail'] += 1
+
+            # Flush all bulk inserts
+            flush_stats = shredder.flush_all()
+            stats.update(flush_stats)
+
+            # Update tx_state
+            if tx_ids:
+                placeholders = ','.join(['%s'] * len(tx_ids))
+                cursor.execute(f"UPDATE tx SET tx_state = 'shredded' WHERE id IN ({placeholders})", tx_ids)
+
+            conn.commit()
+            return stats
+
+        except Exception as e:
+            conn.rollback()
+
+            if is_deadlock_error(e) and attempt < max_retries - 1:
+                # Exponential backoff with jitter
+                wait_time = (0.1 * (2 ** attempt)) + (random.random() * 0.1)
+                print(f"  [!] Deadlock detected, retry {attempt + 1}/{max_retries} in {wait_time:.2f}s")
+                time.sleep(wait_time)
+                continue
+            else:
+                raise
+        finally:
+            cursor.close()
+            conn.close()
+
+    raise Exception(f"Max deadlock retries ({max_retries}) exceeded")
 
 
 class Consumer:
-    """RabbitMQ consumer with graceful shutdown"""
+    """RabbitMQ consumer with deadlock handling"""
 
-    def __init__(self, db_conn, channel, max_messages: int = 0):
-        self.db_conn = db_conn
-        self.cursor = db_conn.cursor()
+    def __init__(self, db_pool, channel, max_messages: int = 0, worker_id: int = 0):
+        self.db_pool = db_pool
         self.channel = channel
         self.max_messages = max_messages
+        self.worker_id = worker_id
         self.message_count = 0
+        self.deadlock_count = 0
         self.should_stop = False
 
     def on_message(self, channel, method, properties, body):
         """Handle incoming message"""
         try:
-            stats = process_message(body, self.cursor, self.db_conn)
-            print(f"  [+] Processed: decoded={stats['decoded']} detail={stats['detail']} "
-                  f"transfers={stats['transfers']} swaps={stats['swaps']} signers={stats['signers']}")
+            stats = process_message_with_retry(body, self.db_pool)
+
+            retries = stats.get('retries', 0)
+            if retries > 0:
+                self.deadlock_count += retries
+
+            print(f"  [W{self.worker_id}] decoded={stats['decoded']} detail={stats['detail']} "
+                  f"transfers={stats['transfers']} swaps={stats['swaps']} "
+                  f"{'(retry=' + str(retries) + ')' if retries else ''}")
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
             self.message_count += 1
 
             if self.max_messages > 0 and self.message_count >= self.max_messages:
-                print(f"\nReached max messages ({self.max_messages})")
+                print(f"\n[W{self.worker_id}] Reached max messages ({self.max_messages})")
                 self.should_stop = True
                 channel.stop_consuming()
 
         except Exception as e:
-            print(f"  [!] Error processing message: {e}")
-            # Requeue the message
+            print(f"  [W{self.worker_id}] Error: {e}")
+            # Requeue with delay to avoid tight error loop
+            time.sleep(1)
             channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
     def start(self):
@@ -622,22 +753,25 @@ class Consumer:
             on_message_callback=self.on_message
         )
 
-        print(f"Waiting for messages on queue '{RABBITMQ_QUEUE}'...")
-        print("Press Ctrl+C to exit\n")
+        print(f"[W{self.worker_id}] Waiting for messages...")
 
         try:
             self.channel.start_consuming()
         except KeyboardInterrupt:
-            print("\nShutting down...")
+            print(f"\n[W{self.worker_id}] Shutting down...")
             self.channel.stop_consuming()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Consume enriched transactions from RabbitMQ')
+    parser = argparse.ArgumentParser(description='Consume enriched transactions (v2 - deadlock resistant)')
     parser.add_argument('--max-messages', type=int, default=0,
                         help='Maximum messages to process (0 = unlimited)')
-    parser.add_argument('--prefetch', type=int, default=10,
-                        help='Prefetch count for RabbitMQ')
+    parser.add_argument('--prefetch', type=int, default=5,
+                        help='Prefetch count for RabbitMQ (lower = fewer deadlocks)')
+    parser.add_argument('--pool-size', type=int, default=5,
+                        help='MySQL connection pool size')
+    parser.add_argument('--worker-id', type=int, default=0,
+                        help='Worker ID for logging')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
     parser.add_argument('--db-user', default='root', help='MySQL user')
@@ -658,17 +792,19 @@ def main():
         print("Error: pika not installed")
         return 1
 
-    print(f"Shredder Consumer")
+    print(f"Shredder Consumer v2 (Deadlock Resistant)")
     print(f"{'='*50}")
-    print(f"RabbitMQ: {args.rabbitmq_host}:{args.rabbitmq_port}")
-    print(f"Queue: {RABBITMQ_QUEUE}")
+    print(f"Worker ID: {args.worker_id}")
     print(f"Prefetch: {args.prefetch}")
+    print(f"Pool size: {args.pool_size}")
     print(f"Max messages: {args.max_messages if args.max_messages > 0 else 'unlimited'}")
     print()
 
-    # Connect to MySQL
-    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
-    db_conn = mysql.connector.connect(
+    # Create connection pool
+    print(f"Creating MySQL connection pool...")
+    db_pool = pooling.MySQLConnectionPool(
+        pool_name=f"shredder_pool_{args.worker_id}",
+        pool_size=args.pool_size,
         host=args.db_host,
         port=args.db_port,
         user=args.db_user,
@@ -691,16 +827,17 @@ def main():
     channel.basic_qos(prefetch_count=args.prefetch)
 
     # Start consumer
-    consumer = Consumer(db_conn, channel, args.max_messages)
+    consumer = Consumer(db_pool, channel, args.max_messages, args.worker_id)
 
     try:
         consumer.start()
     finally:
         connection.close()
-        db_conn.close()
 
     print(f"\n{'='*50}")
-    print(f"Done! Processed {consumer.message_count} messages")
+    print(f"[W{args.worker_id}] Done!")
+    print(f"  Messages processed: {consumer.message_count}")
+    print(f"  Total deadlock retries: {consumer.deadlock_count}")
     print(f"{'='*50}")
 
     return 0

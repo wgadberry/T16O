@@ -164,12 +164,25 @@ def create_api_session() -> aiohttp.ClientSession:
     return aiohttp.ClientSession(headers=headers, connector=connector, timeout=timeout)
 
 
+MAX_SAFE_INT = 9223372036854775807  # 2^63 - 1
+
+def sanitize_large_ints(obj):
+    """Recursively convert integers > 64-bit to strings for JSON serialization"""
+    if isinstance(obj, dict):
+        return {k: sanitize_large_ints(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_large_ints(item) for item in obj]
+    elif isinstance(obj, int) and (obj > MAX_SAFE_INT or obj < -MAX_SAFE_INT):
+        return str(obj)
+    return obj
+
+
 def combine_responses(decoded_response: dict, detail_response: dict, tx_ids: List[int]) -> dict:
     """Combine decoded and detail responses into unified format"""
     return {
         "tx": [
-            {"decoded": decoded_response},
-            {"detail": detail_response}
+            {"decoded": sanitize_large_ints(decoded_response)},
+            {"detail": sanitize_large_ints(detail_response)}
         ],
         "tx_ids": tx_ids,
         "created_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -427,7 +440,7 @@ def main():
                         help='Disable RabbitMQ, use file output only')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be processed without making changes')
-    parser.add_argument('--delay', type=float, default=0.5,
+    parser.add_argument('--delay', type=float, default=0.3,
                         help='Delay between batches in seconds')
     parser.add_argument('--worker-id', type=int, default=0,
                         help='Worker ID for logging (when running multiple workers)')

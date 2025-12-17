@@ -1,32 +1,33 @@
 -- vw_tx_token_info view
 -- Token summary with oldest and newest transaction info
 -- Groups by token and provides first/last tx details
+-- Refactored to use tx_guide (theGuide graph layer)
 
 CREATE OR REPLACE VIEW `vw_tx_token_info` AS
 WITH token_stats AS (
     SELECT
-        h.token_1_id AS token_id,
+        g.token_id,
         COUNT(*) AS tx_count,
-        SUM(h.amount_1) AS total_volume,
-        MIN(h.block_time) AS oldest_block_time,
-        MAX(h.block_time) AS newest_block_time
-    FROM tx_hound h
-    WHERE h.token_1_id IS NOT NULL
-    GROUP BY h.token_1_id
+        SUM(g.amount) AS total_volume,
+        MIN(g.block_time) AS oldest_block_time,
+        MAX(g.block_time) AS newest_block_time
+    FROM tx_guide g
+    WHERE g.token_id IS NOT NULL
+    GROUP BY g.token_id
 ),
 oldest_tx AS (
     SELECT DISTINCT
-        h.token_1_id AS token_id,
-        FIRST_VALUE(h.tx_id) OVER (PARTITION BY h.token_1_id ORDER BY h.block_time ASC) AS tx_id
-    FROM tx_hound h
-    WHERE h.token_1_id IS NOT NULL
+        g.token_id,
+        FIRST_VALUE(g.tx_id) OVER (PARTITION BY g.token_id ORDER BY g.block_time ASC) AS tx_id
+    FROM tx_guide g
+    WHERE g.token_id IS NOT NULL
 ),
 newest_tx AS (
     SELECT DISTINCT
-        h.token_1_id AS token_id,
-        FIRST_VALUE(h.tx_id) OVER (PARTITION BY h.token_1_id ORDER BY h.block_time DESC) AS tx_id
-    FROM tx_hound h
-    WHERE h.token_1_id IS NOT NULL
+        g.token_id,
+        FIRST_VALUE(g.tx_id) OVER (PARTITION BY g.token_id ORDER BY g.block_time DESC) AS tx_id
+    FROM tx_guide g
+    WHERE g.token_id IS NOT NULL
 )
 SELECT
     t.id AS token_id,

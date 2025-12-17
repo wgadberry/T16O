@@ -19,7 +19,13 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: t16o_db
-    command: --binlog_expire_logs_seconds=259200
+    command:
+      - --binlog_expire_logs_seconds=259200
+      - --innodb_buffer_pool_size=2G
+      - --innodb_log_buffer_size=256M
+      - --innodb_flush_log_at_trx_commit=2
+      - --innodb_io_capacity=8000
+      - --innodb_io_capacity_max=16000
     volumes:
       - t16o_v1_mysql_data:/var/lib/mysql
     healthcheck:
