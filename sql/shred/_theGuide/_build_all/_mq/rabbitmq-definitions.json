@@ -1,0 +1,64 @@
+{
+  "rabbit_version": "3.x",
+  "description": "theGuide RabbitMQ Configuration",
+  "users": [
+    {
+      "name": "admin",
+      "password_hash": "admin123",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "admin",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "queues": [
+    {
+      "name": "tx.guide.signatures",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-max-priority": 10
+      }
+    },
+    {
+      "name": "tx.guide.addresses",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-max-priority": 10
+      }
+    },
+    {
+      "name": "tx.funding.addresses",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-max-priority": 10
+      }
+    },
+    {
+      "name": "tx.enriched",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [],
+  "bindings": []
+}
