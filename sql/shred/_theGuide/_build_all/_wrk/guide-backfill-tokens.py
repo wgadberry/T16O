@@ -78,7 +78,7 @@ def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
 
 def main():
     parser = argparse.ArgumentParser(description='Backfill missing token metadata from Solscan')
-    parser.add_argument('--limit', type=int, default=100, help='Max tokens to process')
+    parser.add_argument('--limit', type=int, default=1000, help='Max tokens to process')
     parser.add_argument('--delay', type=float, default=0.2, help='Delay between API calls (seconds)')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')

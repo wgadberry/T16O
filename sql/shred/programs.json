@@ -1,0 +1,170 @@
+{
+  "success": true,
+  "data": [
+    {
+      "platform_id": "jupiter_lend",
+      "platform_name": "Jupiter Lend",
+      "program_ids": [
+        "jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9",
+        "jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi",
+        "jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS"
+      ],
+      "website": "https://jup.ag/lend",
+      "description": "Jupiter Lend is a peer-to-peer decentralized, non-custodial, pool-based interest rates platform."
+    },
+    {
+      "platform_id": "dflow",
+      "platform_name": "DFlow",
+      "program_ids": [
+        "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH"
+      ],
+      "website": "https://dflow.net/",
+      "description": "Intelligent Trade Execution on Solana. DFlow builds low-latency, internet-native market structure."
+    },
+    {
+      "platform_id": "humidifi",
+      "platform_name": "HumidiFi",
+      "program_ids": [
+        "9H6tua7jkLhdm3w8BvgpTn5LZNU7g4ZynDmCiNN3q6Rp"
+      ],
+      "website": "https://humidifi.xyz/",
+      "description": "HumidiFi is Solana's largest decentralized exchange (DEX) by volume, processing over $1B in daily volume - roughly 35% of all spot DEX activity."
+    },
+    {
+      "platform_id": "jupiter",
+      "platform_name": "Jupiter Aggregator",
+      "program_ids": [
+        "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+        "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB"
+      ],
+      "website": "https://jup.ag/",
+      "description": "The best swap aggregator & infrastructure for Solana -  powering best price, token selection and UX for all users and devs"
+    },
+    {
+      "platform_id": "orca",
+      "platform_name": "Orca",
+      "program_ids": [
+        "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        "DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1",
+        "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP"
+      ],
+      "website": "https://www.orca.so/",
+      "description": ""
+    },
+    {
+      "platform_id": "raydium",
+      "platform_name": "Raydium",
+      "program_ids": [
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+        "5quBtoiQqxF9Jv6KYKctB59NT3gtJD2Y65kdnB1Uev3h",
+        "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+        "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+        "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"
+      ],
+      "website": "https://raydium.io/",
+      "description": "An on-chain order book AMM powering the evolution of DeFi."
+    },
+    {
+      "platform_id": "phoenix",
+      "platform_name": "Phoenix",
+      "program_ids": [
+        "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY"
+      ],
+      "website": "https://www.phoenix.trade/",
+      "description": ""
+    },
+    {
+      "platform_id": "sanctum",
+      "platform_name": "Sanctum",
+      "program_ids": [
+        "stkitrT1Uoy18Dk1fTrgPw8W6MVzoCfYoAFT4MLsmhq",
+        "5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx",
+        "SPMBzsVUuoHA4Jm6KunbsotaahvVikZs1JyTW6iJvbn",
+        "SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY"
+      ],
+      "website": "https://app.sanctum.so/",
+      "description": "Sanctum is a new primitive built on Solana to power liquid staking and bring Solana into an infinite-LST future. Sanctum enables users that stake SOL natively or with a liquid staking token (LST) to tap into a powerful unified liquidity layer."
+    },
+    {
+      "platform_id": "kamino",
+      "platform_name": "Kamino",
+      "program_ids": [
+        "6LtLpnUFNByNXLyCoK9wA2MykKAmQNZKBdY8s47dehDc",
+        "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
+      ],
+      "website": "https://app.kamino.finance/",
+      "description": "Automated products powered by secure DeFi primitives"
+    },
+    {
+      "platform_id": "pumpfun",
+      "platform_name": "Pump.fun",
+      "program_ids": [
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+      ],
+      "website": "https://pump.fun/",
+      "description": "Launch a coin that is instantly tradeable for under $2 in one click"
+    },
+    {
+      "platform_id": "openbook",
+      "platform_name": "Openbook",
+      "program_ids": [
+        "opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb"
+      ],
+      "website": "https://www.openbook.ag/",
+      "description": ""
+    },
+    {
+      "platform_id": "stabble",
+      "platform_name": "Stabble",
+      "program_ids": [
+        "swapNyd8XiQwJ6ianp9snpu4brUqFxadzvHebnAXjJZ",
+        "swapFpHZwjELNnjvThjajtiVmkz3yPQEHjLtka2fwHW"
+      ],
+      "website": "https://stabble.org/",
+      "description": "Solana's first frictionless liquidity and trading layer."
+    },
+    {
+      "platform_id": "jupiterdca",
+      "platform_name": "Jupiter DCA/Order",
+      "program_ids": [
+        "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M",
+        "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"
+      ],
+      "website": "https://jup.ag/recurring",
+      "description": "Jupiter DCA helps users automate regular purchases or sales of SPL tokens over a chosen period, making it easier to manage long-term investments. Jupiter Limit Order allows users to place limit orders on Solana with access to a wide range of token pairs and deep liquidity, offering flexibility to trade at preferred prices."
+    },
+    {
+      "platform_id": "solfi",
+      "platform_name": "SolFi",
+      "program_ids": [
+        "SoLFiHG9TfgtdUXUjWAxi3LtvYuFyDLVhBWxdMZxyCe",
+        "SV2EYYJyRz2YhfXwXnhNAevDEui5Q6yrfyo13WtupPF"
+      ],
+      "website": "https://solfi.com/",
+      "description": "SolFi is the premier liquidity source on Solana."
+    },
+    {
+      "platform_id": "zerofi",
+      "platform_name": "ZeroFi",
+      "program_ids": [
+        "ZERor4xhbUycZ6gb9ntrhqscUcZmAbQDjEAtCf4hbZY"
+      ],
+      "website": "",
+      "description": ""
+    },
+    {
+      "platform_id": "meteora",
+      "platform_name": "Meteora ",
+      "program_ids": [
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+        "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
+        "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN",
+        "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+      ],
+      "website": "https://www.meteora.ag/",
+      "description": "Building the most secure, sustainable & composable yield layer for all of Solana and DeFi"
+    }
+  ],
+  "metadata": {}
+}

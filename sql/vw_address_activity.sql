@@ -1,14 +1,14 @@
 -- View: vw_address_activity
 -- Flattened relational view of address activity data
--- Equivalent to sp_address_activity but as queryable columns
+-- Refactored to use tx_guide (theGuide graph layer)
 
 CREATE OR REPLACE VIEW vw_address_activity AS
 SELECT
-    -- Address info
-    a.id AS address_id,
-    a.address,
-    a.address_type,
-    a.label AS address_label,
+    -- Address info (from perspective - outflow)
+    a_from.id AS address_id,
+    a_from.address,
+    a_from.address_type,
+    a_from.label AS address_label,
 
     -- Parent info (flattened)
     parent.id AS parent_id,
@@ -24,42 +24,46 @@ SELECT
     t.id AS tx_id,
     t.signature,
     t.block_time_utc AS timestamp,
-    t.status AS tx_status,
+    t.tx_state AS tx_status,
 
-    -- Party/activity info
-    p.id AS party_id,
-    p.account_index,
-    COALESCE(p.action_type, 'unknown') AS action_type,
-    p.balance_type,
+    -- Activity info
+    g.id AS guide_id,
+    g.ins_index,
+    gt.type_code AS action_type,
+    gt.category AS action_category,
 
     -- Token info
-    mint.id AS mint_id,
+    tk.id AS token_id,
     mint.address AS mint_address,
     CASE
-        WHEN p.balance_type = 'SOL' THEN 'SOL'
-        ELSE COALESCE(mint.label, CONCAT(LEFT(mint.address, 4), '...', RIGHT(mint.address, 4)))
+        WHEN tk.id IS NULL THEN 'SOL'
+        ELSE COALESCE(tk.token_symbol, CONCAT(LEFT(mint.address, 4), '...', RIGHT(mint.address, 4)))
     END AS token_symbol,
-    p.decimals,
+    tk.token_name,
+    g.decimals,
 
     -- Amount info
-    CASE WHEN p.amount_change > 0 THEN 'in' ELSE 'out' END AS direction,
-    p.amount_change AS amount_raw,
-    ABS(p.amount_change) AS amount_raw_abs,
-    p.ui_amount_change AS amount,
-    ABS(p.ui_amount_change) AS amount_abs,
+    gt.direction,
+    g.amount AS amount_raw,
+    g.amount / POW(10, COALESCE(g.decimals, 9)) AS amount,
 
     -- Counterparty info (flattened)
-    cp.id AS counterparty_party_id,
-    cp_owner.id AS counterparty_id,
-    cp_owner.address AS counterparty_address,
-    cp_owner.address_type AS counterparty_type,
-    cp_owner.label AS counterparty_label
+    a_to.id AS counterparty_id,
+    a_to.address AS counterparty_address,
+    a_to.address_type AS counterparty_type,
+    a_to.label AS counterparty_label,
 
-FROM party p
-JOIN addresses a ON p.owner_id = a.id
-JOIN transactions t ON p.tx_id = t.id
-JOIN addresses mint ON p.mint_id = mint.id
-LEFT JOIN addresses parent ON a.parent_id = parent.id
-LEFT JOIN addresses prog ON a.program_id = prog.id
-LEFT JOIN party cp ON p.counterparty_owner_id = cp.id
-LEFT JOIN addresses cp_owner ON cp.owner_id = cp_owner.id;
+    -- Source tracking
+    gs.source_code,
+    g.source_row_id
+
+FROM tx_guide g
+JOIN tx_address a_from ON g.from_address_id = a_from.id
+JOIN tx_address a_to ON g.to_address_id = a_to.id
+JOIN tx t ON g.tx_id = t.id
+JOIN tx_guide_type gt ON g.edge_type_id = gt.id
+LEFT JOIN tx_token tk ON g.token_id = tk.id
+LEFT JOIN tx_address mint ON tk.mint_address_id = mint.id
+LEFT JOIN tx_address parent ON a_from.parent_id = parent.id
+LEFT JOIN tx_address prog ON a_from.program_id = prog.id
+LEFT JOIN tx_guide_source gs ON g.source_id = gs.id;

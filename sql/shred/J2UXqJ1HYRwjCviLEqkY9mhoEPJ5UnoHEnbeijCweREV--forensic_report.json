@@ -1,0 +1,1257 @@
+{
+  "token_mint": "J2UXqJ1HYRwjCviLEqkY9mhoEPJ5UnoHEnbeijCweREV",
+  "token_symbol": "SOLTIT",
+  "analysis_time": "2025-12-13T00:49:38.003448+00:00",
+  "time_range": [
+    "2025-10-07 01:00:46",
+    "2025-12-12 22:57:26"
+  ],
+  "total_transactions": 8105,
+  "total_wallets": 464,
+  "total_volume": 16063112449.003252,
+  "manipulation_score": 100,
+  "confidence": "high",
+  "summary": "HIGH PROBABILITY OF MANIPULATION. Detected 26 bot wallets, 43 coordinated dump events, 7 sybil clusters.",
+  "bot_wallets": [
+    {
+      "wallet": "ATQs6A92eUzdxTBsQhRJxxJDpgYDTGvLnU4e5mMEfY3k",
+      "bot_score": 90.0,
+      "total_trades": 8,
+      "buys": 4,
+      "sells": 8,
+      "buy_volume": 13782.995030099999,
+      "sell_volume": 24809.391054176,
+      "evidence": {
+        "timing_variance": 0.0,
+        "avg_interval": 0.0,
+        "fast_reactions": 4,
+        "amount_consistency": 0.005495552719139439
+      }
+    },
+    {
+      "wallet": "HLtnuk5FLQr48jSpSw41xwaEqZ3MoucT1hmVzccToQZE",
+      "bot_score": 85.0,
+      "total_trades": 12,
+      "buys": 6,
+      "sells": 12,
+      "buy_volume": 39120.724194518,
+      "sell_volume": 70417.303550128,
+      "evidence": {
+        "fast_reactions": 6,
+        "amount_consistency": 0.04518734136077228,
+        "tx_rate_per_hour": 533.3333333333334
+      }
+    },
+    {
+      "wallet": "CatyeC3LgBxub7HcpW2n7cZZZ66CUKdcZ8DzHucHrSiP",
+      "bot_score": 80.0,
+      "total_trades": 4,
+      "buys": 2,
+      "sells": 4,
+      "buy_volume": 4844132.55172572,
+      "sell_volume": 8719438.593106294,
+      "evidence": {
+        "timing_variance": 0.0,
+        "avg_interval": 0.0,
+        "fast_reactions": 2,
+        "amount_consistency": 0.0035838282427426617
+      }
+    },
+    {
+      "wallet": "gtagyESa99t49VmUqnnfsuowYnigSNKuYXdXWyXWNdd",
+      "bot_score": 80.0,
+      "total_trades": 4,
+      "buys": 2,
+      "sells": 4,
+      "buy_volume": 108649.864185008,
+      "sell_volume": 195569.755533012,
+      "evidence": {
+        "timing_variance": 5.5555555555555545,
+        "avg_interval": 1.6666666666666667,
+        "fast_reactions": 2,
+        "amount_consistency": 0.0032888307141137603
+      }
+    },
+    {
+      "wallet": "RaVenxw8kykBbW7KGBaBsb7fDkkBYK4uJVDSFun6ZxR",
+      "bot_score": 60.0,
+      "total_trades": 8,
+      "buys": 4,
+      "sells": 8,
+      "buy_volume": 523331.213651108,
+      "sell_volume": 941996.1845719919,
+      "evidence": {
+        "fast_reactions": 4,
+        "amount_consistency": 0.027375634305232637
+      }
+    },
+    {
+      "wallet": "SHARKRdGLNYRZrhotqvZi3XAtT62CRGCFxmg5LJgSHC",
+      "bot_score": 60.0,
+      "total_trades": 8,
+      "buys": 4,
+      "sells": 8,
+      "buy_volume": 18694.746072039998,
+      "sell_volume": 33650.542929667994,
+      "evidence": {
+        "fast_reactions": 4,
+        "amount_consistency": 0.009676692936898714
+      }
+    },
+    {
+      "wallet": "5wMHFyCgRrggsKWrvS2zHDHi7V6xfwfSAsZG95LwXYUQ",
+      "bot_score": 50.0,
+      "total_trades": 4,
+      "buys": 2,
+      "sells": 4,
+      "buy_volume": 90924.310990047,
+      "sell_volume": 163663.759782082,
+      "evidence": {
+        "fast_reactions": 2,
+        "amount_consistency": 0.005770926934865367
+      }
+    },
+    {
+      "wallet": "AxR5o7n98EY6xoNGVhrJ3QGZAS2wRUcbzRnU5Dwbaev8",
+      "bot_score": 40.0,
+      "total_trades": 344,
+      "buys": 172,
+      "sells": 344,
+      "buy_volume": 14122519.228730492,
+      "sell_volume": 25420534.611714806,
+      "evidence": {
+        "fast_reactions": 172
+      }
+    },
+    {
+      "wallet": "EV7VScMVUyfe8LKczt5rgJjhfyJy4DnfRGcJJ9g3zjZB",
+      "bot_score": 40.0,
+      "total_trades": 68,
+      "buys": 34,
+      "sells": 68,
+      "buy_volume": 4494645.809654471,
+      "sell_volume": 8090362.457378022,
+      "evidence": {
+        "fast_reactions": 34
+      }
+    },
+    {
+      "wallet": "bobCPc5nqVoX7r8gKzCMPLrKjFidjnSCrAdcYGCH2Ye",
+      "bot_score": 40.0,
+      "total_trades": 12,
+      "buys": 6,
+      "sells": 12,
+      "buy_volume": 5094279.068178476,
+      "sell_volume": 9169702.322721254,
+      "evidence": {
+        "fast_reactions": 6
+      }
+    },
+    {
+      "wallet": "G4tinUhbt18yjMGEH2yn359gu54VL3Jj9T5rg8Qrfr41",
+      "bot_score": 40.0,
+      "total_trades": 28,
+      "buys": 14,
+      "sells": 28,
+      "buy_volume": 2649183.422803959,
+      "sell_volume": 4768530.161047114,
+      "evidence": {
+        "fast_reactions": 14
+      }
+    },
+    {
+      "wallet": "HxjwdF326ZunmUwC1iXhfgL3ku78YsksN6n7Rfxzwr6b",
+      "bot_score": 40.0,
+      "total_trades": 6,
+      "buys": 3,
+      "sells": 6,
+      "buy_volume": 4988436.834558119,
+      "sell_volume": 8979186.302204609,
+      "evidence": {
+        "fast_reactions": 3
+      }
+    },
+    {
+      "wallet": "XoXoL2gjxbKWVNtg672gzQjRi268nTonPHr24qZJzNb",
+      "bot_score": 40.0,
+      "total_trades": 28,
+      "buys": 14,
+      "sells": 28,
+      "buy_volume": 2425392.9908153554,
+      "sell_volume": 4365951.546671642,
+      "evidence": {
+        "fast_reactions": 14
+      }
+    },
+    {
+      "wallet": "damnjbgs5YiNCfQYqms2pL5ynNLkQ4WHfrELEFczNZA",
+      "bot_score": 40.0,
+      "total_trades": 16,
+      "buys": 8,
+      "sells": 16,
+      "buy_volume": 1014449.2087018711,
+      "sell_volume": 1826008.57566336,
+      "evidence": {
+        "fast_reactions": 8
+      }
+    },
+    {
+      "wallet": "co1dafmGrEDyzjRGLwc7iw8woCwcUQFjaa6CWkmsKoJ",
+      "bot_score": 40.0,
+      "total_trades": 48,
+      "buys": 24,
+      "sells": 48,
+      "buy_volume": 4199190.329446214,
+      "sell_volume": 7558542.593003156,
+      "evidence": {
+        "fast_reactions": 24
+      }
+    },
+    {
+      "wallet": "FkdDHrM8j8psKbxuwjV1jBKCM2JGPygkj7WCX8sSCzNm",
+      "bot_score": 40.0,
+      "total_trades": 18,
+      "buys": 9,
+      "sells": 18,
+      "buy_volume": 24061.484880935004,
+      "sell_volume": 43310.67278567399,
+      "evidence": {
+        "fast_reactions": 9
+      }
+    },
+    {
+      "wallet": "2QfBNK2WDwSLoUQRb1zAnp3KM12N9hQ8q6ApwUMnWW2T",
+      "bot_score": 40.0,
+      "total_trades": 20,
+      "buys": 10,
+      "sells": 20,
+      "buy_volume": 3530894.727437268,
+      "sell_volume": 6355784.4601788195,
+      "evidence": {
+        "fast_reactions": 10
+      }
+    },
+    {
+      "wallet": "fck87VFtnrvWLd9UGUhAtqxWi9zBdoUi57gXgVPaic1",
+      "bot_score": 40.0,
+      "total_trades": 14,
+      "buys": 7,
+      "sells": 14,
+      "buy_volume": 486384.39089652104,
+      "sell_volume": 875491.9036137299,
+      "evidence": {
+        "fast_reactions": 7
+      }
+    },
+    {
+      "wallet": "LvjCuiYEvNiHiXNAMUPUDbuCrmaMTUyubLypXwn22Fm",
+      "bot_score": 40.0,
+      "total_trades": 66,
+      "buys": 36,
+      "sells": 60,
+      "buy_volume": 672857.2134822928,
+      "sell_volume": 1211187.6435499927,
+      "evidence": {
+        "fast_reactions": 28
+      }
+    },
+    {
+      "wallet": "5MGfsuYNRhbuN6x1M6WaR3721dSDGtXpcsHxNsgkjsXC",
+      "bot_score": 40.0,
+      "total_trades": 28,
+      "buys": 14,
+      "sells": 28,
+      "buy_volume": 136763.705824102,
+      "sell_volume": 246174.67048337194,
+      "evidence": {
+        "fast_reactions": 14
+      }
+    }
+  ],
+  "wash_trading_pairs": [],
+  "sybil_clusters": [
+    {
+      "funder": "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
+      "wallet_count": 95,
+      "wallets": [
+        "E7uhkKw6FFZyx53aL5ymrnKC4tttzjqy3o6kpH9rMmC8",
+        "AASjzVp8Ff5qTr41mVTnDEL5zeYoa6d1DN93pdCv7Shg",
+        "44bM6dAGRNW5E61TYxtyueuMupp7kqdx8HZ2hWgZb9WC",
+        "8Nztq12MMXkuBcPfDDZN4BxHpKMkzLw8A3hsXusJboLv",
+        "A1vgNK8fGcQYazrPAnXD5zy4Akw1sC9DYLxWfqJ6Fm7m",
+        "GaezFnQ7Wo9UzbgU5HnRryv4AsSotS1bbM3nPZ79E2Wy",
+        "Lkb6zau6M1BUUq8oHyDmsw3o5gCbMvDwaseUvd5666z",
+        "4uf2LjSany9t8LkoTysBDPGxUckH6WWJ8yiWKUk7drZ6",
+        "B5ZJQJuuFUYcwi81DXHnypY33cKRqgrupX1gqCZed1UR",
+        "DifKUryJWS1hEQfFFvnRC64ydBD7Y4RYuDG4cvHkr4ZG",
+        "2rqBjjoyTYwRrsn8sU6wFAhduVWyDcuuVpJyxtfq7VLU",
+        "FuUDWeaerG8vmuQWaQ6WJgz45pAUwFsCChgxQes2Zbbz",
+        "AX2Sf6bkCCGPN9awFrzt7LCJmEDBHjKJbXE9yEmhMxAM",
+        "2MXSNJtu1LZABBkQ4rJYHi7c35Qg27YmqsNT86kJrnTC",
+        "9K69SdZ7HfaAML6UWoeQwq2cptoiK9pFk5qL6F77eBDG",
+        "HNo2jppzT7axNcow7TjxWweFbbX8Fz1E8NZvuggWDded",
+        "34yVeWYmJrUrYGXVkVfrUKYFfVYVNvaQphxzx2B5me62",
+        "D913J2PpycBdVhtMWDETXkFQSqBwuQWANhFG7UnL5n18",
+        "FfbXkvVw6HbedopCXNa8By6bENgzbyz7tYR4v8tqiAxd",
+        "8EzGMYhhSYeQuoXBP3MBvnnhV1RKdgh5fEVEgiFx2dQj",
+        "BX3BZwCpeBmdtUkieVSLKbZLHz9bEaJWCnVP1LE4D8qy",
+        "Dbo3qjR3Xyhz26ZwMV94FYweWktSdi5x4A6rbkjZzqNu",
+        "628RzrmapfdaXqeXyWnebbceBxEsGQ2WmKJcK2UHQpaD",
+        "6k5nbPWSpcbcCwkg7Hz3qVMbGLRdxgSqYziugzo11GH7",
+        "F2vEBHj9ykM8RvXhEsigSs8VNwQ7hN82H4LxfD2rh3pN",
+        "GNUDsg2v2Noixgd54iQ4VmTsJyGjBn7jU7b4Q5wd4PBR",
+        "wAVQktfDqjZ1qitnEgZpjGQSGyrx3XwgrcgS1G19w2e",
+        "C16cKmtEj95vrGQj9reRu3GeLJ5ABXcLczp2y1yxqsin",
+        "HrWuK5zC6KVFbWiFZXW3m6hNYRu57r2gnhTdmHArEVVw",
+        "BosfVsXbf6jxpuNJd9zzPr83FLrdkSWDEMXDxmwbRJgv",
+        "G3xfHU267fZjMZuTadom6yHwoGg3EqdM2hFCN4gZeKx6",
+        "C8qmFonF293MiEsmYbVJjjQHnKmbmnN4FYwCzXwQ1hgu",
+        "3eGkMXpYVbKWnbLuh4MAPRY8yA9EcmB9seh7VrTohWvt",
+        "Bos3jQMtBfQ46keJgmi1YkqBW2R59zsPutmtiMnPzBNV",
+        "D5pRkseJdGXiZrDp4FaBZfZd4JQAWyFp1bE4nw7hUKUZ",
+        "EHvKUCpU52WgrKu6yyDdJGMQCSLXEmriAuv3PELUfxJU",
+        "7ctSkuVbF8XPyyh5bokR7agwgFsxtfAucvsbvQt2D6cw",
+        "8vM9VWTHpFKJdyAXMTAVj5w3kjbH2zz1K9S6ps4bfNfc",
+        "9aeTPBTJVHacEJzhCQpSu9kGKoUm9t7QrUrEQYH4MeDa",
+        "Coav25hvjD1T2UnH9fv49pmMRK73oJMpqxhH3t3hcho9",
+        "9FpixNTMNWwU7JL7bDvTS7mdZ2m2ZkFgfKDfMDbo5snZ",
+        "6KzhZEhFLsnoN94qpHLMkk1Dne7xVwUbxrvsMcTb7EDQ",
+        "6g4yBNkdEakFN5qrQ8c2Mz26dbHoakCuM2DNxRq49YMV",
+        "21vjEdbXiZZV1E5p6o4kL4RWrE5UsRjsjasEw1Mv7Aiy",
+        "BoM3XBa1S9aS4AdKPsuPnPFRZhpySSU6gfoisq75y5cW",
+        "CXHE53i4NgX24qyPbaUqBPjPgak5fFgozZRPcUGP1X8Q",
+        "69fP1imFMsbSRsZBAvmRdMAH8YSMjKTjRdTYxS3tLsjA",
+        "E76D5NMqj8vp8ufFbnbbwEHP2c7n7BaLUG5bjVQgvP5J",
+        "ECDD7erWhXWoTspgEH6UEDjjRstD2obGFDszvLWZuf7z",
+        "AgMBjJdCzKDeyXPNRi2yZ6vLwKxsXe4D4ZWW3PwQGHjS",
+        "U18Sc6b3fAxUATNfhMfMPpz72QVgqbTwWAueeXUaJ1q",
+        "8ogB1EeXKhNk2XeNTcBEiRawpUgTx4Shpdn19bJ3Mz9G",
+        "8WCqmVtNCwtXWo5Pd2U2JqN6rPnsVGgdaxGasgjmxcS7",
+        "DkaRBcaUgo55gqeiMwxSxxHviXHyohjdRWFMVvjp7iz2",
+        "758LF4jY3GGVTKAJYyTK1fJhKWf8si6s85vH92aF2o1V",
+        "6PvjPbm4DaUW98KxEJHMsgawfdY4azPLJwN3HHeVxNVw",
+        "Gj5K5kX2ktxaydCwZZ34xSgPuo7tKYj6qViV5w7i9Wkp",
+        "GQhp1metiEge237QfN6rLtFENiz9BW2RCV3s3KPEbWdJ",
+        "DHFdFqjCMzdG13VNJNrST6MkezAuMzriveCaPZWcBTTT",
+        "ADwCpHQ4zfdiRYvCUHJRGQ1X4NbGfxJ3cnKMdrTi71jf",
+        "7ZbqvjyYdt6rBcz2MNKC5rBFQW9MzAgHjoE25pR9hfHe",
+        "AVhRvnMCbN7FXZHp7KnkT2NGU3a6eZteCBgPxjSgiqxT",
+        "4HsStbJVFZpwAbQ37FMWAjZmQgxrtHNGSbUrM1wyTAEq",
+        "79iQBsxSTUpht36gQ8BvLDAc2AudVWN2iEkXxKdoP3L6",
+        "Ae2Vx4K3ehgT9XQoVmVsux6RN5Cmt9MEmi8rPDTYXHWa",
+        "66VvGXEKVDD3GzMATec7Nch2b3i1hTGqRneYt5jdpvB4",
+        "yudkpbXU7Ufvumi6fpJ69HMwyfoQQ8UeSFZc4be2hiW",
+        "BjuEs4JtdZiAHzCqbHDtFkxd3LKCJHjKSpnj8ivexaPF",
+        "7A9ZnT21uK5NLJq4R3MVsbZrWi2u8uocM19eSjNEzQQs",
+        "hswtMtZrQz1E42pVULzz5GgRHXVd2hdaeSvYSx3BRp1",
+        "2t3Vnqg7niZr3hXKrxBr1E9r6YTvKFhsuSu5P6upiRJp",
+        "FsY1JzEYLFT2BUKW2LkXd2m6MRomMnzy3oCEhpVRZrvR",
+        "3s5uQYAHd5SQTZF9Gj6kauubuTRotnRhuv6wgfWHzQAx",
+        "2uGGxrMetvgCWQ7VenGEmFUBRan1dW8BNG3YYZagRefb",
+        "FEp6DVB8WyeCbqrjbU7nuQmDYYGcdH4raJEoPvMfUQFG",
+        "74DYf9oprzCTWUEsE86fuoJUSQ4UUEJY3EzApXYbFA2i",
+        "HXzdyGkmpNKAJfcebrMmxhcPHyety1bSUPqwqTpXrYnY",
+        "5yfEuroCDbc7ZyUQJtStrR4yFua4nP89jCuSCcgsqe1X",
+        "HvGtVzGocSDGRboN4CEXP7CBaVdMC2heZMdXnxwfgPhu",
+        "8KFzNrh4CwP8UXn9Qi7y7aTnz2iKg9xYVd4YiDP3Adce",
+        "HGezrugGoTBeXBdZoHLm9kpuPf67mavMyCYfGGRJBkNn",
+        "57BAhQRLhmW7CUcAG4PX4KQxPxHNqgqQkkiULBdiinJG",
+        "AEeNr1RpnT9qoqXxQ3PxSXjJvhia7XYrtQBqM9q3rseJ",
+        "DK3D1mxVWzcxEiqYd1UVa1cr9ZzpbaqxuxW6C22K1Dtv",
+        "8eRQksj334SXG7WBBhD6uxt4NSTXf6mmBMiYzCd9gex4",
+        "3WVcDPEtR5RGV7SHCX6DULfdujyf8YeCLXY2Ke12QAG6",
+        "6LJ5MQLiLGRByoxwh8xzfohYR1KW6cAJbMz85f4FgnVU",
+        "D5kuymDE8CTAQ2ANVn8LQXsmoE2Ys4QCFCgAS1oxCN8A",
+        "2vu4Go3849WpZ1Ff4U1PxoLzv8zWZU3i2fDxsbDA4LgZ",
+        "5hcuxSXSNj3EPPs8aiktpxy6BaWCgvEHzWmhVeLGca4Z",
+        "9RSVzUD4XHHMgRSh9tMmTV6tTLQWbUwWeZ9Thhz3DNi8",
+        "9Quai5qWgr2q4x2krqMN7adsQqJ4otQptBaKtEd9MKDR",
+        "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+        "8dpp4d3ayff5MpCvxN48eEPN621SgNujG45vmzxBuVyg",
+        "2PAnsVDYkuQTMxysupCXQFRxB95h24KN6YafDQv6xX9g"
+      ],
+      "total_sells": 1239,
+      "total_sell_volume": 4347780572.720287,
+      "sybil_score": 7620
+    },
+    {
+      "funder": "yudkpbXU7Ufvumi6fpJ69HMwyfoQQ8UeSFZc4be2hiW",
+      "wallet_count": 3,
+      "wallets": [
+        "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+        "6qZRYpsJbx9WDtDfUkbCwopMGK6eh2yEP25Nzb2J4RxM",
+        "yudkpbXU7Ufvumi6fpJ69HMwyfoQQ8UeSFZc4be2hiW"
+      ],
+      "total_sells": 793,
+      "total_sell_volume": 2702591325.714787,
+      "sybil_score": 4010
+    },
+    {
+      "funder": "FERjPVNEa7Udq8CEv68h6tPL46Tq7ieE49HrE2wea3XT",
+      "wallet_count": 19,
+      "wallets": [
+        "GNUDsg2v2Noixgd54iQ4VmTsJyGjBn7jU7b4Q5wd4PBR",
+        "44bM6dAGRNW5E61TYxtyueuMupp7kqdx8HZ2hWgZb9WC",
+        "HrWuK5zC6KVFbWiFZXW3m6hNYRu57r2gnhTdmHArEVVw",
+        "8ogB1EeXKhNk2XeNTcBEiRawpUgTx4Shpdn19bJ3Mz9G",
+        "Bos3jQMtBfQ46keJgmi1YkqBW2R59zsPutmtiMnPzBNV",
+        "6PvjPbm4DaUW98KxEJHMsgawfdY4azPLJwN3HHeVxNVw",
+        "8vM9VWTHpFKJdyAXMTAVj5w3kjbH2zz1K9S6ps4bfNfc",
+        "DK3D1mxVWzcxEiqYd1UVa1cr9ZzpbaqxuxW6C22K1Dtv",
+        "6KzhZEhFLsnoN94qpHLMkk1Dne7xVwUbxrvsMcTb7EDQ",
+        "34yVeWYmJrUrYGXVkVfrUKYFfVYVNvaQphxzx2B5me62",
+        "BX3BZwCpeBmdtUkieVSLKbZLHz9bEaJWCnVP1LE4D8qy",
+        "4HsStbJVFZpwAbQ37FMWAjZmQgxrtHNGSbUrM1wyTAEq",
+        "79iQBsxSTUpht36gQ8BvLDAc2AudVWN2iEkXxKdoP3L6",
+        "Dbo3qjR3Xyhz26ZwMV94FYweWktSdi5x4A6rbkjZzqNu",
+        "9RSVzUD4XHHMgRSh9tMmTV6tTLQWbUwWeZ9Thhz3DNi8",
+        "CXHE53i4NgX24qyPbaUqBPjPgak5fFgozZRPcUGP1X8Q",
+        "69fP1imFMsbSRsZBAvmRdMAH8YSMjKTjRdTYxS3tLsjA",
+        "6k5nbPWSpcbcCwkg7Hz3qVMbGLRdxgSqYziugzo11GH7",
+        "F2vEBHj9ykM8RvXhEsigSs8VNwQ7hN82H4LxfD2rh3pN"
+      ],
+      "total_sells": 82,
+      "total_sell_volume": 136788695.36299613,
+      "sybil_score": 695
+    },
+    {
+      "funder": "5yfEuroCDbc7ZyUQJtStrR4yFua4nP89jCuSCcgsqe1X",
+      "wallet_count": 21,
+      "wallets": [
+        "E7uhkKw6FFZyx53aL5ymrnKC4tttzjqy3o6kpH9rMmC8",
+        "AASjzVp8Ff5qTr41mVTnDEL5zeYoa6d1DN93pdCv7Shg",
+        "FsY1JzEYLFT2BUKW2LkXd2m6MRomMnzy3oCEhpVRZrvR",
+        "ECDD7erWhXWoTspgEH6UEDjjRstD2obGFDszvLWZuf7z",
+        "GaezFnQ7Wo9UzbgU5HnRryv4AsSotS1bbM3nPZ79E2Wy",
+        "U18Sc6b3fAxUATNfhMfMPpz72QVgqbTwWAueeXUaJ1q",
+        "5yfEuroCDbc7ZyUQJtStrR4yFua4nP89jCuSCcgsqe1X",
+        "HvGtVzGocSDGRboN4CEXP7CBaVdMC2heZMdXnxwfgPhu",
+        "8WCqmVtNCwtXWo5Pd2U2JqN6rPnsVGgdaxGasgjmxcS7",
+        "4uf2LjSany9t8LkoTysBDPGxUckH6WWJ8yiWKUk7drZ6",
+        "DkaRBcaUgo55gqeiMwxSxxHviXHyohjdRWFMVvjp7iz2",
+        "EHvKUCpU52WgrKu6yyDdJGMQCSLXEmriAuv3PELUfxJU",
+        "B5ZJQJuuFUYcwi81DXHnypY33cKRqgrupX1gqCZed1UR",
+        "DifKUryJWS1hEQfFFvnRC64ydBD7Y4RYuDG4cvHkr4ZG",
+        "7ctSkuVbF8XPyyh5bokR7agwgFsxtfAucvsbvQt2D6cw",
+        "9aeTPBTJVHacEJzhCQpSu9kGKoUm9t7QrUrEQYH4MeDa",
+        "FuUDWeaerG8vmuQWaQ6WJgz45pAUwFsCChgxQes2Zbbz",
+        "AVhRvnMCbN7FXZHp7KnkT2NGU3a6eZteCBgPxjSgiqxT",
+        "2vu4Go3849WpZ1Ff4U1PxoLzv8zWZU3i2fDxsbDA4LgZ",
+        "Ae2Vx4K3ehgT9XQoVmVsux6RN5Cmt9MEmi8rPDTYXHWa",
+        "E76D5NMqj8vp8ufFbnbbwEHP2c7n7BaLUG5bjVQgvP5J"
+      ],
+      "total_sells": 70,
+      "total_sell_volume": 10628078.562073387,
+      "sybil_score": 665
+    },
+    {
+      "funder": "6qZRYpsJbx9WDtDfUkbCwopMGK6eh2yEP25Nzb2J4RxM",
+      "wallet_count": 3,
+      "wallets": [
+        "BjuEs4JtdZiAHzCqbHDtFkxd3LKCJHjKSpnj8ivexaPF",
+        "628RzrmapfdaXqeXyWnebbceBxEsGQ2WmKJcK2UHQpaD",
+        "HGezrugGoTBeXBdZoHLm9kpuPf67mavMyCYfGGRJBkNn"
+      ],
+      "total_sells": 68,
+      "total_sell_volume": 360529652.71176225,
+      "sybil_score": 385
+    },
+    {
+      "funder": "8EzGMYhhSYeQuoXBP3MBvnnhV1RKdgh5fEVEgiFx2dQj",
+      "wallet_count": 3,
+      "wallets": [
+        "C8qmFonF293MiEsmYbVJjjQHnKmbmnN4FYwCzXwQ1hgu",
+        "8EzGMYhhSYeQuoXBP3MBvnnhV1RKdgh5fEVEgiFx2dQj",
+        "6LJ5MQLiLGRByoxwh8xzfohYR1KW6cAJbMz85f4FgnVU"
+      ],
+      "total_sells": 22,
+      "total_sell_volume": 14857469.314026523,
+      "sybil_score": 155
+    },
+    {
+      "funder": "A1vgNK8fGcQYazrPAnXD5zy4Akw1sC9DYLxWfqJ6Fm7m",
+      "wallet_count": 3,
+      "wallets": [
+        "FEp6DVB8WyeCbqrjbU7nuQmDYYGcdH4raJEoPvMfUQFG",
+        "A1vgNK8fGcQYazrPAnXD5zy4Akw1sC9DYLxWfqJ6Fm7m",
+        "66VvGXEKVDD3GzMATec7Nch2b3i1hTGqRneYt5jdpvB4"
+      ],
+      "total_sells": 14,
+      "total_sell_volume": 7791234.0561173605,
+      "sybil_score": 115
+    }
+  ],
+  "dump_events": [
+    {
+      "start_time": 1759798848,
+      "start_time_utc": "2025-10-07 01:00:48",
+      "end_time": 1759798908,
+      "duration_seconds": 60,
+      "unique_sellers": 10,
+      "total_sells": 10,
+      "total_volume": 354116911.75051254,
+      "coordination_score": 300,
+      "sellers": [
+        "HrWuK5zC6KVFbWiFZXW3m6hNYRu57r2gnhTdmHArEVVw",
+        "57BAhQRLhmW7CUcAG4PX4KQxPxHNqgqQkkiULBdiinJG",
+        "GNUDsg2v2Noixgd54iQ4VmTsJyGjBn7jU7b4Q5wd4PBR",
+        "8vM9VWTHpFKJdyAXMTAVj5w3kjbH2zz1K9S6ps4bfNfc",
+        "BosfVsXbf6jxpuNJd9zzPr83FLrdkSWDEMXDxmwbRJgv",
+        "hswtMtZrQz1E42pVULzz5GgRHXVd2hdaeSvYSx3BRp1",
+        "Bos3jQMtBfQ46keJgmi1YkqBW2R59zsPutmtiMnPzBNV",
+        "BoM3XBa1S9aS4AdKPsuPnPFRZhpySSU6gfoisq75y5cW",
+        "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+        "FfbXkvVw6HbedopCXNa8By6bENgzbyz7tYR4v8tqiAxd"
+      ],
+      "transactions": [
+        "8FvmWXcBYeysn25NR8ipvPgokg4pbw3S1PN2xcre5E9bnUw1En71uCEkSg2yiDW96eBF75ajkpVDA7sKLBLiZqN",
+        "3ymqBa4e5Xk3KrsTYNsATY7HuCihpkztRU3xLtLRNZibiGVpt6LqSetG6ZAZaAbdK6nLEUo43qmRT5xdXBgBbix4",
+        "4h96C1gD2aqhA3WLDcJxmL1f7k5sVWJA1FDD6TSG7c6BJhc7kXwXvwJ4D6sq82GjgfFpJymoDpgVwEJLLJMrmTPs",
+        "3TEKX2uJGV4CqWWMQen78dNcoisBFWygWuHZZiz3zpNxMAYfgkS74VhMXJMWauYm6JfF82Bhrz1nUxLm7AfxFgg",
+        "hXAnghfetv5fu3rrsnNEYvPXSsBj2MFwvmR14Q5kw3ffXSTTegKkaNY3gXqUmAW1zcgq8qiLBeAFDEQoo4gbV5L",
+        "2yc1t9VPAWKYFvbRxQZpDxKgr283fvFiaybjtxxGDigZpr19wx1uKEFq7NvdsBvd4y9nckm9Wi3qe7PWjuY3Mtw3",
+        "3sP1ZzxCRSKLeC5aLy8KftaJJVA9jzaKjMWN5swNr8pnGPBYsxuAdDNbXBcEY4XvAtD2LtduzsVpA52V7b2JSp2X",
+        "c3j8wL8j4x3ptVLajTzJbzTiZwkN9xtzy5DPLB3vmBizWHRajJVgCajRu7wPWF7xTbyaaa2hRsggQtAYq6sHr9E",
+        "3tuhhT1sFg1msbJuXwSz8FA3btPBxxAo1FY1NP5aU95xHP9CcnZJXfm5YtxW19SD7omU3dQu5bAYaosNUZhSdiW9",
+        "2pyW137Gg7uoKtD3XrSPnAyB7DKewuBcfxikEiupcGWYfAtGp6zUxv8V16q9XHmyXicjwN4FsWJEKYaPTbAqD6wQ"
+      ]
+    },
+    {
+      "start_time": 1759917035,
+      "start_time_utc": "2025-10-08 09:50:35",
+      "end_time": 1759917094,
+      "duration_seconds": 59,
+      "unique_sellers": 10,
+      "total_sells": 10,
+      "total_volume": 3027032.553154618,
+      "coordination_score": 300,
+      "sellers": [
+        "D5kuymDE8CTAQ2ANVn8LQXsmoE2Ys4QCFCgAS1oxCN8A",
+        "7A9ZnT21uK5NLJq4R3MVsbZrWi2u8uocM19eSjNEzQQs",
+        "ADwCpHQ4zfdiRYvCUHJRGQ1X4NbGfxJ3cnKMdrTi71jf",
+        "3eGkMXpYVbKWnbLuh4MAPRY8yA9EcmB9seh7VrTohWvt",
+        "AX2Sf6bkCCGPN9awFrzt7LCJmEDBHjKJbXE9yEmhMxAM",
+        "9FpixNTMNWwU7JL7bDvTS7mdZ2m2ZkFgfKDfMDbo5snZ",
+        "3s5uQYAHd5SQTZF9Gj6kauubuTRotnRhuv6wgfWHzQAx",
+        "6g4yBNkdEakFN5qrQ8c2Mz26dbHoakCuM2DNxRq49YMV",
+        "wAVQktfDqjZ1qitnEgZpjGQSGyrx3XwgrcgS1G19w2e",
+        "74DYf9oprzCTWUEsE86fuoJUSQ4UUEJY3EzApXYbFA2i"
+      ],
+      "transactions": [
+        "4veWaAqARRgWHiy3StvPCQU3VvyBvxmwEGMhF61ZGiBvNEFrK4Q9mwQCWFrjjSR7Tb9S88pyzZbxHfuaApjCDCZh",
+        "3FuyuxYjpChensvUor3T6CoARCquwQsde4NmNmDoNfY9odNmZ74Yq5QbtXKBKG9r2FtbdQf3XaWZWSD7vmveKSMz",
+        "3V8sPJxZwoAX2e7FjnrnUjCE5Qy5UygD19xDcvqCLLaNvA69zkMwnXZXeicpGKXe72KX2THfqCuutXceo3Bb6vDt",
+        "cjDJsUF5YjicgGTGuYUaAkkLHr8aDqdDW5amm6xGGRzXz6nwaq8kYnrCd4iePgPNtqsyC6xAxkBWuh7Dg1EuuEF",
+        "3ymkATeWrFf6GjYLtHLGSJojdmfQMbDApe9z8GtidAD27kvcmGoZuSKxzQs8U4EkUzwXbXLGfNDaPTzfrLv29KDV",
+        "2TrcTUMJ3a84kKWxH8yQwDQttzs1kw7Uwob9E1BTJmi6DptKzwPieKKZtgtj9tjo9bmwQcEpQm888weJAcGpQzpw",
+        "4BLz65P6ovGSgSuF7xhgvZfTdji1NjzdajpneDbreNZWhVX9MJbtWYjTdTUPMXkdAyF32wjnz8HGe2HyxUhWof33",
+        "4sbtBPz1wGqFYpGYmT5yhm9q7ymPAPsAmycwy2RhJaTkx9Nd9FQZHuCh2Qx2A6boZBGBMFeUpsHHVzsTR51mZNi6",
+        "ENuPEgLLjWWRaCC3vwgti6ddcU1V9WXDiCegN96xA8tyRfXZYJvwPqnFWEmYV2kNLfeD1vzVWsuoPEvVAoGmMBZ",
+        "3YSbQKPANGRs8tvpitZXyj77EDAmaepVMKZRJDcGR8rTbGKbivQC3M5wEbPHpQmG6XXez31UDXaNEAdnvZBDQRoj"
+      ]
+    },
+    {
+      "start_time": 1760306456,
+      "start_time_utc": "2025-10-12 22:00:56",
+      "end_time": 1760306503,
+      "duration_seconds": 47,
+      "unique_sellers": 8,
+      "total_sells": 9,
+      "total_volume": 7166339.534929386,
+      "coordination_score": 255,
+      "sellers": [
+        "AEeNr1RpnT9qoqXxQ3PxSXjJvhia7XYrtQBqM9q3rseJ",
+        "Gj5K5kX2ktxaydCwZZ34xSgPuo7tKYj6qViV5w7i9Wkp",
+        "7ZbqvjyYdt6rBcz2MNKC5rBFQW9MzAgHjoE25pR9hfHe",
+        "A1vgNK8fGcQYazrPAnXD5zy4Akw1sC9DYLxWfqJ6Fm7m",
+        "D913J2PpycBdVhtMWDETXkFQSqBwuQWANhFG7UnL5n18",
+        "damnjbgs5YiNCfQYqms2pL5ynNLkQ4WHfrELEFczNZA",
+        "QzZ9vQErJY9HNNHHhpLYKXsgrRgU4a1ySF6ojYb7N3W",
+        "F356hrR7UdiHn9byNzhsmXwkQachbbYjMMC617koS6jn"
+      ],
+      "transactions": [
+        "546p3vwXz7GRWVjdYW5dfoTPqkJUhUWkUMYENWSN23DQNVHpErvppKWqbHUxz5ifs2K87ASKpr2cSnqkqqdMK8x8",
+        "4NQBreEsaG91KGHvJyrGYbHKor5C5X3HXs8YXR3354bLbuwxiyqgJ6LWtmx7N5wXv56qLTtWrXw6kDKenDZ7pzfq",
+        "5F8pbzX5xaCAU8vPfcksSx8A8uaR4rztehNvNBzNJAjBWqVWsWt4Tje7qPLo2r1zYRGV7XRHMZSxySFjoBL4urR2",
+        "4EC5GVMKS8pU93fR9AoJZn6UyYmjG7xfk8vhRXGJJPr3Kjbk2tYMgNUJeDDq5WVF8AqLQyerZ5PHUF83QAnHCcRR",
+        "4EC5GVMKS8pU93fR9AoJZn6UyYmjG7xfk8vhRXGJJPr3Kjbk2tYMgNUJeDDq5WVF8AqLQyerZ5PHUF83QAnHCcRR",
+        "sszPVtuh1PE7QUiGQaqFJ3DRhD1CPxKv13AL8DFCSfGmxQmvLGh65Qf8qDCS2bZCMSTn1UyAaSE8WQwHMqbdwWR",
+        "2Mf9RwEYfPMrB1Ss9VdGziVV1Jh9upCt8rdTJoSLc3ZmC9xb4LtwLLqx3amBf1ErEBorGpVZEuXoTmadYM7vAg6",
+        "61z1G3FYR2VvSXdaH4KMAHK9T3zXvvX39YC7q4UzmNXtQysvpHd1WFgJCYY6asDXLH1PrqYaWDpXWbdr6wLEhdmP",
+        "4j46pJBWdLDG5ksyFbTGLbhNUBUtPNSEptkY8fVLerLD6RXGivArwEeoZHYq9y6mWvTXrgLyRCSXJSwieyVKssch"
+      ]
+    },
+    {
+      "start_time": 1759869113,
+      "start_time_utc": "2025-10-07 20:31:53",
+      "end_time": 1759869169,
+      "duration_seconds": 56,
+      "unique_sellers": 8,
+      "total_sells": 8,
+      "total_volume": 3323453.883340186,
+      "coordination_score": 250,
+      "sellers": [
+        "HwxNgtoZFFPLRLxSrc9y4ezfHcFvKtYjTYjJqkyGSZNA",
+        "9vcF7eQipTWqDVAcJQ3dmGz8endxrXZTADeAbbPt9g4j",
+        "2Qn2GzxHBKAwxtuFkenNETjpHyJDifEeDhCHhBXhmBy1",
+        "FjVSFBomprMA7UKrEH9VA8RF4W6UuSCAKg4ueoXjcddW",
+        "E6ZQJP1fsHhpfTJoEijW3SfL6gZXMTmyiRxWJXFDFBPR",
+        "4qo14MZ6aMQp5wmV653uEKZmxEkNoEnGqd59dVsvp8Ft",
+        "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+        "Edrwxw2CMxjAEKCcZptfJcTYy9tUhPAiUioj6drJws7v"
+      ],
+      "transactions": [
+        "5776xF8rcgxXRjGCikdYGYQp8EhK8ibtyMXAKmmRBccpYTrRDpxa2Cg4h16Lpkium6bE9vstFTQXfJ6NjPTxi9L3",
+        "3FRpVxfFc5CkDK7MjH72Bj8GAu5B25j1DY4fJSohEpkNK6Y4U6Rv4TVmyS321PH4hKwbo2KEvKFVgJHj24e6nfP4",
+        "sQfSGrLfkJZFRWh7TjqcAtoQNifU9miq1xPapdtnEv3CZF37jLHjCCdPeTguRoTQs1cx26Y5uh7qcBjBquDJmTB",
+        "2yEMVEYMGzLG18uVA1ZLdPjMcsqvNNqsjg8jzW8EEcz38bJ77QGRtUk3gAwrVEotBjSjL3P1k6EGhwBAo4Cq6x4u",
+        "4GVCWLip3b4FRayzR45t9KiCFJ62pT4RFL2n2r13jeFPQfwdw2TDPjVTnnkbYUhdPQiQt2xKTVd2zrfkDnMkkuCB",
+        "4zw77soL1HuG4LnktvKEZ52fbWc2V76cErwMMi1CaRNSY8EA61H2YKcMorwSt9vpRidwG4vnq2dTTVYfRJPCgAJe",
+        "2zkeB9svWfaX245t81z5d4mPpikSPpkBP1KXYFt4fWAXtwzoyMJAnjg8ZocWmDagufwh5HoKVbSkkjCbay7tpw8B",
+        "3hSDMR65QKHAeXBWsFDzkzK97Krfqf3Hs68i3CfjsuttDviVyst1JMHAnip4yTVeXn3nDXxi599jj5mXf4uD7zEg"
+      ]
+    },
+    {
+      "start_time": 1759978705,
+      "start_time_utc": "2025-10-09 02:58:25",
+      "end_time": 1759978762,
+      "duration_seconds": 57,
+      "unique_sellers": 8,
+      "total_sells": 8,
+      "total_volume": 4705930.567480914,
+      "coordination_score": 250,
+      "sellers": [
+        "9vcF7eQipTWqDVAcJQ3dmGz8endxrXZTADeAbbPt9g4j",
+        "6PvjPbm4DaUW98KxEJHMsgawfdY4azPLJwN3HHeVxNVw",
+        "D8aLToJWPJ3df9sEsSVUkqtiSF7uHp7ezXpDHBKwgXoG",
+        "EUfKG74Xpcb3oUqNMhvrwcTMLogLkXwrMnks6fEDAujs",
+        "7tFSy7M67ErjjpHZJmsn3J2MFJzLZcy2EHoXAk8ARK8L",
+        "34yVeWYmJrUrYGXVkVfrUKYFfVYVNvaQphxzx2B5me62",
+        "5SBbN6TyLsJNP4wZ8MRr61VReysJAxUgESWkx5NJJVu",
+        "72xbMKaZANVaVQdSu6BULQxjryrcEkzYm1rZDwgT1ab4"
+      ],
+      "transactions": [
+        "4KvdQcayPUVR63bcKaEtkHoGwerfC5krGJZNGQ7hSCqjhR4HXqbM3nzaNy7cUu1gaPNQg2qBrYiboMVqbfgBPbne",
+        "4wMRXorRAQtoAQEoKY7JmVr7RznH3ERHtX6V5SxMwXaUA4e5nnHqnMPc2a2ZMCMefhVGZkwZmMs2f1xUCr24Pzqa",
+        "48BsmkcwyC4Z3Rm9Rmv2qucdzrTydrWQcMkRAPmZyoTDtVJWsG6CGhjDX6DsBJM8M7b9EvNtze4bXcYTCoVX2A1w",
+        "3n1sqtCUD8fxNv2BCKprBYEgZhs1XmM4vuEhwV8gnkLJMm5v6XXAe7CWkNTBmxXUahrUbskTqCJCHawjB2WPLv4k",
+        "4Y6MHywJ82YXjTGbCVCY1jmTSuuZhTeWXxihR691FYhDKbrh9KMRnCQ5rZch5z8tv4eDwA1VU6JtMHUZew5MTwCW",
+        "3PBwDnBgghVzifEzk7LoqSvguqTPqTFbvs6k2W58kpqGZ5hxLBFXXocx5L4FurtrA6civibbvMqaav7sNjNEUE17",
+        "kx2xxhpMo3VQVEMNS8Ys5aqwn4twdgfR3F7Sehhp22gd9QfHf6G2JPhLH9ZrVC5q3NjQC626xxfZJRLyvqMo9rY",
+        "tpP9FTNj8btZfQfRkuuokT3DHEmqwAS6bjb7peg8z1RTrKoXFM9SgKrT2FRJ2JBkd3MPcUTrWjxQKvKs1UfWEVR"
+      ]
+    },
+    {
+      "start_time": 1759869177,
+      "start_time_utc": "2025-10-07 20:32:57",
+      "end_time": 1759869234,
+      "duration_seconds": 57,
+      "unique_sellers": 7,
+      "total_sells": 7,
+      "total_volume": 3222365.639588698,
+      "coordination_score": 225,
+      "sellers": [
+        "6PvjPbm4DaUW98KxEJHMsgawfdY4azPLJwN3HHeVxNVw",
+        "D8aLToJWPJ3df9sEsSVUkqtiSF7uHp7ezXpDHBKwgXoG",
+        "9RSVzUD4XHHMgRSh9tMmTV6tTLQWbUwWeZ9Thhz3DNi8",
+        "7tFSy7M67ErjjpHZJmsn3J2MFJzLZcy2EHoXAk8ARK8L",
+        "34yVeWYmJrUrYGXVkVfrUKYFfVYVNvaQphxzx2B5me62",
+        "5SBbN6TyLsJNP4wZ8MRr61VReysJAxUgESWkx5NJJVu",
+        "72xbMKaZANVaVQdSu6BULQxjryrcEkzYm1rZDwgT1ab4"
+      ],
+      "transactions": [
+        "7pg5uGjnkfYdurFf2BADtpHtBW1akjfxecG3G2mU7862Z4C9nCSfowGxNba6fTpXUfb1nqx6t2KgyfN9g2WSCZb",
+        "2nhnXDFFStaiomXUnaz1J1i6S4k6eUMoHu4ZYFtYWFV91Nhb7YkPhCf5xywT3CVNgASmu8aJLHuc6wSHRpYjRSzZ",
+        "59XUBXL2gxoaRXJz2SopQhpsrSgJCFAaMAzT4hXf6QNYYE1GZC2yidCYpB2yuWXWs9YsLdWX4m6Wxf1Kgn3A8HTv",
+        "2CHXUFkoLw5oE1Dnj9FCbaFicH2kHkYRy8GozgY3EWAerSAnaws2DgUXSpLpt4UMPtYVvb5dhWn1tXh2zAEDw8m3",
+        "4nEhR4MvvQZJtfCt7DbBkD8utucLcLVNcMWubJKEfyp3rhwksknsbjAbR26Fq8uz5riBT3hsHWDEM3jsWSMewVzn",
+        "3YFcP8KTEcR3tRrZ4JovpYjZXmDcssLeVT5HiUaiGNvztAD2oHB5qCggKvzK9cezhfJEpudDGtLNhtdyEPnDk9Uj",
+        "48nkyLFQyz6QGvhhhHZzqmTRuFcJT7q5ZvtvtTEuskSSFgGcaKNrottEmcobA97jLMBYDL9HLYtj1jHTKf83Kydh"
+      ]
+    },
+    {
+      "start_time": 1759898215,
+      "start_time_utc": "2025-10-08 04:36:55",
+      "end_time": 1759898270,
+      "duration_seconds": 55,
+      "unique_sellers": 7,
+      "total_sells": 7,
+      "total_volume": 2735830.785603102,
+      "coordination_score": 225,
+      "sellers": [
+        "BX3BZwCpeBmdtUkieVSLKbZLHz9bEaJWCnVP1LE4D8qy",
+        "8ogB1EeXKhNk2XeNTcBEiRawpUgTx4Shpdn19bJ3Mz9G",
+        "8eRQksj334SXG7WBBhD6uxt4NSTXf6mmBMiYzCd9gex4",
+        "6KzhZEhFLsnoN94qpHLMkk1Dne7xVwUbxrvsMcTb7EDQ",
+        "6k5nbPWSpcbcCwkg7Hz3qVMbGLRdxgSqYziugzo11GH7",
+        "8dpp4d3ayff5MpCvxN48eEPN621SgNujG45vmzxBuVyg",
+        "2PAnsVDYkuQTMxysupCXQFRxB95h24KN6YafDQv6xX9g"
+      ],
+      "transactions": [
+        "5rhTXyjx1VirkTeFtnUa5PaAb3mZVe2Ef6z8rT3CFs4iue53duCTUSHFwR4cuMTY2qfuXF3PC9dZjDSugW9SUuUQ",
+        "DLz8gQKYyXVpE2ZMfp4P9U7Z36rs9wJ9EdbCzAMts3MJhf5w9sQrMFoduRXTpQTaWr7FXHU8DGuac3ByzsEUP7F",
+        "3B9paK2vgmSg3HqgLnLJsemoTqVftz1wWFdU9HhguT5ZeygNb42N1ZnFJSRX25brwJ2RxUQ8ULtm3b7B63dshPEQ",
+        "4EpD845Fd4jyXiXT3uG6DF1AJH5C3WySFFTB9xkUrbXtiGafC1QBxDRXW45KepDhGjWopSWo6oUBkfRYaUhKwv4F",
+        "2LR4q331UeVf2b8iJub2tAgmNpxznv8LnZAP35wYXK7Ba5gYvujRoMyc2Xaa8uQ87dBiQv1EWqzyk3cv7KA4jRSW",
+        "3EWk2HWvxT3KaNMJoczsgRsTh8Tsg4QqZAvLQr939e1hgtGKKCk9pxWEs9qq5RcQeGgv3GRaakb2mZ6yCJXZcf8V",
+        "2n8W18RWzQXVcbjEHycC411DQ6ypDKEPCCYWrfFcgNzHX23h6s4Qzni3nCZff26Uhj3eHWpq18VTgDLxNpranbwD"
+      ]
+    },
+    {
+      "start_time": 1759978768,
+      "start_time_utc": "2025-10-09 02:59:28",
+      "end_time": 1759978807,
+      "duration_seconds": 39,
+      "unique_sellers": 7,
+      "total_sells": 7,
+      "total_volume": 3054830.1335407533,
+      "coordination_score": 225,
+      "sellers": [
+        "HwxNgtoZFFPLRLxSrc9y4ezfHcFvKtYjTYjJqkyGSZNA",
+        "2Qn2GzxHBKAwxtuFkenNETjpHyJDifEeDhCHhBXhmBy1",
+        "9RSVzUD4XHHMgRSh9tMmTV6tTLQWbUwWeZ9Thhz3DNi8",
+        "FjVSFBomprMA7UKrEH9VA8RF4W6UuSCAKg4ueoXjcddW",
+        "E6ZQJP1fsHhpfTJoEijW3SfL6gZXMTmyiRxWJXFDFBPR",
+        "4qo14MZ6aMQp5wmV653uEKZmxEkNoEnGqd59dVsvp8Ft",
+        "Edrwxw2CMxjAEKCcZptfJcTYy9tUhPAiUioj6drJws7v"
+      ],
+      "transactions": [
+        "Q6pnikSugicvrDeR5Esq4RPvmWdCBoRvTXck7vXj1HEeWVPC1a6YFhRLHkL9CbjPCa7e8yTJVrw9Wa4oF9mzB34",
+        "5XYSjqs7Q98wacfFKhpBMD5H9fV6xRG9GfC3dCq7pMTmcvTeotuH5cu9sBjrCLDTFFfkNByK2YdnHgBz7iKkxrBY",
+        "4dPoaGsbj6jiBRoDwgk5CiAfchi4S6Syb3Xs483kuH22kgj1ZfkHhnMocdVAd5pxDaAJg5ixNj3NGZb3VBCCNAnt",
+        "4sa9VN2PR3mZiEPn4UAKSjGLqzTRBRtnGEGbZfwwr57uMZiqdwhDhj68qnWvdL5SXi41KBCtcY8eDwmVJsaY8LtY",
+        "5WJPFxWQLS9zy4fkv3aU6Qgg2RUwmpD8B3ym4Pmydngu5YU1AcWPLGj2hWPNn5pejC9P7TnQAGkkESuARXEMYD8A",
+        "4DhsoFLR97z2V5WSxUNsw7j4BhYkQWoLygVFK74T9K4W34S7419i418vsapwr6hEyCrx7cdhFCEE8bd3cUcpxiRh",
+        "3w9iUs7uePigbvP7zyD7dbPr1RWYN4SuMkrbrTNp8FqBLMLRprVPTndnF8ghhZr42DVvZP95F3whcnbVVB1UEWfa"
+      ]
+    },
+    {
+      "start_time": 1760446054,
+      "start_time_utc": "2025-10-14 12:47:34",
+      "end_time": 1760446108,
+      "duration_seconds": 54,
+      "unique_sellers": 5,
+      "total_sells": 15,
+      "total_volume": 87902689.61438364,
+      "coordination_score": 225,
+      "sellers": [
+        "xUwUxxg5eLEVfowp1ki2we8JWJjukkriVLY39c55nqa",
+        "G4tinUhbt18yjMGEH2yn359gu54VL3Jj9T5rg8Qrfr41",
+        "AxR5o7n98EY6xoNGVhrJ3QGZAS2wRUcbzRnU5Dwbaev8",
+        "co1dafmGrEDyzjRGLwc7iw8woCwcUQFjaa6CWkmsKoJ",
+        "HUyZAgbkjj7uXLS1KhXQk1Ge3fV3tcPYS7TNBX8XUCQZ"
+      ],
+      "transactions": [
+        "5nemB6CLstJ1oAXoyesVVQTui66ZiVq7zrp6wKEtJTJuLqKd9HwsTfbGdgnaYpejT6quZtHa5JJ7P61TUzPZEhbm",
+        "3k5Uhm8NM9Xfee1cTFhMQ2UAuv1GiKjAKKJkgAVzrjfMQuA9w4PFr2owqh1NsJMsfft14utCdaTK2dYFbv6jBxb4",
+        "5YUtYqoEDG1vmZD26FdZF2YYWFEpUapUMAbC7oFmdFXnDvWY4ZgD9EyyDAGy9HKTs2Awj99myhh8PUgHy9gRQNW9",
+        "ubumHYfH1KJP7MteLpsgUu7UEAx47EQqHfUyVmqCCvf2QeaWRWpDzXXmnG5p7pDwXY9voj14P8nqtWh1DzdkfK8",
+        "4PKnSY7kNahKVfNXAreYrkpud45zy2SSG3ew1ZYorUCBPuyPtcfZF3SPC7urowCohFoED2ZakHMyx1Fspz8sFJdL",
+        "cpnagrrJ6mpNu1NQgraiGJHvu5QgDSYbs9q4UWMCu4Pj6ENksZqqRgtEXCEauEdtKTtfL4dro63yaahra3PqmJa",
+        "5s37ZZ8nFtY4sV5SrtHtKvHd2PogDKJs4KcEr72GdsypuC6g6ejWTjGw8YKa8w86PcNhoz6zRhoBWUkzAUfth5zX",
+        "5UxFXfCSLRkYNuAzJUitmK8c69gM5uBXvgRBMyoxxPqV2RrhC2gjQ6HiyBHMRy5fWNCH6iafyigrQ8mEsbeyDEd5",
+        "ro157EyzEpkKFCj9JpkW33dEFjjtUmGebnG17D6crm8tt6e6YVtwo3ZXKgYVwjreuwBESdMEqPcENF5Y6CJb34B",
+        "51uNSVfJxBHrcADLYhTtycHtB9RNirFcb6fX8ELgR87q3PLUw7AZxmKEiyCrjHUAnE1WEMYqsG9qvhJJMqTyCGVQ",
+        "5oCRLHUBH2XHZCqh9Z1oqrTxhy66HyUDpxMUHZ8VkSR7kABhn6Pvt6wJYDVvmCm7xKv81j2P1cLi5prveUEX6QDG",
+        "RVkYtzPnGNcTnMWLBxcoiDq34mma2CSqTmrCtqFMFAva1N2D2awSwhNnGgPeR8KniQvB4YNbEAPvnx3G3ZYZ4Mh",
+        "21uEHZpmVBJzgvZr3mGcMDxCCGSLY6AmMEg2YsvvzJwEp2Xrumhm8Uj26GpuX5MqyJgYRrHyjT9YoR9K772CZ6is",
+        "4r6zN4zhxdzSDBdXFJasozmk3nTGnZjDDvNGMLPfSCqmS7nai7jobRPkspaCh2T9jFTs1WLxP66nyHGsZsQpavGs",
+        "3asG5gqQUXEu8BFZYdBYZdxn8SJvPGndoSQrzy37WkxXq14yG6oxCHStP1zK1UoK4ksxJM6F3wfW1Fx2UiBqx5NW"
+      ]
+    },
+    {
+      "start_time": 1760579138,
+      "start_time_utc": "2025-10-16 01:45:38",
+      "end_time": 1760579198,
+      "duration_seconds": 60,
+      "unique_sellers": 6,
+      "total_sells": 11,
+      "total_volume": 24456840.860837467,
+      "coordination_score": 225,
+      "sellers": [
+        "fck87VFtnrvWLd9UGUhAtqxWi9zBdoUi57gXgVPaic1",
+        "4MvvFWgELDqwGRfxKpqT2NG15kX6g93MPA6RXgKn3qBp",
+        "G4tinUhbt18yjMGEH2yn359gu54VL3Jj9T5rg8Qrfr41",
+        "co1dafmGrEDyzjRGLwc7iw8woCwcUQFjaa6CWkmsKoJ",
+        "damnjbgs5YiNCfQYqms2pL5ynNLkQ4WHfrELEFczNZA",
+        "2QfBNK2WDwSLoUQRb1zAnp3KM12N9hQ8q6ApwUMnWW2T"
+      ],
+      "transactions": [
+        "3h7Gz6oedTJxFtpggd8ntTTQ2fpeTtB8pL4CnLWGcr9aieoALHdWkUzU4dgH5prLuMqhFX3m5Wcr2qiMXcgamqhh",
+        "F5by9Xy6YjTrGZeDUcx9MmGCE5BtSBBKQywC1PjdpN8tBP966vTg9nWWDxzCYcKgFcaE4uiRsB6majDHZ4J2o2w",
+        "3Gj3hxtpciinEF3KMGG4NmbaKSTtmYQdFFKDFFt7nhyr57XtnWSWvjDCTt61YWhiM6yd5x4iKGPDP9UTBVfM5ds8",
+        "2J7BZr5LfRyKj5KqaoiEE4MW7Cr5RwUrEL8RuiuPw48DeLmxofYbQSaY9RBghvqhnDe87VfMVF5CJ4F8VBTGVf84",
+        "PXq712Bx8ueNSy8x1Ca78ZiYED31xSHudN3fGXDnhkoKyLN3cJyeVkgrc9zqm8Q1mh6a1DVY5GHFM9HCSrAzvpW",
+        "5QgHaPWcc49ypW1fkMLLyvSvPX4CGP2nxcNKCBo7Hguzbvy3bjm6sQzUfYkWB87Qs5UhfrEsuM4BfgHhEjxnmk9X",
+        "5DTLzy8VDejNRvcx1V9zkg9rYANppBwPdekxjDMZMQ4qSB2jRL35A9wLoLkEoEinXjKS1LRM5NhCvq9PGBQRzf4u",
+        "4fyHbq4VxvGth3CzGuQVQj3SjmeWnA3ngKxWfbZoXZdX1MhjZj4dK8yTsoTAy7tF1fWF1njY3CXC5KU32V5XJyor",
+        "RQkH4WSuByUeyEZ2CPHjPCpouQqX2ZBnKqaXTdSvj3jXZ9Z9x1iZP25HpDxiBvwoKDdubaPA2rhJKThPGFJ1eQJ",
+        "28gpG6zCwx16rG76t6hWDDsHC9Py9JCs6NREFKNWqYEqZw74WTYtN3RhCAL6p7m8wwdUTGZFKt9pXVcXierPD5NH",
+        "oHUNTXc7JiEy5fFLZ5767GYme913aRfMBRAd5fTPKMAdrDqZfQdUdU2q3MxAfPVAQ76mLHc5xozfP1b5t2bFKWz"
+      ]
+    },
+    {
+      "start_time": 1761856757,
+      "start_time_utc": "2025-10-30 20:39:17",
+      "end_time": 1761856757,
+      "duration_seconds": 0,
+      "unique_sellers": 4,
+      "total_sells": 17,
+      "total_volume": 987346.066678506,
+      "coordination_score": 215,
+      "sellers": [
+        "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+        "ATQs6A92eUzdxTBsQhRJxxJDpgYDTGvLnU4e5mMEfY3k",
+        "HLtnuk5FLQr48jSpSw41xwaEqZ3MoucT1hmVzccToQZE",
+        "FkdDHrM8j8psKbxuwjV1jBKCM2JGPygkj7WCX8sSCzNm"
+      ],
+      "transactions": [
+        "4aPr7ZWMnDmfBqxRAN8GyTUZgCA53chM3MDWoPjkeiT1q28GY3RpLfA65i7DF43PPsqEbo419iqQiv7gEqPHgSPi",
+        "2Fk1zsPLpv2goXbRVtU2j1MupvHPf8qRdwH3GUtiLJhEDXd5joseqXw9EDJqdCF162hTv22G8j76yk8JJosWwHFY",
+        "4aemU9casLVg6rxxqdChCbbuZjDsWsc83AJn2meNHvoqf25fs3wxzq4nFS4gwJU4EK7sJLXALiTGUFMEnRkQiqPP",
+        "21wqPELFD2Mwvv6uzB3S8xaXh7ESb91bpj4USfavQQDy71Vmr693uow3LAtfgdxupNVNNKgwSEah2Uafsd9CkHs7",
+        "2fVMCWsnbGNGHvwcFYvDkeNsKfnVR3X8duM31KnXNZv7ae1qkuqYfgaa74d3HbHUr4N3s4sFQm3RLKQEyb4nERBn",
+        "5qT5U2vVe9tyfZC2Qx4H988uvtBzccjGSuYXw8A5rkav5BQhKDzQKKj4AQTDieF9MPLSDwnp44foen6NGCLPmstP",
+        "2NK4xiM5wVVwNygfH7HmrzxsV3XHKWi3X4FxTbDgRuuZAKM3aBvPGwAjBff4gnTQAMLNUAF5XLgfzT5UaZ2HBGAk",
+        "5TJTQWC4RTHoAPNePJFBPdcmJYuCssaD9mHhnt4wjQPVPuNYi8G8qV8qp5iKpxzBEsgy1E1XMVwwyLDDhda4G4eN",
+        "2nL7TWKkpapKBybv5qdiMbcRJEZF2MHeWuLLXm2Jj1yasJNE9EtDBu8u9ej8rnABihYVeDba2DuUvujh2qJohyJJ",
+        "4aPr7ZWMnDmfBqxRAN8GyTUZgCA53chM3MDWoPjkeiT1q28GY3RpLfA65i7DF43PPsqEbo419iqQiv7gEqPHgSPi",
+        "2Fk1zsPLpv2goXbRVtU2j1MupvHPf8qRdwH3GUtiLJhEDXd5joseqXw9EDJqdCF162hTv22G8j76yk8JJosWwHFY",
+        "4aemU9casLVg6rxxqdChCbbuZjDsWsc83AJn2meNHvoqf25fs3wxzq4nFS4gwJU4EK7sJLXALiTGUFMEnRkQiqPP",
+        "21wqPELFD2Mwvv6uzB3S8xaXh7ESb91bpj4USfavQQDy71Vmr693uow3LAtfgdxupNVNNKgwSEah2Uafsd9CkHs7",
+        "2fVMCWsnbGNGHvwcFYvDkeNsKfnVR3X8duM31KnXNZv7ae1qkuqYfgaa74d3HbHUr4N3s4sFQm3RLKQEyb4nERBn",
+        "5qT5U2vVe9tyfZC2Qx4H988uvtBzccjGSuYXw8A5rkav5BQhKDzQKKj4AQTDieF9MPLSDwnp44foen6NGCLPmstP",
+        "2NK4xiM5wVVwNygfH7HmrzxsV3XHKWi3X4FxTbDgRuuZAKM3aBvPGwAjBff4gnTQAMLNUAF5XLgfzT5UaZ2HBGAk",
+        "5TJTQWC4RTHoAPNePJFBPdcmJYuCssaD9mHhnt4wjQPVPuNYi8G8qV8qp5iKpxzBEsgy1E1XMVwwyLDDhda4G4eN"
+      ]
+    },
+    {
+      "start_time": 1759870916,
+      "start_time_utc": "2025-10-07 21:01:56",
+      "end_time": 1759870974,
+      "duration_seconds": 58,
+      "unique_sellers": 6,
+      "total_sells": 6,
+      "total_volume": 2831865.0,
+      "coordination_score": 200,
+      "sellers": [
+        "Gj5K5kX2ktxaydCwZZ34xSgPuo7tKYj6qViV5w7i9Wkp",
+        "2MXSNJtu1LZABBkQ4rJYHi7c35Qg27YmqsNT86kJrnTC",
+        "CXHE53i4NgX24qyPbaUqBPjPgak5fFgozZRPcUGP1X8Q",
+        "69fP1imFMsbSRsZBAvmRdMAH8YSMjKTjRdTYxS3tLsjA",
+        "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+        "8EzGMYhhSYeQuoXBP3MBvnnhV1RKdgh5fEVEgiFx2dQj"
+      ],
+      "transactions": [
+        "374CGDzpk9KGYqW6iAxetnkHPK5WaxwTCMM3hoK8zoscoz3tc9NUpazgxFR4knBAPSK7W5MP7y81rKjCeoxKpnSz",
+        "5LngU6LyrfL1XnJ3ifd46RWLJSv4eUfNLUnJZ9c5iBoQw2YKNfzWDDypdRCMBgrRHckU7N7jC4oqTXJwnYf4YQpc",
+        "5hZWKBcPUCB3mwGsaCn5PgJqXY3VWSsiPBLqxnWP7uMbvMpDnfVWfyBRdr4JrV5Winzq3xByPMSBQyBUM8QvRNXV",
+        "5rtg379PZP19BGkHfG3qM5gPjzU32LY2gyhffzGBpBEPntZ9q3BBkSphELNWvJLPJD4ZCJtnqSvVCLSXXbXjgPNs",
+        "5wDWKKkgfx99mdibadcZwbMu2PjeWMbF6XsduXAkkatMgfT8GhgZoMNrMry1vF1dun5ZLtFNazeZ4Dh3n6HfBEVf",
+        "itX5wqH976GtePMPyEsMbHdLuaLLXjEEwnuDkhqo7hVzBshKwu2aCFXWUL5Zie2Rin2tw8GjxnzocEauHA5Usq1"
+      ]
+    },
+    {
+      "start_time": 1760053628,
+      "start_time_utc": "2025-10-09 23:47:08",
+      "end_time": 1760053664,
+      "duration_seconds": 36,
+      "unique_sellers": 6,
+      "total_sells": 6,
+      "total_volume": 1780732.844926448,
+      "coordination_score": 200,
+      "sellers": [
+        "Gj5K5kX2ktxaydCwZZ34xSgPuo7tKYj6qViV5w7i9Wkp",
+        "9K69SdZ7HfaAML6UWoeQwq2cptoiK9pFk5qL6F77eBDG",
+        "66VvGXEKVDD3GzMATec7Nch2b3i1hTGqRneYt5jdpvB4",
+        "A1vgNK8fGcQYazrPAnXD5zy4Akw1sC9DYLxWfqJ6Fm7m",
+        "69fP1imFMsbSRsZBAvmRdMAH8YSMjKTjRdTYxS3tLsjA",
+        "8EzGMYhhSYeQuoXBP3MBvnnhV1RKdgh5fEVEgiFx2dQj"
+      ],
+      "transactions": [
+        "3yGAmUbv2BuRskugT6YrG38kdfpGsAn2mMvL9n2v8qvAKkdaZFtjxPtsH63wXGEKTJsr3KNdszoi3rQXboi7w2XZ",
+        "5z1r2iraL2ZJKP2Kw3Ry21KGw3h3s7dy3yFru8wfiArDFpqjCx4mFWSxev2nmeq5NV666xKGy2cVM8KV8hFMKvri",
+        "4A8T9FmuzjXQNXuMvymxz1rgiGyQqtimMrkaCo63mUmegPZj33j2mZPNA7hTR51UwxY4XT57hLbVdoctp8ZBqMNN",
+        "j7KbaRAgYogB4mvKd23ao7WpEiDY1FAUHfV1wLZVuN1pebc6ZDCoUvUSXBS3ewP5BYqYr1xFPEku4F8mK9bpvxf",
+        "topbKu914NNBDFrGFHJ1cPFMuUff9X8dTQe95HwNqTRZRfbMixbSkMZKyixX3CrAMWfBabM4r9KkcWv3oKyVjGN",
+        "T2CprsQaQrrsGYmnFHKGnS8K55PVA6WuVBki58zvU8GxeZdMhFcEX7nxFddoPUgfFdMZ9WX9DYNX6MHWDj9cQhC"
+      ]
+    },
+    {
+      "start_time": 1760323142,
+      "start_time_utc": "2025-10-13 02:39:02",
+      "end_time": 1760323199,
+      "duration_seconds": 57,
+      "unique_sellers": 6,
+      "total_sells": 6,
+      "total_volume": 2768868.6856019152,
+      "coordination_score": 200,
+      "sellers": [
+        "HBons9j7apmrqqxyHFdvaTQtFpmPWcTXYKvDY4Qturer",
+        "H3DN3qmCtwALBDxZ9RUR5chfCa9TnKfXQ8MiLkS6BCgy",
+        "7vzCUcxbW9ZQZRXf3Csv5dBigfUVAUb9YqDZdVJLZqpZ",
+        "DVci8kF3oBkhqRUi6U5PGMdD5uhN3esnXQ1vcdkm8nTG",
+        "2wMpSopsqpH8TxciXqqRoViQV96CrKGG1rMd9PcdfpXo",
+        "758LF4jY3GGVTKAJYyTK1fJhKWf8si6s85vH92aF2o1V"
+      ],
+      "transactions": [
+        "2aFr1fjR52qW2Q2ywY2djR9sbfxWWdwq98ioL8g3knhQ5z8kgfCTkeay5FPkBdyYDY3eszX6ijda5XydUFK9L3A1",
+        "4XwNVwANDBHQkE8cQMeMRKtD5WAW77SMaF3dvqVx3ome13tbRHsATqiPxKRdeHaXs21cbkK7vt9ML7bhAVEg3rWy",
+        "4VQLUKnKLZdvDNWHtQnZfmRacihiTEQtMmz2hnajhcAzYex6FzdsU21gM3SnzaBFCYXHsPgybZ9nobhymchPajDS",
+        "4TX6YkvcJy7KP2PczJzD4jduAiRH2hoKSVLfeEeSLHbFncQ4PDSsKTA9aPLK3jtFY1dhosE1e9Qr3tRtzRFeGaBu",
+        "4HpaS7283S6YvrmEMrmArT4xSUznbUphRJpf5a79AuVix6KpkoHvxwVBqcne8T7GUEdVJGH4BXaZ2BAvNxRkttkw",
+        "5t2u8abMVbW7krk25ggLaZGaRfm7GNqTbvFQSXfa3gUs3LcZXBtaVmJymx5aVL4tKnQgJBi2kasePsGaet9uJZdq"
+      ]
+    },
+    {
+      "start_time": 1760323208,
+      "start_time_utc": "2025-10-13 02:40:08",
+      "end_time": 1760323259,
+      "duration_seconds": 51,
+      "unique_sellers": 6,
+      "total_sells": 6,
+      "total_volume": 3182104.3681108532,
+      "coordination_score": 200,
+      "sellers": [
+        "2RoJG1PmZMrFjQdMqBahyYfePgWwPYDPpYk2Q1T84tZm",
+        "AUZTY7j6zehkBmvDYECdHDMWdjkYL56KwrVxGESUosDv",
+        "9KLoQU9R8SHq6wWkw7btne3vtvLNunUytXS2dGJFDvci",
+        "Fuw9nLU6sZQn2mDFA3ZsVgxhLxabhX9rHVKyAUbZcXCt",
+        "Gb6cmcZfPhVbYD3YPV2pQd4ZoWVSLqkdTG4XYEMugoqG",
+        "42rAu1NoFof7KCnNcbjNRtrZGr4CTXGsJnSRssLgiAxp"
+      ],
+      "transactions": [
+        "5AxNPAjVaqNjspUAwVifeLtZ3E37YU5jmHSspWMSpsp68UABaWnu7VR1XjJRD9JidH15KdmiAvPAScmq8bTJkPyr",
+        "4Fksin7kkUb7ZaePgCuKy2i8re8dU43eoUtY6Ls9AQCyjNYT3SbQUC9L6cfKsMt178mNFNs4CnRZrS8YMhaAc4JL",
+        "gqaHmoH6gNzsAbJdQQMybEtMfGYqPZ3s2XCDKAWR8bbSQtMdy6ed3gkQXdYC2AHxR13VqQLSAtUvxEdvAEKwJd7",
+        "mkrHNnUxNifKSAiMS7u1vMismam3JzfZyUPiEvEgBBqbupzWPs2Tvnrfk7N1zNeA65CLcJHUjRSciXvRvCni51d",
+        "5kHFSBYcKsutqgdTTaN59Nfvzji6WXzq1Da6AfT9JSDhYWhTHLge8g2j9FP76UABzm5sdMT3sivhVnGNBuKvRJ2W",
+        "465oBswKZDm4o9ehuqcCjzoHvqCHjrSAahoVBqmS6ybeSiN6paq1YKFxgDZemFPPkHeVUwpbEu4PXAdXQ9kkRZ8X"
+      ]
+    },
+    {
+      "start_time": 1762318637,
+      "start_time_utc": "2025-11-05 04:57:17",
+      "end_time": 1762318667,
+      "duration_seconds": 30,
+      "unique_sellers": 5,
+      "total_sells": 10,
+      "total_volume": 33268454.14206047,
+      "coordination_score": 200,
+      "sellers": [
+        "RaVenxw8kykBbW7KGBaBsb7fDkkBYK4uJVDSFun6ZxR",
+        "5LMtwSn45ttbcUfqnEbyT9PwEuTYbQ3LgHEHSTD4oUWY",
+        "AxR5o7n98EY6xoNGVhrJ3QGZAS2wRUcbzRnU5Dwbaev8",
+        "DCCEgz28WE8hZANzRbitk4jxJZWgTYp7wLXq5Au7tBbw",
+        "2QfBNK2WDwSLoUQRb1zAnp3KM12N9hQ8q6ApwUMnWW2T"
+      ],
+      "transactions": [
+        "2nppnHWAYDz8wSY2mnYKQnh61SzkEvCeWoZKQAEeRgoEECFJa6iD2ueV8bnvaiuwYYWGUdqzTTnaerfGh74hanja",
+        "3tyVkwdFjLy36v17auyShAtceePpcKRks9H68KfSyZ3D6aCiC3r2DvRCDejMC3pvsV675NqfBNqj25ps4wEgQ436",
+        "3LTgYgp3YauoLyPsPwrPjMvGkZoGFvj5i3UZZbcKKZpGqf3cs686KuKYB99bNCazYHt7tPW5uoKvgkjCwVtWmt2R",
+        "37EWhLX3krsdmu4FJ6koggnHGMxdC9iXuq2SHmyXifo9HuSY454iGVydbWzJkv8E84hgpV35R8Sq3pckapshAUuD",
+        "3LTgYgp3YauoLyPsPwrPjMvGkZoGFvj5i3UZZbcKKZpGqf3cs686KuKYB99bNCazYHt7tPW5uoKvgkjCwVtWmt2R",
+        "qkvZ1mro6AHFzxqMm2VZSZhDwt1hCbqDUWCG96azmvWFQuD9PM3ib6LBZpTdtAHhk2ZcvQeXanwBQbfHqFEsXiX",
+        "49xtdNnjRZRGBYrNozdn9EPixFKhvSi7HmczpW4kp3WMMh1vr2sWKGpf95bMnag2b4nQXQLuVmjLxYWEah9wn53T",
+        "5s6DRAmGJkxr5fK21LoEoEK84YZJ9T9UdsAfsWkUKg5MBwST5AS5CRFHgVgJptcvnzjqyYPVMRdYt4yiq3C2gyMJ",
+        "qkvZ1mro6AHFzxqMm2VZSZhDwt1hCbqDUWCG96azmvWFQuD9PM3ib6LBZpTdtAHhk2ZcvQeXanwBQbfHqFEsXiX",
+        "Rf7o7sbo1dxjikz6JV8sbEVL7pFQpsxbWL2B5NVqkxPe9fH4FETMRxRQ7ZqZk4AJyzgnbPqEuXRE5hxrqa5batc"
+      ]
+    },
+    {
+      "start_time": 1762073575,
+      "start_time_utc": "2025-11-02 08:52:55",
+      "end_time": 1762073634,
+      "duration_seconds": 59,
+      "unique_sellers": 4,
+      "total_sells": 13,
+      "total_volume": 14256883.607360186,
+      "coordination_score": 195,
+      "sellers": [
+        "HSeXqWaBiZcYFJsRr4PopXQJ6WRa9mpMpvBhg7vewV6",
+        "AiM1WvYfnoMwRumjAHJBMRHFBjpFBVJhXNKVMUjbUY19",
+        "gtagyESa99t49VmUqnnfsuowYnigSNKuYXdXWyXWNdd",
+        "AxR5o7n98EY6xoNGVhrJ3QGZAS2wRUcbzRnU5Dwbaev8"
+      ],
+      "transactions": [
+        "5Tuw9qnmfSFUtoX9KXyAChH6aJ9gRPVEUSAvbLwKAGGDFWuSsMRfKuVKnKZGXrC9UwBMWSh3NJtzV82Cw3PFUKhS",
+        "23RsEMKzLSmKn6BriRqw4KwmSiXDnLLpazUqb5oVbPAgUmhshcHKJBb5SVqviQLDxEECjxSQxTXLAk1hiBvS5hK4",
+        "2mNCrY99d49XXMzfrq9Huoh9HusMU4XSgdhuoEDmi6NzzT9TPZjrtJdmbG6j7AnWrZRpKdFAHWnECFYSGaVHcR9d",
+        "2djwFyXGcjfGAVDanYtrHeniswXgQFYNSkT1fgMXdhzPC84MZWfWdbW69xkZvGUxSmLaNN3bc5QZLkwFsPxGqq9a",
+        "2vjtv4HvHfzS9KPyQbUSYSnxqBZgMdchFHMn8gcjQYESoYouf5ZyYuBX1mUMMnByJZBBZhpPyBrc7jXECtDfwrCU",
+        "2PR4C5tEjKdws7GfgaUdP28FE2DFVGkh5A35M9Pf3eX6vdzxQkhxiUG8uFFhiHiYio22htDctFDt37SvruPHseDG",
+        "4xpiNP8NsjpZ96hDMUgWEhSKwQBjjx3uvzP1Nhom82HHonZfoX9NHz1ZUuzkJFoTCQmM5V5X5JuA4xpuif9SVLwp",
+        "3emNEWBfW97H7NwA1UBao5S84HP4YtqLUZsAkqtJmCNmAGk9hGyohZ6WS6ZNtfdKKmt1drWGbgWxkPoJQRerUBtd",
+        "2rTW7ecdUacCoyR53ADw7yTUgC2RNLRBkPxHswmsAGFmfSHu43p6jqhr3W7EjuCjzpCgPUnTLPmJrovEkpg25ghs",
+        "qzX91qi1oS4o3aJLHRkC46LJTdgCyWVZ1ZBNUzumZGmwqdUnKQJtDfZCytVNGGTNuH3YWppsG4CiNjsZZ3eR2MA",
+        "fThuxuYmYfr8oeGFWTvfENLCvhSKR17Rzu2sDqeZx32o7zJr4n8ko1oBHf2qLDRMsDpPK3UWba5iEAFmS6w2t9a",
+        "hUBBXd1BbKaYCmR2bm2SVrYfmrKpmqgnzNZ6kfwBjQYt6uF9PUaNRVmdVqMbSdrnNJAwZDHCh7qW5psw6s64iXv",
+        "5DDVoUUJk3FojQTGex2Tkr9H7XsXfHFVDALseSN9ZVCkmMG5V1Sr7zL2PuXYuAamNtdFgbaVkEhJcwfvfM4Cbvxz"
+      ]
+    },
+    {
+      "start_time": 1760924755,
+      "start_time_utc": "2025-10-20 01:45:55",
+      "end_time": 1760924810,
+      "duration_seconds": 55,
+      "unique_sellers": 5,
+      "total_sells": 8,
+      "total_volume": 1074271.4616712,
+      "coordination_score": 190,
+      "sellers": [
+        "DhNUu2rwxnsmwaLrdh6p9GoYD1Uj8YyiukZbLA2H4juy",
+        "AxR5o7n98EY6xoNGVhrJ3QGZAS2wRUcbzRnU5Dwbaev8",
+        "co1dafmGrEDyzjRGLwc7iw8woCwcUQFjaa6CWkmsKoJ",
+        "EV7VScMVUyfe8LKczt5rgJjhfyJy4DnfRGcJJ9g3zjZB",
+        "2QfBNK2WDwSLoUQRb1zAnp3KM12N9hQ8q6ApwUMnWW2T"
+      ],
+      "transactions": [
+        "56Va6xQomEGn1Dp5WnBzvktrhtxF3yV8j4eAoTyXVNYt9itF28AosXTATBE1tbNeLioNLBy8KHmsx4EW5wd3adWT",
+        "2wTmbPPyXkp4cMTJs423LP469N82uWDsguqLDQb9qaDLoC9eR2ogDeEvrwroMSi8UCQZY2aRLNqMhUsymeYPjDtt",
+        "5ZCghYXxWjK5gpYr69UhgkmvewLvAFTd33h6cNxuKuJCavWrxnw5r2e3efQyvA224kvbyZXByRvDckF7ebE25JHx",
+        "mYYzFPqQssSq2iMryCXoLitjc5sa9DogqVyFbST93uMuSoUqzhbTbRaJ12bEWnZQgieEru3P4TS9vmWho5Hg8JV",
+        "5Hff4Zd3xgNyi5To2Sbo2wz76sqXvS8wtcVrVuEF2tj2QZjtUMiHC9hoQwF1dQhv2JkqE8gHLBgk97EAZiB8dV3H",
+        "121LCfAKrbX5bwDVS3eR9gUo7TJUVmVMAhDe6v6Wtki2boMDQfHivKUp1FH1wE8KmahvJLnWravGYTpbRt5MnBv",
+        "3b3b1hevssKLhp7yvL8kYuQzsWNbCakbtDXpPaT7meo9AHt1wujhDsCm5oVeWJpySC6vPz4NTGpttG3id12s2PTf",
+        "4nsEPTWGoUY8DjMwqzQrrkuybKZ8jKmVdynrdak1APCWmJKLfCPTnDoPKWKWuPw66PQSpoT7V9bKSi2TUfNKghEc"
+      ]
+    },
+    {
+      "start_time": 1762079827,
+      "start_time_utc": "2025-11-02 10:37:07",
+      "end_time": 1762079878,
+      "duration_seconds": 51,
+      "unique_sellers": 3,
+      "total_sells": 14,
+      "total_volume": 10802202.982218804,
+      "coordination_score": 180,
+      "sellers": [
+        "fck87VFtnrvWLd9UGUhAtqxWi9zBdoUi57gXgVPaic1",
+        "HSeXqWaBiZcYFJsRr4PopXQJ6WRa9mpMpvBhg7vewV6",
+        "AxR5o7n98EY6xoNGVhrJ3QGZAS2wRUcbzRnU5Dwbaev8"
+      ],
+      "transactions": [
+        "Dp6kRt399ciWbX6Dz96joa1UX99jbpmUmQSBqJgGgTgsae6pzQ4LYsuUkneTCVFMUfHriaVMX3pjVwhPh5C374A",
+        "5FwwnveXQN5htt35e39R8tPbaRBdjryh5CLy5T6he8mr3nonYYpqE26Zt4mqoUpFY1VhPPsyf6jgQmS1QKcZo6rg",
+        "2soCoX6a6QbuSyLmdK6Sgewz1zFW3UevniqUor3zfataCPdyC8rnuF9WkwyBaeyWjQB6PbRqL2iH1zuhzCzNmPNT",
+        "5FwwnveXQN5htt35e39R8tPbaRBdjryh5CLy5T6he8mr3nonYYpqE26Zt4mqoUpFY1VhPPsyf6jgQmS1QKcZo6rg",
+        "4dr7oX8tiQzJjnCTzHZK1y6ohc4HJfMnVxHgXLtxUHziGXixwSHRy6sQhKFcvBqGkpEMMZr3T29fqscVnRW9JaRs",
+        "3WwfZGGn8c6yG8o2tUZYLjuY8y9nT7o11X4N3MXoyrTmAdLVF1WkPsijnm1vAPyyRDpH9TLGtXbPojCvkqATLUoQ",
+        "4Ao1TViXarCN74KvAHgD8ioLjLT1LsLCDyd29U9aQp8GqhGNoxaFM7LPEYSX7x7q6VE9UCGBuNUo8SMvQo489w4v",
+        "3WwfZGGn8c6yG8o2tUZYLjuY8y9nT7o11X4N3MXoyrTmAdLVF1WkPsijnm1vAPyyRDpH9TLGtXbPojCvkqATLUoQ",
+        "4xqtoY4kb27jt3A6g2H2Ln5pF9wcx36UQ7DHxAXwPsPBsGBRBM6h1kxV1kcTcxegs5oQokagpo8KxzZfaa5k3FSX",
+        "5EC8eRpz4c4Kahpqfq88QsiYCmnLz3VCayFJagdDLfuv14i8aGc1NFBdqpXbcgGoTSGMPq8gUqW6gKkXdjqJNdEk",
+        "3jauHSAaganQLh42AaPXiuvTKT4SfnYDEuNB8Ydk8rMBdaDTnSDbzSHvyTBTcY5PdMpP77vP5ce1JDLxcG1qcTHF",
+        "35RUd5XtU5rsfhVSaJkwpFPG89cSDUt4knLQKhcvynqcA548NyfEjpDdurPeBVJaUiJXzjUUVM4p9G4rvG128wqi",
+        "Ns6mTxUyaiRjM19acsH3WaY4y3ohFtHpZzy3Ko4EyJ8cV443dDhrhKaadJrEyEofd6hUjaPWMYTZZyCLaibbeXw",
+        "3jauHSAaganQLh42AaPXiuvTKT4SfnYDEuNB8Ydk8rMBdaDTnSDbzSHvyTBTcY5PdMpP77vP5ce1JDLxcG1qcTHF"
+      ]
+    },
+    {
+      "start_time": 1765557914,
+      "start_time_utc": "2025-12-12 16:45:14",
+      "end_time": 1765557936,
+      "duration_seconds": 22,
+      "unique_sellers": 4,
+      "total_sells": 6,
+      "total_volume": 40229316.24174285,
+      "coordination_score": 160,
+      "sellers": [
+        "AUVhH1kn9aZy6CpuRSeGZaLkQwpDve369GgaBFQYDv46",
+        "26ooGGTHJwqr56cNg68oQge98LHw7Gq6HQw4grycFtEb",
+        "DzhkRoQfYqmGEJkezJrpJfajKMD97qwfQT74HYfQzywE",
+        "7x6bx7CxhxRjvTcqokUwtymfP6bpBTa4oUDsqosRPWVC"
+      ],
+      "transactions": [
+        "35Um9jXwoDNNeWZK5weq3z6D6z92kChbvYTJmQecsjxJZfXJ7YNEZkVVp23LirqrMoXtcFYuck5AVY8n7DNY8UTv",
+        "35Um9jXwoDNNeWZK5weq3z6D6z92kChbvYTJmQecsjxJZfXJ7YNEZkVVp23LirqrMoXtcFYuck5AVY8n7DNY8UTv",
+        "3o3HgVKXrvoEMEgh8g4p3judng32KzxzHxAZrbbSY3qwmExHnNnMFv89aKuqELiLWZcyT9uJJFnWbfHxgUEMUtTf",
+        "3o3HgVKXrvoEMEgh8g4p3judng32KzxzHxAZrbbSY3qwmExHnNnMFv89aKuqELiLWZcyT9uJJFnWbfHxgUEMUtTf",
+        "Hj4JsrsenzMo6paNC95gAiVDFqnFipotTyQHNC822jSWMe45yBWcQ2WQaqg2gkN1R7WK6gsv9DBErFZowXVjyxb",
+        "4cePKYoeREWnnWs9gAq1Vh4e3CtyERKwPf6bC2nhGSPGgfViQrb4DCxgtDxv9yTY1N5ZBVYug4py1v1d75vhedxQ"
+      ]
+    }
+  ],
+  "top_sellers": [
+    {
+      "wallet": "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
+      "sells": 1967,
+      "sell_volume": 3678362850.4347267,
+      "buys": 0,
+      "buy_volume": 0.0,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "BTmqi8V5WvMBiXhEDf7zhncFoxFczQREyQNcKLkhzEZS",
+      "sells": 753,
+      "sell_volume": 1429966680.7290351,
+      "buys": 0,
+      "buy_volume": 0.0,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "yudkpbXU7Ufvumi6fpJ69HMwyfoQQ8UeSFZc4be2hiW",
+      "sells": 35,
+      "sell_volume": 1182624644.9857519,
+      "buys": 66,
+      "buy_volume": 90737211.61006483,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "5LMtwSn45ttbcUfqnEbyT9PwEuTYbQ3LgHEHSTD4oUWY",
+      "sells": 128,
+      "sell_volume": 842294563.1159433,
+      "buys": 90,
+      "buy_volume": 399768706.74325675,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "FfbXkvVw6HbedopCXNa8By6bENgzbyz7tYR4v8tqiAxd",
+      "sells": 2,
+      "sell_volume": 621781821.1879297,
+      "buys": 1,
+      "buy_volume": 345434345.1044054,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "HUyZAgbkjj7uXLS1KhXQk1Ge3fV3tcPYS7TNBX8XUCQZ",
+      "sells": 18,
+      "sell_volume": 290962157.5027312,
+      "buys": 9,
+      "buy_volume": 145459821.05527258,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "HY8pWqhnNXmyektecHfX85hJuDVSUDKDzL5ziUkDSZu5",
+      "sells": 30,
+      "sell_volume": 217257979.91470343,
+      "buys": 28,
+      "buy_volume": 123249891.21336272,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "6V2Zez7mfTcpx3gjmkSWUCuLCbpGwgS6EN2xqXuxgEMc",
+      "sells": 27,
+      "sell_volume": 145361742.00359392,
+      "buys": 18,
+      "buy_volume": 81696703.10375309,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "Hjwo1jEQu4pmA7RehQbQouASEvUdndYYPz67rrXegEns",
+      "sells": 6,
+      "sell_volume": 141240275.03787297,
+      "buys": 4,
+      "buy_volume": 74409802.06852035,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "2onD44ZzLk5p5C4vDBDjKRYvnxsboex3bLUqjP3sMRKM",
+      "sells": 27,
+      "sell_volume": 137972805.94595563,
+      "buys": 16,
+      "buy_volume": 97256233.160397,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "BjuEs4JtdZiAHzCqbHDtFkxd3LKCJHjKSpnj8ivexaPF",
+      "sells": 26,
+      "sell_volume": 134405073.31702718,
+      "buys": 70,
+      "buy_volume": 45748508.81817189,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "468HsW33kneqfYnieS1NGQUvojMS7fdu9gbX2Qef9ng8",
+      "sells": 10,
+      "sell_volume": 132240382.35598628,
+      "buys": 5,
+      "buy_volume": 14939998.008533437,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "HGezrugGoTBeXBdZoHLm9kpuPf67mavMyCYfGGRJBkNn",
+      "sells": 21,
+      "sell_volume": 122044960.47673541,
+      "buys": 36,
+      "buy_volume": 58953139.48783763,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "2KkEykmvkaLDjUfuNcqnYuRFajaE5uB9dTZjYu866Mvj",
+      "sells": 4,
+      "sell_volume": 112308836.79308552,
+      "buys": 1,
+      "buy_volume": 62393798.21838084,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "4MvvFWgELDqwGRfxKpqT2NG15kX6g93MPA6RXgKn3qBp",
+      "sells": 14,
+      "sell_volume": 105660001.21536371,
+      "buys": 3,
+      "buy_volume": 58700000.675202064,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "2rqBjjoyTYwRrsn8sU6wFAhduVWyDcuuVpJyxtfq7VLU",
+      "sells": 4,
+      "sell_volume": 104332018.5899928,
+      "buys": 2,
+      "buy_volume": 57962232.549996,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "628RzrmapfdaXqeXyWnebbceBxEsGQ2WmKJcK2UHQpaD",
+      "sells": 21,
+      "sell_volume": 104079618.91799967,
+      "buys": 35,
+      "buy_volume": 68381829.17917144,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "AgMBjJdCzKDeyXPNRi2yZ6vLwKxsXe4D4ZWW3PwQGHjS",
+      "sells": 10,
+      "sell_volume": 101562961.30331215,
+      "buys": 2,
+      "buy_volume": 56423867.39072898,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "HSeXqWaBiZcYFJsRr4PopXQJ6WRa9mpMpvBhg7vewV6",
+      "sells": 35,
+      "sell_volume": 100785712.21773142,
+      "buys": 31,
+      "buy_volume": 56036220.70512953,
+      "is_bot": false,
+      "bot_score": 0.0
+    },
+    {
+      "wallet": "41F7dcgEow7u3Nm5vPCn8FuAikNYx9NUuhT81euXPVAM",
+      "sells": 8,
+      "sell_volume": 100000000.0,
+      "buys": 13,
+      "buy_volume": 9902788.965982135,
+      "is_bot": false,
+      "bot_score": 0.0
+    }
+  ]
+}
