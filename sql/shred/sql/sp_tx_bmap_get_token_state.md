@@ -154,3 +154,95 @@ CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ...', NULL, 1703000000);
   - MSOL, JITOSOL, BSOL, LSTSOL (liquid staking tokens)
 - Nodes represent the state of token holders at the specified transaction's block_time
 - Use `prev`/`next` arrays to navigate through transaction history
+
+## Sample Output
+
+```sql
+CALL sp_tx_bmap_get_token_state(NULL, 'soltit', NULL, NULL, NULL);
+```
+
+```json
+{
+  "result": {
+    "txs": {
+      "next": [],
+      "prev": [
+        {
+          "signature": "3yuhfUEBRXVgK3f5jDKNEEHYthdtXBqeej9tQzcukfaVRidsccs54kTPexdFizjSXRU7x6zDLxCwZ1jMLCJRZh5",
+          "block_time": 1766112594,
+          "edge_types": ["spl_transfer", "swap_in"],
+          "block_time_utc": "2025-12-19 02:49:54.000000"
+        },
+        {
+          "signature": "3LQoRuP8ZMaq2xWjCXiFA9h2ChMq7VvtCbrvNi43h5ANGdh6egqmfwS7LRriqRaivKUKvo69rKZSkmxmwRwnaaS4",
+          "block_time": 1766108823,
+          "edge_types": ["spl_transfer", "swap_in"],
+          "block_time_utc": "2025-12-19 01:47:03.000000"
+        },
+        {
+          "signature": "DzzMiUsxWXn4gedwaC1JtcSGscWVNYZyqdUHW8mBygKwxpkpvNHzpEChkLyqSPqXku9toohwrwosyxSG8Y11fmL",
+          "block_time": 1766096784,
+          "edge_types": ["spl_transfer", "swap_in"],
+          "block_time_utc": "2025-12-18 22:26:24.000000"
+        },
+        {
+          "signature": "Gvz7qW5XKKVRgf4VVxLneZNDNTVbacnDXuprvLHcBoVR1KDAfsdEN1HZxt1DBrRjkSTUczUg2N8tQp2XurEyQjS",
+          "block_time": 1766096726,
+          "edge_types": ["spl_transfer", "swap_out"],
+          "block_time_utc": "2025-12-18 22:25:26.000000"
+        },
+        {
+          "signature": "4PmbXoNA4qqAwqTf2ENQcDFuaVCpiWmHDfZGsWnmYboF8741m4KtL55vCBvM8r7jX5aunUW3oZc5PEe4hYnusyvy",
+          "block_time": 1766096702,
+          "edge_types": ["spl_transfer", "swap_out"],
+          "block_time_utc": "2025-12-18 22:25:02.000000"
+        }
+      ],
+      "signature": "54GtCFf4Bvkqjv8RB2sqpx4yiD68yowH85MeK2ck4NyZqDu3mJDQzbCJXTuLdmm2RSfAmGZfy5uNqGFng7ex5mCr",
+      "block_time": 1766130323,
+      "edge_types": ["spl_transfer", "swap_in"],
+      "block_time_utc": "2025-12-19 07:45:23.000000"
+    },
+    "edges": [
+      {
+        "type": "spl_transfer",
+        "amount": 5327335.0,
+        "source": "GbLeL5XcQAhZALcFA8RMVnpuCLTt5Bh6tKNZDPdyrGz4",
+        "target": "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
+        "signature": "54GtCFf4Bvkqjv8RB2sqpx4yiD68yowH85MeK2ck4NyZqDu3mJDQzbCJXTuLdmm2RSfAmGZfy5uNqGFng7ex5mCr",
+        "block_time": 1766130323,
+        "block_time_utc": "2025-12-19 07:45:23.000000"
+      },
+      {
+        "type": "swap_in",
+        "amount": 5327335.0,
+        "source": "GbLeL5XcQAhZALcFA8RMVnpuCLTt5Bh6tKNZDPdyrGz4",
+        "target": "Arf5iyDLVnVCSgx33Fzzu16nBWk6k7jEqAzWtTvHmPs7",
+        "signature": "54GtCFf4Bvkqjv8RB2sqpx4yiD68yowH85MeK2ck4NyZqDu3mJDQzbCJXTuLdmm2RSfAmGZfy5uNqGFng7ex5mCr",
+        "block_time": 1766130323,
+        "block_time_utc": "2025-12-19 07:45:23.000000"
+      }
+    ],
+    "nodes": [
+      {
+        "label": "wallet",
+        "address": "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+        "balance": 206900000.0,
+        "funded_by": null,
+        "sol_balance": 0.0
+      },
+      {
+        "label": "wallet",
+        "address": "6qZRYpsJbx9WDtDfUkbCwopMGK6eh2yEP25Nzb2J4RxM",
+        "balance": 10000000.0,
+        "funded_by": "fr6yQkDmWy6R6pecbUsxXaw6EvRJznZ2HsK5frQgud8",
+        "sol_balance": 0.0
+      }
+    ],
+    "token": {
+      "mint": "J2UXqJ1HYRwjCviLEqkY9mhoEPJ5UnoHEnbeijCweREV",
+      "symbol": "SOLTIT"
+    }
+  }
+}
+```
