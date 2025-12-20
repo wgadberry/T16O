@@ -9,7 +9,8 @@ Time-navigable cluster map for token analysis. Returns current holders (balance 
 | `p_token_name` | VARCHAR(128) | Token name (optional) |
 | `p_token_symbol` | VARCHAR(128) | Token symbol (optional) |
 | `p_mint_address` | VARCHAR(44) | Token mint address (preferred) |
-| `p_signature` | VARCHAR(88) | Transaction signature (optional - if NULL, uses most recent) |
+| `p_signature` | VARCHAR(88) | Transaction signature (optional - if NULL, uses p_block_time or most recent) |
+| `p_block_time` | BIGINT UNSIGNED | Unix timestamp (optional - find nearest tx; ignored if p_signature provided) |
 
 ## Token Resolution Priority
 
@@ -19,23 +20,35 @@ Time-navigable cluster map for token analysis. Returns current holders (balance 
 4. Else if `p_signature` provided (only), derive token from tx_guide activity
    - Prefers "interesting" tokens over base currencies (SOL, WSOL, USDC, USDT, etc.)
 
+## Transaction Resolution Priority
+
+1. If `p_signature` provided, use that tx (`p_block_time` ignored)
+2. Else if `p_block_time` provided, find nearest tx to that time
+3. Else use most recent tx
+
 ## Usage Examples
 
 ```sql
--- By mint address (preferred)
-CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', NULL);
+-- By mint address (preferred), most recent tx
+CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', NULL, NULL);
 
--- By token symbol
-CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL);
+-- By token symbol, most recent tx
+CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, NULL);
 
 -- By token name
-CALL sp_tx_bmap_get_token_state('Bonk', NULL, NULL, NULL);
+CALL sp_tx_bmap_get_token_state('Bonk', NULL, NULL, NULL, NULL);
 
 -- By signature only (derives token automatically)
-CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc');
+CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc', NULL);
 
 -- Specific signature for a token
-CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, '5KtP...abc');
+CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, '5KtP...abc', NULL);
+
+-- Token with nearest tx to block_time
+CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, 1703000000);
+
+-- Mint address with nearest tx to block_time
+CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ...', NULL, 1703000000);
 ```
 
 ## Response Structure

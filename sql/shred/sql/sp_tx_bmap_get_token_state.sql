@@ -5,7 +5,8 @@
 --   p_token_name: Token name (optional)
 --   p_token_symbol: Token symbol (optional)
 --   p_mint_address: Token mint address (preferred)
---   p_signature: Transaction signature (optional - if NULL, uses most recent)
+--   p_signature: Transaction signature (optional - if NULL, uses p_block_time or most recent)
+--   p_block_time: Unix timestamp (optional - find nearest tx; ignored if p_signature provided)
 --
 -- Token Resolution:
 --   1. If p_mint_address provided, use it
@@ -13,10 +14,16 @@
 --   3. Else if p_token_name provided, use it
 --   4. Else if p_signature provided (only), derive token from tx_guide activity
 --
+-- Transaction Resolution:
+--   1. If p_signature provided, use that tx (p_block_time ignored)
+--   2. Else if p_block_time provided, find nearest tx to that time
+--   3. Else use most recent tx
+--
 -- Usage:
---   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL);
---   CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ...', '5KtP...abc');
---   CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc');  -- derive token from sig
+--   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, NULL);
+--   CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ...', '5KtP...abc', NULL);
+--   CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc', NULL);  -- derive token from sig
+--   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, 1703000000);  -- nearest to block_time
 
 DROP PROCEDURE IF EXISTS sp_tx_bmap_get_token_state;
 
@@ -26,7 +33,8 @@ CREATE PROCEDURE sp_tx_bmap_get_token_state(
     IN p_token_name VARCHAR(128),
     IN p_token_symbol VARCHAR(128),
     IN p_mint_address VARCHAR(44),
-    IN p_signature VARCHAR(88)
+    IN p_signature VARCHAR(88),
+    IN p_block_time BIGINT UNSIGNED
 )
 BEGIN
     DECLARE v_token_id BIGINT;
@@ -112,7 +120,7 @@ BEGIN
             -- Already resolved from signature-only call in STEP 1
             SET v_tx_id = v_tx_id;  -- no-op, already set
         ELSEIF p_signature IS NOT NULL THEN
-            -- Verify signature exists AND relates to this token
+            -- Verify signature exists AND relates to this token (p_block_time ignored)
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
@@ -135,6 +143,24 @@ BEGIN
                         'signature', p_signature
                     )) AS guide;
                 END IF;
+                -- Exit early
+                SET v_token_id = NULL;
+            END IF;
+        ELSEIF p_block_time IS NOT NULL THEN
+            -- Find nearest tx to provided block_time for this token
+            SELECT t.id, t.signature, t.block_time
+            INTO v_tx_id, v_signature, v_block_time
+            FROM tx_guide g
+            JOIN tx t ON t.id = g.tx_id
+            WHERE g.token_id = v_token_id
+            ORDER BY ABS(CAST(t.block_time AS SIGNED) - CAST(p_block_time AS SIGNED))
+            LIMIT 1;
+
+            IF v_tx_id IS NULL THEN
+                SELECT JSON_OBJECT('result', JSON_OBJECT(
+                    'error', 'No transactions found for this token',
+                    'mint', v_mint_address
+                )) AS guide;
                 -- Exit early
                 SET v_token_id = NULL;
             END IF;
