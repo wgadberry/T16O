@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer</title>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: var(--accent);
+        }
+
+        /* Query Form */
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Navigation */
+        .nav-section {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .current-tx {
+            text-align: center;
+            padding: 15px;
+            background: var(--bg-input);
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .current-tx .signature {
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--accent);
+            word-break: break-all;
+        }
+
+        .current-tx .time {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .edge-types {
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .edge-type {
+            background: var(--accent);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 11px;
+        }
+
+        .edge-type.swap_in { background: #22c55e; }
+        .edge-type.swap_out { background: #ef4444; }
+        .edge-type.spl_transfer { background: #3b82f6; }
+        .edge-type.sol_transfer { background: #a855f7; }
+
+        .nav-buttons {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .nav-list {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            flex: 1;
+        }
+
+        .nav-list.prev { align-items: flex-start; }
+        .nav-list.next { align-items: flex-end; }
+
+        .nav-item {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+            max-width: 300px;
+        }
+
+        .nav-item:hover { border-color: var(--accent); background: var(--bg-card); }
+
+        .nav-item .sig { font-family: monospace; color: var(--accent); }
+        .nav-item .time { color: var(--text-secondary); font-size: 11px; }
+
+        /* Token Info */
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+
+        /* Data Grid */
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .data-content {
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        /* Nodes */
+        .node {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .node .address {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            word-break: break-all;
+        }
+
+        .node .label { color: var(--text-secondary); font-size: 12px; margin-top: 5px; }
+
+        .node .stats {
+            display: flex;
+            gap: 15px;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+
+        .node .stat-value { color: var(--success); font-weight: bold; }
+
+        /* Edges */
+        .edge {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .edge .flow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .edge .addr {
+            font-family: monospace;
+            font-size: 10px;
+            color: var(--accent);
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .edge .arrow { color: var(--warning); font-size: 16px; }
+        .edge .amount { color: var(--success); font-weight: bold; }
+
+        .edge .meta {
+            display: flex;
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        /* Error */
+        .error {
+            background: #7f1d1d;
+            color: #fca5a5;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .loading::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Token State Viewer</h1>
+
+        <!-- Query Form -->
+        <div class="query-form">
+            <div class="form-group">
+                <label>Token Symbol</label>
+                <input type="text" id="token_symbol" placeholder="e.g. BONK, soltit">
+            </div>
+            <div class="form-group">
+                <label>Token Name</label>
+                <input type="text" id="token_name" placeholder="e.g. Bonk">
+            </div>
+            <div class="form-group">
+                <label>Mint Address</label>
+                <input type="text" id="mint_address" placeholder="e.g. DezXAZ...">
+            </div>
+            <div class="form-group">
+                <label>Signature</label>
+                <input type="text" id="signature" placeholder="e.g. 5KtP...">
+            </div>
+            <div class="form-group">
+                <label>Block Time (Unix)</label>
+                <input type="number" id="block_time" placeholder="e.g. 1703000000">
+            </div>
+            <div class="form-group" style="justify-content: flex-end;">
+                <button class="btn" onclick="fetchData()">Load Token State</button>
+            </div>
+        </div>
+
+        <!-- Results Container -->
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let currentData = null;
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading</div>';
+
+            // Build query params
+            if (!params) {
+                params = {
+                    token_name: document.getElementById('token_name').value || undefined,
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    block_time: document.getElementById('block_time').value || undefined
+                };
+            }
+
+            // Remove undefined params
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function navigateTo(signature) {
+            // Update signature input and fetch
+            document.getElementById('signature').value = signature;
+            fetchData({
+                signature,
+                mint_address: currentData?.result?.token?.mint
+            });
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { txs, token, nodes, edges } = data.result;
+
+            let html = '';
+
+            // Token Info
+            if (token) {
+                html += `
+                    <div class="token-info">
+                        <div class="symbol">${token.symbol || 'Unknown'}</div>
+                        <div class="mint">${token.mint}</div>
+                    </div>
+                `;
+            }
+
+            // Navigation Section
+            if (txs) {
+                html += `
+                    <div class="nav-section">
+                        <div class="current-tx">
+                            <div class="signature">${txs.signature}</div>
+                            <div class="time">${txs.block_time_utc} (${txs.block_time})</div>
+                            <div class="edge-types">
+                                ${(txs.edge_types || []).map(t =>
+                                    `<span class="edge-type ${t}">${t}</span>`
+                                ).join('')}
+                            </div>
+                        </div>
+                        <div class="nav-buttons">
+                            <div class="nav-list prev">
+                                <strong style="color: var(--text-secondary); margin-bottom: 5px;">← Previous</strong>
+                                ${(txs.prev || []).map(p => `
+                                    <div class="nav-item" onclick="navigateTo('${p.signature}')">
+                                        <div class="sig">${p.signature.slice(0, 20)}...</div>
+                                        <div class="time">${p.block_time_utc}</div>
+                                        <div class="edge-types" style="justify-content: flex-start; margin-top: 5px;">
+                                            ${(p.edge_types || []).map(t =>
+                                                `<span class="edge-type ${t}">${t}</span>`
+                                            ).join('')}
+                                        </div>
+                                    </div>
+                                `).join('')}
+                                ${(txs.prev || []).length === 0 ? '<div style="color: var(--text-secondary);">No previous</div>' : ''}
+                            </div>
+                            <div class="nav-list next">
+                                <strong style="color: var(--text-secondary); margin-bottom: 5px;">Next →</strong>
+                                ${(txs.next || []).map(n => `
+                                    <div class="nav-item" onclick="navigateTo('${n.signature}')">
+                                        <div class="sig">${n.signature.slice(0, 20)}...</div>
+                                        <div class="time">${n.block_time_utc}</div>
+                                        <div class="edge-types" style="justify-content: flex-end; margin-top: 5px;">
+                                            ${(n.edge_types || []).map(t =>
+                                                `<span class="edge-type ${t}">${t}</span>`
+                                            ).join('')}
+                                        </div>
+                                    </div>
+                                `).join('')}
+                                ${(txs.next || []).length === 0 ? '<div style="color: var(--text-secondary);">No next</div>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Data Grid
+            html += '<div class="data-grid">';
+
+            // Nodes
+            html += `
+                <div class="data-section">
+                    <h3>Nodes (${(nodes || []).length} holders)</h3>
+                    <div class="data-content">
+                        ${(nodes || []).map(n => `
+                            <div class="node">
+                                <div class="address">${n.address}</div>
+                                <div class="label">${n.label || 'Unknown'}</div>
+                                <div class="stats">
+                                    <span>Balance: <span class="stat-value">${formatNumber(n.balance)}</span></span>
+                                    <span>SOL: <span class="stat-value">${n.sol_balance?.toFixed(4) || '0'}</span></span>
+                                </div>
+                                ${n.funded_by ? `<div class="label" style="margin-top: 5px;">Funded by: ${n.funded_by.slice(0, 20)}...</div>` : ''}
+                            </div>
+                        `).join('')}
+                        ${(nodes || []).length === 0 ? '<div style="color: var(--text-secondary);">No nodes</div>' : ''}
+                    </div>
+                </div>
+            `;
+
+            // Edges
+            html += `
+                <div class="data-section">
+                    <h3>Edges (${(edges || []).length} transfers)</h3>
+                    <div class="data-content">
+                        ${(edges || []).map(e => `
+                            <div class="edge">
+                                <div class="flow">
+                                    <span class="addr" title="${e.source}">${e.source.slice(0, 12)}...</span>
+                                    <span class="arrow">→</span>
+                                    <span class="addr" title="${e.target}">${e.target.slice(0, 12)}...</span>
+                                    <span class="amount">${formatNumber(e.amount)}</span>
+                                    <span class="edge-type ${e.type}">${e.type}</span>
+                                </div>
+                                <div class="meta">
+                                    <span>${e.block_time_utc}</span>
+                                    <span title="${e.signature}">${e.signature.slice(0, 16)}...</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                        ${(edges || []).length === 0 ? '<div style="color: var(--text-secondary);">No edges</div>' : ''}
+                    </div>
+                </div>
+            `;
+
+            html += '</div>';
+
+            resultsDiv.innerHTML = html;
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
+            return num.toFixed(2);
+        }
+
+        // Load with default on page load if URL has params
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('token_symbol')) {
+            document.getElementById('token_symbol').value = urlParams.get('token_symbol');
+            fetchData();
+        }
+    </script>
+</body>
+</html>
