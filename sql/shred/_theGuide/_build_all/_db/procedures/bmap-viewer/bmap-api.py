@@ -75,6 +75,67 @@ def get_bmap():
     except Exception as e:
         return jsonify({'result': {'error': f'Error: {str(e)}'}}), 500
 
+@app.route('/api/timerange', methods=['GET'])
+def get_timerange():
+    """
+    Get min/max block_time for a token
+    - token_symbol: Token symbol
+    - mint_address: Token mint address
+    """
+    token_symbol = request.args.get('token_symbol') or None
+    mint_address = request.args.get('mint_address') or None
+
+    if not token_symbol and not mint_address:
+        return jsonify({'error': 'token_symbol or mint_address required'}), 400
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+
+        if mint_address:
+            query = """
+                SELECT
+                    MIN(t.block_time) as min_time,
+                    MAX(t.block_time) as max_time,
+                    COUNT(DISTINCT t.id) as tx_count
+                FROM tx_guide g
+                JOIN tx t ON t.id = g.tx_id
+                JOIN tx_token tk ON tk.id = g.token_id
+                JOIN tx_address mint ON mint.id = tk.mint_address_id
+                WHERE mint.address = %s
+            """
+            cursor.execute(query, (mint_address,))
+        else:
+            query = """
+                SELECT
+                    MIN(t.block_time) as min_time,
+                    MAX(t.block_time) as max_time,
+                    COUNT(DISTINCT t.id) as tx_count
+                FROM tx_guide g
+                JOIN tx t ON t.id = g.tx_id
+                JOIN tx_token tk ON tk.id = g.token_id
+                WHERE tk.token_symbol = %s
+            """
+            cursor.execute(query, (token_symbol,))
+
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if row and row['min_time']:
+            return jsonify({
+                'min_time': row['min_time'],
+                'max_time': row['max_time'],
+                'tx_count': row['tx_count']
+            })
+        else:
+            return jsonify({'error': 'No transactions found'}), 404
+
+    except mysql.connector.Error as e:
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
+    except Exception as e:
+        return jsonify({'error': f'Error: {str(e)}'}), 500
+
 if __name__ == '__main__':
     print("=" * 60)
     print("BMap Viewer API")
