@@ -261,7 +261,7 @@ class AddressHistoryWorker:
     def __init__(self, db_conn, channel, solscan: SolscanClient,
                  prefetch: int = 50, tx_limit: int = 20,
                  dry_run: bool = False, api_delay: float = API_DELAY,
-                 batch_delay: float = 1.0):
+                 batch_delay: float = 0.5):
         self.db_conn = db_conn
         self.cursor = db_conn.cursor(dictionary=True)
         self.channel = channel

@@ -68,7 +68,12 @@
       "Bash(/dev/null <<'EOF'\nSELECT 'tx_token total' as metric, COUNT(*) as cnt FROM tx_token\nUNION ALL SELECT 'tx_token with name', COUNT(*) FROM tx_token WHERE name IS NOT NULL\nUNION ALL SELECT 'tx_pool total', COUNT(*) FROM tx_pool\nUNION ALL SELECT 'tx_program total', COUNT(*) FROM tx_program\nUNION ALL SELECT 'tx_address with funder', COUNT(*) FROM tx_address WHERE funded_by_address_id IS NOT NULL\nUNION ALL SELECT 'tx_address init_fetched', COUNT(*) FROM tx_address WHERE init_tx_fetched = 1;\nEOF)",
       "Bash(timeout 30 python:*)",
       "Bash(timeout 20 python:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(docker exec:*)",
+      "Bash(sed:*)",
+      "Bash(timeout 120 python:*)",
+      "Bash(timeout 5 python:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

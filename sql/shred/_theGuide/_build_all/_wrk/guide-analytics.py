@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
 """
-Guide Analytics - Graph analytics for detecting wash trading, clipping, and sybil patterns
+Guide Analytics - Graph analytics for detecting wash trading, arbitrage, and bot patterns
 Uses NetworkX for advanced graph algorithms on tx_guide data.
 
 Usage:
-    python guide-analytics.py                      # Full analysis
+    python guide-analytics.py                      # Full wash trading analysis
     python guide-analytics.py --address <addr>    # Analyze specific address
     python guide-analytics.py --token SOLTIT      # Filter by token
     python guide-analytics.py --cycles            # Find circular flows
     python guide-analytics.py --clusters          # Find sybil clusters
+
+    # Arbitrage Detection
+    python guide-analytics.py --arbitrage                    # Find all arbitrage txs
+    python guide-analytics.py --arbitrage --token BoatKid    # Filter by token
+    python guide-analytics.py --tx-id 12345                  # Analyze specific tx
+    python guide-analytics.py --arb-wallet <addr>            # Analyze wallet's arb activity
+
+    # Timeline & Path Analysis
+    python guide-analytics.py --timeline <addr>              # Chronological activity
+    python guide-analytics.py --path <addr> --depth 3        # Fund flow paths
+
+    # Export
+    python guide-analytics.py --arbitrage --json output.json
+    python guide-analytics.py --token X --gexf graph.gexf    # For Gephi visualization
 """
 
 import argparse
@@ -214,6 +228,219 @@ def analyze_address(G: nx.MultiDiGraph, address: str) -> Dict:
         'tokens_received': dict(tokens_in),
         'tokens_sent': dict(tokens_out)
     }
+
+
+def detect_arbitrage_in_tx(cursor, tx_id: int) -> Optional[Dict]:
+    """
+    Detect multi-hop arbitrage in a single transaction.
+    Pattern: wallet -> pool1 -> pool2 -> ... -> wallet with net positive return
+    """
+    cursor.execute("""
+        SELECT
+            g.id,
+            fa.address AS from_address,
+            ta.address AS to_address,
+            COALESCE(tk.token_symbol, 'SOL') AS token_symbol,
+            g.amount,
+            g.decimals,
+            gt.type_code AS edge_type
+        FROM tx_guide g
+        JOIN tx_address fa ON fa.id = g.from_address_id
+        JOIN tx_address ta ON ta.id = g.to_address_id
+        LEFT JOIN tx_token tk ON tk.id = g.token_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.tx_id = %s
+        ORDER BY g.id
+    """, (tx_id,))
+
+    edges = cursor.fetchall()
+    if not edges:
+        return None
+
+    # Find wallets (addresses that both send and receive)
+    senders = set()
+    receivers = set()
+
+    for row in edges:
+        _, from_addr, to_addr, _, _, _, _ = row
+        senders.add(from_addr)
+        receivers.add(to_addr)
+
+    wallets = senders & receivers
+
+    # Calculate net flows per wallet per token
+    for wallet in wallets:
+        net_flows = defaultdict(float)
+        pools_used = set()
+        swap_count = 0
+
+        for row in edges:
+            _, from_addr, to_addr, token_symbol, amount, decimals, edge_type = row
+            human_amount = (amount or 0) / (10 ** (decimals or 0)) if amount else 0
+
+            if from_addr == wallet:
+                net_flows[token_symbol] -= human_amount
+                pools_used.add(to_addr)
+            if to_addr == wallet:
+                net_flows[token_symbol] += human_amount
+                pools_used.add(from_addr)
+
+            if 'swap' in edge_type:
+                swap_count += 1
+
+        # Check for profit in base tokens
+        base_tokens = ['SOL', 'WSOL', 'USDC', 'USDT']
+        for base in base_tokens:
+            if base in net_flows and net_flows[base] > 0:
+                # Calculate profit percentage
+                total_out = abs(sum(v for t, v in net_flows.items() if v < 0 and t == base))
+                profit_pct = (net_flows[base] / total_out * 100) if total_out > 0 else 0
+
+                return {
+                    'tx_id': tx_id,
+                    'wallet': wallet,
+                    'swap_count': swap_count,
+                    'pools_used': len(pools_used),
+                    'tokens_involved': [t for t, v in net_flows.items() if v != 0],
+                    'profit_token': base,
+                    'profit_amount': net_flows[base],
+                    'profit_pct': profit_pct,
+                    'net_flows': dict(net_flows)
+                }
+
+    return None
+
+
+def find_arbitrage_transactions(cursor, token_symbol: str = None, limit: int = 100) -> List[Dict]:
+    """
+    Find all transactions with potential arbitrage patterns.
+    Looks for txs with 2+ swaps involving the same wallet.
+    """
+    # Find transactions with multiple swaps
+    if token_symbol:
+        cursor.execute("""
+            SELECT
+                g.tx_id,
+                t.signature,
+                COUNT(*) AS edge_count,
+                SUM(CASE WHEN gt.type_code LIKE %s THEN 1 ELSE 0 END) AS swap_count
+            FROM tx_guide g
+            JOIN tx t ON t.id = g.tx_id
+            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            JOIN tx_token tk ON tk.id = g.token_id
+            WHERE tk.token_symbol = %s
+            GROUP BY g.tx_id, t.signature
+            HAVING swap_count >= 2
+            ORDER BY swap_count DESC
+            LIMIT %s
+        """, ('%swap%', token_symbol, limit))
+    else:
+        cursor.execute("""
+            SELECT
+                g.tx_id,
+                t.signature,
+                COUNT(*) AS edge_count,
+                SUM(CASE WHEN gt.type_code LIKE %s THEN 1 ELSE 0 END) AS swap_count
+            FROM tx_guide g
+            JOIN tx t ON t.id = g.tx_id
+            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            GROUP BY g.tx_id, t.signature
+            HAVING swap_count >= 2
+            ORDER BY swap_count DESC
+            LIMIT %s
+        """, ('%swap%', limit))
+
+    results = []
+    for tx_id, signature, edge_count, swap_count in cursor.fetchall():
+        arb = detect_arbitrage_in_tx(cursor, tx_id)
+        if arb:
+            arb['signature'] = signature
+            results.append(arb)
+
+    return results
+
+
+def analyze_arbitrage_wallet(cursor, address: str, limit: int = 1000) -> Dict:
+    """
+    Analyze a wallet for arbitrage activity patterns.
+    """
+    # Find all transactions involving this wallet with swaps
+    cursor.execute("""
+        SELECT DISTINCT g.tx_id, t.signature, t.block_time
+        FROM tx_guide g
+        JOIN tx t ON t.id = g.tx_id
+        JOIN tx_address a ON a.id IN (g.from_address_id, g.to_address_id)
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE a.address = %s
+        AND gt.type_code LIKE '%swap%'
+        ORDER BY t.block_time DESC
+        LIMIT %s
+    """, (address, limit))
+
+    txs = cursor.fetchall()
+
+    arbitrage_txs = []
+    total_profit = defaultdict(float)
+
+    for tx_id, signature, block_time in txs:
+        arb = detect_arbitrage_in_tx(cursor, tx_id)
+        if arb and arb['wallet'] == address:
+            arb['signature'] = signature
+            arb['block_time'] = block_time
+            arbitrage_txs.append(arb)
+            total_profit[arb['profit_token']] += arb['profit_amount']
+
+    return {
+        'address': address,
+        'total_swap_txs': len(txs),
+        'arbitrage_txs': len(arbitrage_txs),
+        'total_profit': dict(total_profit),
+        'recent_arbitrages': arbitrage_txs[:20]
+    }
+
+
+def print_arbitrage_report(cursor, token_symbol: str = None, limit: int = 50):
+    """Print arbitrage analysis report"""
+
+    print(f"\n{'='*80}")
+    print("ARBITRAGE DETECTION REPORT")
+    print(f"{'='*80}")
+
+    if token_symbol:
+        print(f"Token filter: {token_symbol}")
+
+    arbs = find_arbitrage_transactions(cursor, token_symbol, limit)
+
+    print(f"\nFound {len(arbs)} arbitrage transactions")
+
+    # Group by wallet
+    wallet_stats = defaultdict(lambda: {'count': 0, 'profit': defaultdict(float)})
+
+    for arb in arbs:
+        wallet = arb['wallet']
+        wallet_stats[wallet]['count'] += 1
+        wallet_stats[wallet]['profit'][arb['profit_token']] += arb['profit_amount']
+
+    print(f"\n{'='*80}")
+    print("TOP ARBITRAGE WALLETS")
+    print(f"{'='*80}")
+
+    for wallet, stats in sorted(wallet_stats.items(), key=lambda x: -x[1]['count'])[:15]:
+        print(f"\n{wallet}")
+        print(f"  Arb transactions: {stats['count']}")
+        for token, profit in stats['profit'].items():
+            print(f"  Total {token} profit: {profit:,.9f}")
+
+    print(f"\n{'='*80}")
+    print("RECENT ARBITRAGE TRANSACTIONS")
+    print(f"{'='*80}")
+
+    for i, arb in enumerate(arbs[:20]):
+        print(f"\n{i+1}. TX: {arb.get('signature', 'N/A')[:20]}...")
+        print(f"   Wallet: {arb['wallet'][:20]}...")
+        print(f"   Swaps: {arb['swap_count']}, Pools: {arb['pools_used']}")
+        print(f"   Tokens: {arb['tokens_involved']}")
+        print(f"   Profit: {arb['profit_amount']:,.9f} {arb['profit_token']} ({arb['profit_pct']:.4f}%)")
 
 
 def find_clipping_suspects(G: nx.MultiDiGraph, cursor) -> List[Dict]:
@@ -726,6 +953,9 @@ def main():
     parser.add_argument('--end-date', help='Filter: end date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--cycles', action='store_true', help='Focus on cycle detection')
     parser.add_argument('--clusters', action='store_true', help='Focus on sybil clusters')
+    parser.add_argument('--arbitrage', action='store_true', help='Detect arbitrage patterns')
+    parser.add_argument('--arb-wallet', help='Analyze specific wallet for arbitrage activity')
+    parser.add_argument('--tx-id', type=int, help='Analyze specific transaction by tx.id')
     parser.add_argument('--json', help='Export results to JSON file')
     parser.add_argument('--gexf', help='Export to GEXF format (for Gephi)')
     parser.add_argument('--db-host', default='localhost')
@@ -763,6 +993,82 @@ def main():
     print("Connecting to database...")
     conn = connect_db(args.db_host, args.db_port, args.db_user, args.db_pass, args.db_name)
     cursor = conn.cursor()
+
+    # Single transaction analysis
+    if args.tx_id:
+        print(f"\nAnalyzing transaction ID: {args.tx_id}")
+        arb = detect_arbitrage_in_tx(cursor, args.tx_id)
+        if arb:
+            print(f"\n{'='*80}")
+            print("ARBITRAGE DETECTED")
+            print(f"{'='*80}")
+            print(f"Wallet: {arb['wallet']}")
+            print(f"Swaps: {arb['swap_count']}, Pools: {arb['pools_used']}")
+            print(f"Tokens: {arb['tokens_involved']}")
+            print(f"Profit: {arb['profit_amount']:,.9f} {arb['profit_token']} ({arb['profit_pct']:.4f}%)")
+            print(f"\nNet flows:")
+            for token, flow in arb['net_flows'].items():
+                direction = '+' if flow > 0 else ''
+                print(f"  {token}: {direction}{flow:,.9f}")
+        else:
+            print("No arbitrage pattern detected in this transaction")
+
+        if args.json:
+            with open(args.json, 'w') as f:
+                json.dump(arb, f, indent=2, default=str)
+            print(f"\nExported to {args.json}")
+
+        cursor.close()
+        conn.close()
+        return
+
+    # Arbitrage wallet analysis
+    if args.arb_wallet:
+        print(f"\nAnalyzing arbitrage activity for: {args.arb_wallet}")
+        analysis = analyze_arbitrage_wallet(cursor, args.arb_wallet)
+
+        print(f"\n{'='*80}")
+        print("ARBITRAGE WALLET ANALYSIS")
+        print(f"{'='*80}")
+        print(f"Address: {analysis['address']}")
+        print(f"Total swap transactions: {analysis['total_swap_txs']}")
+        print(f"Arbitrage transactions: {analysis['arbitrage_txs']}")
+        print(f"\nTotal profits:")
+        for token, profit in analysis['total_profit'].items():
+            print(f"  {token}: {profit:,.9f}")
+
+        if analysis['recent_arbitrages']:
+            print(f"\n{'='*80}")
+            print("RECENT ARBITRAGES")
+            print(f"{'='*80}")
+            for i, arb in enumerate(analysis['recent_arbitrages'][:10]):
+                print(f"\n{i+1}. {arb.get('signature', 'N/A')[:30]}...")
+                print(f"   Profit: {arb['profit_amount']:,.9f} {arb['profit_token']} ({arb['profit_pct']:.4f}%)")
+                print(f"   Swaps: {arb['swap_count']}, Pools: {arb['pools_used']}")
+
+        if args.json:
+            with open(args.json, 'w') as f:
+                json.dump(analysis, f, indent=2, default=str)
+            print(f"\nExported to {args.json}")
+
+        cursor.close()
+        conn.close()
+        return
+
+    # Arbitrage detection mode
+    if args.arbitrage:
+        token_filter = args.token[0] if args.token else None
+        print_arbitrage_report(cursor, token_filter, limit=100)
+
+        if args.json:
+            arbs = find_arbitrage_transactions(cursor, token_filter, limit=100)
+            with open(args.json, 'w') as f:
+                json.dump(arbs, f, indent=2, default=str)
+            print(f"\nExported to {args.json}")
+
+        cursor.close()
+        conn.close()
+        return
 
     # Timeline mode - skip graph building, query directly
     if args.timeline:

@@ -1,0 +1,209 @@
+{
+  "walletTrails": [
+    {
+      "rootWallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "depth": 0,
+      "connections": [
+        {
+          "connectedWallet": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "transactionCount": 3,
+          "totalVolumeSOL": 4.0,
+          "totalVolumeUSD": 400.00,
+          "firstTransaction": "2025-10-27T10:00:00Z",
+          "lastTransaction": "2025-10-27T16:00:00Z",
+          "relationship": "frequent_trader",
+          "direction": "bidirectional"
+        },
+        {
+          "connectedWallet": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 1500.00,
+          "firstTransaction": "2025-10-27T14:00:00Z",
+          "lastTransaction": "2025-10-27T14:00:00Z",
+          "relationship": "one_time_sender",
+          "direction": "outbound"
+        },
+        {
+          "connectedWallet": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 25000.00,
+          "firstTransaction": "2025-10-27T19:00:00Z",
+          "lastTransaction": "2025-10-27T19:00:00Z",
+          "relationship": "large_sender",
+          "direction": "outbound"
+        }
+      ]
+    },
+    {
+      "rootWallet": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      "depth": 0,
+      "connections": [
+        {
+          "connectedWallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+          "transactionCount": 3,
+          "totalVolumeSOL": 4.0,
+          "totalVolumeUSD": 400.00,
+          "firstTransaction": "2025-10-27T10:00:00Z",
+          "lastTransaction": "2025-10-27T16:00:00Z",
+          "relationship": "frequent_trader",
+          "direction": "bidirectional"
+        },
+        {
+          "connectedWallet": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 50000.00,
+          "firstTransaction": "2025-10-27T11:00:00Z",
+          "lastTransaction": "2025-10-27T11:00:00Z",
+          "relationship": "large_sender",
+          "direction": "outbound"
+        },
+        {
+          "connectedWallet": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 5000.00,
+          "firstTransaction": "2025-10-27T15:00:00Z",
+          "lastTransaction": "2025-10-27T15:00:00Z",
+          "relationship": "nft_related",
+          "direction": "inbound"
+        }
+      ]
+    },
+    {
+      "rootWallet": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+      "depth": 0,
+      "connections": [
+        {
+          "connectedWallet": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 50000.00,
+          "firstTransaction": "2025-10-27T11:00:00Z",
+          "lastTransaction": "2025-10-27T11:00:00Z",
+          "relationship": "large_receiver",
+          "direction": "inbound"
+        },
+        {
+          "connectedWallet": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+          "transactionCount": 2,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 22000.00,
+          "firstTransaction": "2025-10-27T12:00:00Z",
+          "lastTransaction": "2025-10-27T13:00:00Z",
+          "relationship": "defi_protocol",
+          "direction": "bidirectional"
+        },
+        {
+          "connectedWallet": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.5,
+          "totalVolumeUSD": 50.00,
+          "firstTransaction": "2025-10-27T17:00:00Z",
+          "lastTransaction": "2025-10-27T17:00:00Z",
+          "relationship": "nft_related",
+          "direction": "outbound"
+        }
+      ]
+    },
+    {
+      "rootWallet": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+      "depth": 0,
+      "connections": [
+        {
+          "connectedWallet": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+          "transactionCount": 2,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 22000.00,
+          "firstTransaction": "2025-10-27T12:00:00Z",
+          "lastTransaction": "2025-10-27T13:00:00Z",
+          "relationship": "defi_protocol",
+          "direction": "bidirectional"
+        },
+        {
+          "connectedWallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 25000.00,
+          "firstTransaction": "2025-10-27T19:00:00Z",
+          "lastTransaction": "2025-10-27T19:00:00Z",
+          "relationship": "large_receiver",
+          "direction": "inbound"
+        },
+        {
+          "connectedWallet": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 2500.00,
+          "firstTransaction": "2025-10-27T18:00:00Z",
+          "lastTransaction": "2025-10-27T18:00:00Z",
+          "relationship": "distribution",
+          "direction": "outbound"
+        }
+      ]
+    },
+    {
+      "rootWallet": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+      "depth": 0,
+      "connections": [
+        {
+          "connectedWallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 1500.00,
+          "firstTransaction": "2025-10-27T14:00:00Z",
+          "lastTransaction": "2025-10-27T14:00:00Z",
+          "relationship": "one_time_receiver",
+          "direction": "inbound"
+        },
+        {
+          "connectedWallet": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 2500.00,
+          "firstTransaction": "2025-10-27T18:00:00Z",
+          "lastTransaction": "2025-10-27T18:00:00Z",
+          "relationship": "distribution",
+          "direction": "inbound"
+        }
+      ]
+    },
+    {
+      "rootWallet": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+      "depth": 0,
+      "connections": [
+        {
+          "connectedWallet": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.0,
+          "totalVolumeUSD": 5000.00,
+          "firstTransaction": "2025-10-27T15:00:00Z",
+          "lastTransaction": "2025-10-27T15:00:00Z",
+          "relationship": "nft_related",
+          "direction": "outbound"
+        },
+        {
+          "connectedWallet": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+          "transactionCount": 1,
+          "totalVolumeSOL": 0.5,
+          "totalVolumeUSD": 50.00,
+          "firstTransaction": "2025-10-27T17:00:00Z",
+          "lastTransaction": "2025-10-27T17:00:00Z",
+          "relationship": "nft_related",
+          "direction": "inbound"
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "totalWallets": 6,
+    "totalConnections": 16,
+    "averageConnectionsPerWallet": 2.67,
+    "timeRange": {
+      "start": "2025-10-27T10:00:00Z",
+      "end": "2025-10-27T19:00:00Z"
+    }
+  }
+}

@@ -1,0 +1,156 @@
+{
+  "accounts": [
+    {
+      "publicKey": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "lamports": 5432100000,
+      "solBalance": 5.4321,
+      "owner": "11111111111111111111111111111111",
+      "executable": false,
+      "rentEpoch": 361,
+      "metadata": {
+        "label": "Main Wallet A",
+        "category": "whale",
+        "firstSeen": "2024-01-15T10:30:00Z",
+        "lastActivity": "2025-10-27T14:22:00Z"
+      },
+      "tokenAccounts": [
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenSymbol": "USDC",
+          "balance": 125000.50,
+          "decimals": 6,
+          "uiAmount": 125000.50
+        },
+        {
+          "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "tokenSymbol": "USDT",
+          "balance": 50000.25,
+          "decimals": 6,
+          "uiAmount": 50000.25
+        }
+      ]
+    },
+    {
+      "publicKey": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      "lamports": 2150000000,
+      "solBalance": 2.15,
+      "owner": "11111111111111111111111111111111",
+      "executable": false,
+      "rentEpoch": 361,
+      "metadata": {
+        "label": "Exchange Wallet B",
+        "category": "exchange",
+        "firstSeen": "2024-03-22T08:15:00Z",
+        "lastActivity": "2025-10-27T16:45:00Z"
+      },
+      "tokenAccounts": [
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenSymbol": "USDC",
+          "balance": 2500000.00,
+          "decimals": 6,
+          "uiAmount": 2500000.00
+        }
+      ]
+    },
+    {
+      "publicKey": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+      "lamports": 890000000,
+      "solBalance": 0.89,
+      "owner": "11111111111111111111111111111111",
+      "executable": false,
+      "rentEpoch": 361,
+      "metadata": {
+        "label": "Trader Wallet C",
+        "category": "trader",
+        "firstSeen": "2024-06-10T12:00:00Z",
+        "lastActivity": "2025-10-27T18:30:00Z"
+      },
+      "tokenAccounts": [
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenSymbol": "USDC",
+          "balance": 15000.75,
+          "decimals": 6,
+          "uiAmount": 15000.75
+        },
+        {
+          "mint": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+          "tokenSymbol": "mSOL",
+          "balance": 100.5,
+          "decimals": 9,
+          "uiAmount": 100.5
+        }
+      ]
+    },
+    {
+      "publicKey": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+      "lamports": 12500000000,
+      "solBalance": 12.5,
+      "owner": "11111111111111111111111111111111",
+      "executable": false,
+      "rentEpoch": 361,
+      "metadata": {
+        "label": "DeFi Protocol D",
+        "category": "protocol",
+        "firstSeen": "2024-02-01T09:00:00Z",
+        "lastActivity": "2025-10-27T19:00:00Z"
+      },
+      "tokenAccounts": [
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenSymbol": "USDC",
+          "balance": 750000.00,
+          "decimals": 6,
+          "uiAmount": 750000.00
+        }
+      ]
+    },
+    {
+      "publicKey": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+      "lamports": 450000000,
+      "solBalance": 0.45,
+      "owner": "11111111111111111111111111111111",
+      "executable": false,
+      "rentEpoch": 361,
+      "metadata": {
+        "label": "Retail Wallet E",
+        "category": "retail",
+        "firstSeen": "2024-08-05T14:20:00Z",
+        "lastActivity": "2025-10-26T10:15:00Z"
+      },
+      "tokenAccounts": [
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenSymbol": "USDC",
+          "balance": 1500.00,
+          "decimals": 6,
+          "uiAmount": 1500.00
+        }
+      ]
+    },
+    {
+      "publicKey": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+      "lamports": 3200000000,
+      "solBalance": 3.2,
+      "owner": "11111111111111111111111111111111",
+      "executable": false,
+      "rentEpoch": 361,
+      "metadata": {
+        "label": "NFT Collector F",
+        "category": "nft_collector",
+        "firstSeen": "2024-04-18T11:30:00Z",
+        "lastActivity": "2025-10-27T15:45:00Z"
+      },
+      "tokenAccounts": [
+        {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenSymbol": "USDC",
+          "balance": 35000.00,
+          "decimals": 6,
+          "uiAmount": 35000.00
+        }
+      ]
+    }
+  ]
+}

@@ -6,26 +6,40 @@ for consumption by shredder-guide.py.
 
 Workflow:
 1. Fetch signatures via Chainstack RPC (getSignaturesForAddress)
-2. Optionally filter out already-processed signatures
-3. Batch signatures into groups of 20
-4. Publish batches to RabbitMQ queue 'tx.guide.signatures'
+2. Smart sync: only fetch new signatures since last known (unless --force-all)
+3. Optionally filter out already-processed signatures
+4. Batch signatures into groups of 20
+5. Publish batches to RabbitMQ queue 'tx.guide.signatures'
 
 Usage:
-    # Single address
-    python guide-producer.py <address> [--max-signatures 10000]
+    # Single address (smart sync - fetches only new signatures)
+    python guide-producer.py <address>
 
     # Multiple addresses
-    python guide-producer.py addr1 addr2 addr3 --max-signatures 5000
+    python guide-producer.py addr1 addr2 addr3
 
     # From file (one address per line)
     python guide-producer.py --address-file wallets.txt
 
-    # With time bounds
+    # Sync all mints from tx_address table
+    python guide-producer.py --sync-mint-transactions
+
+    # Combine CLI addresses with mint sync
+    python guide-producer.py addr1 addr2 --sync-mint-transactions
+
+    # Force full fetch (bypass smart sync, let dups be handled downstream)
+    python guide-producer.py addr1 --force-all
+
+    # Limit signatures per address
+    python guide-producer.py addr1 --max-signatures 5000
+
+    # With pagination bounds
     python guide-producer.py <address> --before <signature> --until <signature>
 
 Examples:
-    python guide-producer.py 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU --max-signatures 1000
-    python guide-producer.py --address-file suspects.txt --batch-size 20
+    python guide-producer.py 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
+    python guide-producer.py --sync-mint-transactions
+    python guide-producer.py --address-file suspects.txt --sync-mint-transactions --force-all
 """
 
 import argparse
@@ -119,7 +133,7 @@ def fetch_all_signatures(
     session: requests.Session,
     address: str,
     rpc_url: str,
-    max_signatures: int = 10000,
+    max_signatures: float = float('inf'),
     before: Optional[str] = None,
     until: Optional[str] = None,
     delay: float = 0.2,
@@ -128,6 +142,7 @@ def fetch_all_signatures(
     """Generator that fetches all signatures for an address with pagination
 
     Yields individual signature objects from RPC response.
+    max_signatures can be float('inf') for unlimited.
     """
     total_fetched = 0
     batch_num = 0
@@ -135,7 +150,7 @@ def fetch_all_signatures(
     while total_fetched < max_signatures:
         batch_num += 1
         remaining = max_signatures - total_fetched
-        fetch_limit = min(1000, remaining)
+        fetch_limit = min(1000, int(remaining) if remaining != float('inf') else 1000)
 
         try:
             response = fetch_signatures_rpc(
@@ -292,6 +307,60 @@ def filter_batch(batch: List[str], cursor) -> List[str]:
     return filtered
 
 
+def get_all_mints(cursor) -> List[str]:
+    """Get all mint addresses from tx_address, excluding SOL/WSOL"""
+    # SOL and WSOL mint addresses - too much traffic
+    SOL_MINT = 'So11111111111111111111111111111111111111111'
+    WSOL_MINT = 'So11111111111111111111111111111111111111112'
+
+    cursor.execute("""
+        SELECT address FROM tx_address
+        WHERE address_type = 'mint'
+        AND address NOT IN (%s, %s)
+    """, (SOL_MINT, WSOL_MINT))
+    return [row[0] for row in cursor.fetchall()]
+
+
+def get_last_known_signature(cursor, address: str) -> Optional[str]:
+    """Get the most recent signature for an address from tx_guide
+
+    Works for both wallets (via from/to_address_id) and mints (via token_id).
+    Returns None if no transactions found.
+    """
+    # First get the address ID
+    cursor.execute("SELECT id, address_type FROM tx_address WHERE address = %s", (address,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+
+    addr_id, addr_type = row
+
+    if addr_type == 'mint':
+        # For mints, look up via tx_token -> tx_guide.token_id
+        cursor.execute("""
+            SELECT t.signature
+            FROM tx t
+            JOIN tx_guide g ON g.tx_id = t.id
+            JOIN tx_token tk ON tk.id = g.token_id
+            WHERE tk.mint_address_id = %s
+            ORDER BY t.block_time DESC
+            LIMIT 1
+        """, (addr_id,))
+    else:
+        # For wallets/other, look up via tx_guide.from_address_id or to_address_id
+        cursor.execute("""
+            SELECT t.signature
+            FROM tx t
+            JOIN tx_guide g ON g.tx_id = t.id
+            WHERE g.from_address_id = %s OR g.to_address_id = %s
+            ORDER BY t.block_time DESC
+            LIMIT 1
+        """, (addr_id, addr_id))
+
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -304,8 +373,12 @@ def main():
     parser.add_argument('--address-file', help='File containing addresses (one per line)')
     parser.add_argument('--before', help='Signature to fetch before (pagination start)')
     parser.add_argument('--until', help='Signature to fetch until (pagination end)')
-    parser.add_argument('--max-signatures', type=int, default=10000,
-                        help='Maximum signatures per address (default: 10000)')
+    parser.add_argument('--max-signatures', default='all',
+                        help='Maximum signatures per address (default: all)')
+    parser.add_argument('--sync-mint-transactions', action='store_true',
+                        help='Sync transactions for all mints in tx_address (incremental)')
+    parser.add_argument('--force-all', action='store_true',
+                        help='Force full fetch for all addresses, bypass smart sync')
     parser.add_argument('--batch-size', type=int, default=20,
                         help='Signatures per RabbitMQ message (default: 20)')
     parser.add_argument('--rpc-url', default=CHAINSTACK_RPC_URL, help='Solana RPC URL')
@@ -330,14 +403,25 @@ def main():
 
     args = parser.parse_args()
 
-    # Collect addresses
+    # Parse max_signatures ('all' or integer)
+    if args.max_signatures == 'all':
+        max_signatures = float('inf')
+    else:
+        try:
+            max_signatures = int(args.max_signatures)
+        except ValueError:
+            print(f"Error: --max-signatures must be 'all' or an integer, got '{args.max_signatures}'")
+            return 1
+
+    # Collect CLI addresses
     addresses = list(args.addresses) if args.addresses else []
     if args.address_file:
         addresses.extend(load_addresses_from_file(args.address_file))
 
-    if not addresses:
+    # Validate: need addresses OR --sync-mint-transactions
+    if not addresses and not args.sync_mint_transactions:
         print("Error: No addresses provided")
-        print("Usage: python guide-producer.py <address> [--address-file file.txt]")
+        print("Usage: python guide-producer.py <address> [--address-file file.txt] [--sync-mint-transactions]")
         return 1
 
     # Check dependencies
@@ -346,11 +430,20 @@ def main():
         print("Install with: pip install pika")
         return 1
 
+    # DB required for --sync-mint-transactions or smart sync (unless --force-all)
+    needs_db = args.sync_mint_transactions or args.filter_existing or (not args.force_all and addresses)
+    if needs_db and not HAS_MYSQL:
+        print("Error: mysql-connector-python not installed")
+        print("Install with: pip install mysql-connector-python")
+        return 1
+
     print(f"Guide Producer - Chainstack to RabbitMQ")
     print(f"{'='*60}")
-    print(f"Addresses: {len(addresses)}")
+    print(f"CLI Addresses: {len(addresses)}")
+    print(f"Sync mint transactions: {args.sync_mint_transactions}")
     print(f"Max signatures per address: {args.max_signatures}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Smart sync: {not args.force_all} (force-all: {args.force_all})")
     print(f"RPC: {args.rpc_url[:50]}...")
     print(f"RabbitMQ: {args.rabbitmq_host}:{args.rabbitmq_port}")
     print(f"Queue: {RABBITMQ_QUEUE}")
@@ -375,8 +468,8 @@ def main():
         )
         print(f"  Connected to queue: {RABBITMQ_QUEUE}")
 
-    if args.filter_existing and HAS_MYSQL:
-        print(f"Connecting to MySQL for filtering...")
+    if needs_db:
+        print(f"Connecting to MySQL...")
         db_conn = mysql.connector.connect(
             host=args.db_host,
             port=args.db_port,
@@ -387,24 +480,47 @@ def main():
         db_cursor = db_conn.cursor()
         print(f"  Connected")
 
+    # Load mints if --sync-mint-transactions
+    mint_addresses = []
+    if args.sync_mint_transactions:
+        print(f"Loading mints from tx_address...")
+        mint_addresses = get_all_mints(db_cursor)
+        print(f"  Found {len(mint_addresses)} mints")
+
+    # Combine all addresses: CLI addresses + mints
+    all_addresses = addresses + mint_addresses
+    print(f"Total addresses to process: {len(all_addresses)}")
+
     # Stats
     total_signatures = 0
     total_batches = 0
     total_filtered = 0
 
     try:
-        for addr_idx, address in enumerate(addresses, 1):
-            print(f"\n--- Address {addr_idx}/{len(addresses)}: {address[:16]}... ---")
+        for addr_idx, address in enumerate(all_addresses, 1):
+            print(f"\n--- Address {addr_idx}/{len(all_addresses)}: {address[:16]}... ---")
 
             addr_signatures = 0
             addr_batches = 0
 
+            # Smart sync: determine 'until' signature
+            until_sig = args.until  # CLI override takes precedence
+            if not args.force_all and not until_sig and db_cursor:
+                last_known = get_last_known_signature(db_cursor, address)
+                if last_known:
+                    until_sig = last_known
+                    print(f"  Smart sync: will fetch until {last_known[:20]}...")
+                else:
+                    print(f"  No prior transactions found, full fetch")
+            elif args.force_all:
+                print(f"  Force-all: full fetch (bypassing smart sync)")
+
             # Fetch signatures generator
             sig_generator = fetch_all_signatures(
                 rpc_session, address, args.rpc_url,
-                max_signatures=args.max_signatures,
+                max_signatures=max_signatures,
                 before=args.before,
-                until=args.until,
+                until=until_sig,
                 delay=args.rpc_delay,
                 skip_failed=not args.include_failed
             )
@@ -450,7 +566,9 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Done!")
-    print(f"  Addresses processed: {len(addresses)}")
+    print(f"  CLI addresses processed: {len(addresses)}")
+    print(f"  Mint addresses processed: {len(mint_addresses)}")
+    print(f"  Total addresses processed: {len(all_addresses)}")
     print(f"  Total signatures: {total_signatures}")
     print(f"  Total batches published: {total_batches}")
     if args.filter_existing:

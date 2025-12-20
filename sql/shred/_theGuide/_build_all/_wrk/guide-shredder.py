@@ -16,10 +16,11 @@ Pipeline position:
 
 Flow:
 1. Consume batch of signatures from RabbitMQ queue 'tx.guide.signatures'
-2. Call Solscan /transaction/actions/multi (20 signatures)
-3. Extract distinct addresses -> send to 'tx.guide.addresses' queue
-4. Pass ENTIRE JSON to sp_tx_shred_batch (DB handles all parsing/normalization)
-5. ACK message on success
+2. Pre-filter: skip signatures already in tx table (save API calls)
+3. Call Solscan /transaction/actions/multi (only new signatures)
+4. Extract distinct addresses -> send to 'tx.guide.addresses' queue
+5. Pass ENTIRE JSON to sp_tx_shred_batch (DB handles all parsing/normalization)
+6. ACK message on success
 
 Usage:
     python guide-shredder.py [--prefetch 5]
@@ -90,6 +91,31 @@ def create_solscan_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({"token": SOLSCAN_API_TOKEN})
     return session
+
+
+# =============================================================================
+# Pre-filter: Check for existing signatures before Solscan call
+# =============================================================================
+
+def filter_existing_signatures(cursor, signatures: list) -> list:
+    """
+    Filter out signatures that already exist in tx table.
+    Returns only signatures that need to be fetched from Solscan.
+    """
+    if not signatures:
+        return []
+
+    placeholders = ','.join(['%s'] * len(signatures))
+    cursor.execute(f"""
+        SELECT signature FROM tx WHERE signature IN ({placeholders})
+    """, signatures)
+
+    existing = {row[0] for row in cursor.fetchall()}
+
+    if not existing:
+        return signatures
+
+    return [sig for sig in signatures if sig not in existing]
 
 
 # =============================================================================
@@ -188,11 +214,10 @@ class GuideConsumerV2:
         # Convert to JSON string
         json_str = json.dumps(json_data)
 
-        # Call stored procedure
-        self.cursor.callproc('sp_tx_shred_batch', [json_str, 0, 0, 0])
-
-        # Get output parameters
-        self.cursor.execute("SELECT @_sp_tx_shred_batch_1, @_sp_tx_shred_batch_2, @_sp_tx_shred_batch_3")
+        # Call stored procedure using session variables (callproc doesn't bind OUT params properly)
+        self.cursor.execute("SET @p_tx = 0, @p_edge = 0, @p_addr = 0")
+        self.cursor.execute("CALL sp_tx_shred_batch(%s, @p_tx, @p_edge, @p_addr)", (json_str,))
+        self.cursor.execute("SELECT @p_tx, @p_edge, @p_addr")
         result = self.cursor.fetchone()
 
         self.db_conn.commit()
@@ -222,6 +247,20 @@ class GuideConsumerV2:
                     print(f"        {sig[:20]}...")
                 if len(signatures) > 3:
                     print(f"        ... and {len(signatures) - 3} more")
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                self.message_count += 1
+                return
+
+            # === Phase 0: Pre-filter existing signatures (save API calls) ===
+            original_count = len(signatures)
+            signatures = filter_existing_signatures(self.cursor, signatures)
+            skipped_count = original_count - len(signatures)
+
+            if skipped_count > 0:
+                print(f"  [~] Skipped {skipped_count}/{original_count} existing signatures")
+
+            if not signatures:
+                print(f"  [=] All signatures already exist, ACK and skip")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 self.message_count += 1
                 return

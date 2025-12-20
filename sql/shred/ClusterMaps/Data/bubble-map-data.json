@@ -1,0 +1,367 @@
+{
+  "bubbleMap": {
+    "nodes": [
+      {
+        "id": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "label": "Main Wallet A",
+        "category": "whale",
+        "size": 180321,
+        "balance": {
+          "sol": 5.4321,
+          "usdc": 125000.50,
+          "usdt": 50000.25,
+          "totalUSD": 175000.75
+        },
+        "metrics": {
+          "transactionCount": 5,
+          "totalVolumeIn": 28500.00,
+          "totalVolumeOut": 27500.00,
+          "netFlow": 1000.00,
+          "uniqueConnections": 3,
+          "avgTransactionSize": 11200.00
+        },
+        "position": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        },
+        "color": "#FF6B6B",
+        "riskScore": 0.15
+      },
+      {
+        "id": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "label": "Exchange Wallet B",
+        "category": "exchange",
+        "size": 2502150,
+        "balance": {
+          "sol": 2.15,
+          "usdc": 2500000.00,
+          "usdt": 0.00,
+          "totalUSD": 2502150.00
+        },
+        "metrics": {
+          "transactionCount": 5,
+          "totalVolumeIn": 6000.00,
+          "totalVolumeOut": 53000.00,
+          "netFlow": -47000.00,
+          "uniqueConnections": 3,
+          "avgTransactionSize": 11800.00
+        },
+        "position": {
+          "x": 100,
+          "y": 50,
+          "z": 0
+        },
+        "color": "#4ECDC4",
+        "riskScore": 0.05
+      },
+      {
+        "id": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+        "label": "Trader Wallet C",
+        "category": "trader",
+        "size": 15890,
+        "balance": {
+          "sol": 0.89,
+          "usdc": 15000.75,
+          "usdt": 0.00,
+          "totalUSD": 15890.75
+        },
+        "metrics": {
+          "transactionCount": 4,
+          "totalVolumeIn": 50000.00,
+          "totalVolumeOut": 12500.00,
+          "netFlow": 37500.00,
+          "uniqueConnections": 3,
+          "avgTransactionSize": 15625.00
+        },
+        "position": {
+          "x": 50,
+          "y": -75,
+          "z": 20
+        },
+        "color": "#95E1D3",
+        "riskScore": 0.25
+      },
+      {
+        "id": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+        "label": "DeFi Protocol D",
+        "category": "protocol",
+        "size": 762500,
+        "balance": {
+          "sol": 12.5,
+          "usdc": 750000.00,
+          "usdt": 0.00,
+          "totalUSD": 762500.00
+        },
+        "metrics": {
+          "transactionCount": 4,
+          "totalVolumeIn": 35000.00,
+          "totalVolumeOut": 39500.00,
+          "netFlow": -4500.00,
+          "uniqueConnections": 3,
+          "avgTransactionSize": 18625.00
+        },
+        "position": {
+          "x": -80,
+          "y": 60,
+          "z": -15
+        },
+        "color": "#FFE66D",
+        "riskScore": 0.10
+      },
+      {
+        "id": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+        "label": "Retail Wallet E",
+        "category": "retail",
+        "size": 1950,
+        "balance": {
+          "sol": 0.45,
+          "usdc": 1500.00,
+          "usdt": 0.00,
+          "totalUSD": 1950.00
+        },
+        "metrics": {
+          "transactionCount": 2,
+          "totalVolumeIn": 4000.00,
+          "totalVolumeOut": 0.00,
+          "netFlow": 4000.00,
+          "uniqueConnections": 2,
+          "avgTransactionSize": 2000.00
+        },
+        "position": {
+          "x": -50,
+          "y": -50,
+          "z": 30
+        },
+        "color": "#A8E6CF",
+        "riskScore": 0.08
+      },
+      {
+        "id": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+        "label": "NFT Collector F",
+        "category": "nft_collector",
+        "size": 38200,
+        "balance": {
+          "sol": 3.2,
+          "usdc": 35000.00,
+          "usdt": 0.00,
+          "totalUSD": 38200.00
+        },
+        "metrics": {
+          "transactionCount": 2,
+          "totalVolumeIn": 0.50,
+          "totalVolumeOut": 5000.00,
+          "netFlow": -4999.50,
+          "uniqueConnections": 2,
+          "avgTransactionSize": 2500.25
+        },
+        "position": {
+          "x": 120,
+          "y": -30,
+          "z": -25
+        },
+        "color": "#FF8B94",
+        "riskScore": 0.12
+      }
+    ],
+    "edges": [
+      {
+        "source": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "target": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "weight": 4000.00,
+        "transactionCount": 3,
+        "flowType": "bidirectional",
+        "tokenTypes": ["SOL", "USDC"],
+        "thickness": 8,
+        "color": "#FF6B6B",
+        "animated": true
+      },
+      {
+        "source": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "target": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+        "weight": 50000.00,
+        "transactionCount": 1,
+        "flowType": "outbound",
+        "tokenTypes": ["USDC"],
+        "thickness": 15,
+        "color": "#4ECDC4",
+        "animated": true
+      },
+      {
+        "source": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+        "target": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+        "weight": 22000.00,
+        "transactionCount": 2,
+        "flowType": "bidirectional",
+        "tokenTypes": ["USDC"],
+        "thickness": 12,
+        "color": "#95E1D3",
+        "animated": true
+      },
+      {
+        "source": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "target": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+        "weight": 1500.00,
+        "transactionCount": 1,
+        "flowType": "outbound",
+        "tokenTypes": ["USDC"],
+        "thickness": 4,
+        "color": "#FF6B6B",
+        "animated": false
+      },
+      {
+        "source": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+        "target": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "weight": 5000.00,
+        "transactionCount": 1,
+        "flowType": "outbound",
+        "tokenTypes": ["USDC"],
+        "thickness": 6,
+        "color": "#FF8B94",
+        "animated": false
+      },
+      {
+        "source": "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+        "target": "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+        "weight": 50.00,
+        "transactionCount": 1,
+        "flowType": "outbound",
+        "tokenTypes": ["SOL"],
+        "thickness": 2,
+        "color": "#95E1D3",
+        "animated": false
+      },
+      {
+        "source": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+        "target": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
+        "weight": 2500.00,
+        "transactionCount": 1,
+        "flowType": "outbound",
+        "tokenTypes": ["USDT"],
+        "thickness": 5,
+        "color": "#FFE66D",
+        "animated": false
+      },
+      {
+        "source": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "target": "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+        "weight": 25000.00,
+        "transactionCount": 1,
+        "flowType": "outbound",
+        "tokenTypes": ["USDT"],
+        "thickness": 13,
+        "color": "#FF6B6B",
+        "animated": true
+      }
+    ],
+    "clusters": [
+      {
+        "id": "cluster_1",
+        "name": "High Volume Trading Cluster",
+        "nodes": [
+          "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+          "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z"
+        ],
+        "totalVolume": 77500.00,
+        "averageRiskScore": 0.15
+      },
+      {
+        "id": "cluster_2",
+        "name": "DeFi Protocol Cluster",
+        "nodes": [
+          "3vZ18JZK2HAESjGiVHxhQm8ZHqEfzEp6pxvX9WFZ1Kpz",
+          "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z",
+          "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH"
+        ],
+        "totalVolume": 24500.00,
+        "averageRiskScore": 0.14
+      },
+      {
+        "id": "cluster_3",
+        "name": "NFT Marketplace Cluster",
+        "nodes": [
+          "2nKDmzQiJz7VzQNfCTqZvqQpHgWVcbafzRgRBBk2JuBG",
+          "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "FWQwKNYRdRM8QvLQFLTtSHKrMNLnQUP4q2BF6eqHHx4z"
+        ],
+        "totalVolume": 5050.00,
+        "averageRiskScore": 0.14
+      }
+    ],
+    "timeSeriesData": [
+      {
+        "timestamp": "2025-10-27T10:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 1.0,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T11:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 50000.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T12:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 10000.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T13:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 12000.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T14:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 1500.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T15:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 5000.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T16:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 3000.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T17:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 0.5,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T18:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 2500.00,
+        "transactionCount": 1
+      },
+      {
+        "timestamp": "2025-10-27T19:00:00Z",
+        "activeNodes": 2,
+        "totalVolume": 25000.00,
+        "transactionCount": 1
+      }
+    ],
+    "metadata": {
+      "totalNodes": 6,
+      "totalEdges": 8,
+      "totalVolume": 110050.50,
+      "totalTransactions": 20,
+      "timeRange": {
+        "start": "2025-10-27T10:00:00Z",
+        "end": "2025-10-27T19:00:00Z"
+      },
+      "currencies": ["SOL", "USDC", "USDT", "mSOL"],
+      "categories": ["whale", "exchange", "trader", "protocol", "retail", "nft_collector"]
+    }
+  }
+}
