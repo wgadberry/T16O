@@ -701,9 +701,10 @@
                 `;
             }
 
-            // Timeline Slider
+            // Timeline Slider (visible if we have timeline data)
+            const timelineVisible = timelineData.minTime > 0 ? 'block' : 'none';
             html += `
-                <div class="timeline-container" id="timeline-section" style="display: none;">
+                <div class="timeline-container" id="timeline-section" style="display: ${timelineVisible};">
                     <div class="timeline-header">
                         <h3>Timeline</h3>
                         <div class="timeline-stats">
@@ -812,7 +813,8 @@
                     // First load - fetch time range
                     initTimeline(token);
                 } else {
-                    // Update slider position
+                    // Restore timeline UI and update position
+                    restoreTimelineUI();
                     updateTimelinePosition(txs?.block_time);
                 }
             }
@@ -1142,7 +1144,27 @@
             }, 300);
         }
 
+        function restoreTimelineUI() {
+            // Restore timeline labels and slider range from stored data
+            const minLabel = document.getElementById('timeline-min-label');
+            const maxLabel = document.getElementById('timeline-max-label');
+            const txCount = document.getElementById('timeline-tx-count');
+            const slider = document.getElementById('timeline-slider');
+
+            if (minLabel) minLabel.textContent = formatTimestamp(timelineData.minTime);
+            if (maxLabel) maxLabel.textContent = formatTimestamp(timelineData.maxTime);
+            if (txCount) txCount.textContent = timelineData.txCount.toLocaleString();
+
+            if (slider) {
+                slider.min = timelineData.minTime;
+                slider.max = timelineData.maxTime;
+                slider.removeEventListener('input', onSliderInput);
+                slider.addEventListener('input', onSliderInput);
+            }
+        }
+
         function updateTimelinePosition(blockTime) {
+            if (!blockTime) return;
             timelineData.currentTime = blockTime;
             const slider = document.getElementById('timeline-slider');
             if (slider) {
