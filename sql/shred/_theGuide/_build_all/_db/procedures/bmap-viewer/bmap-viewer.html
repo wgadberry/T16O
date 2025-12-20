@@ -624,6 +624,15 @@
                 <label>Block Time (Unix)</label>
                 <input type="number" id="block_time" placeholder="e.g. 1703000000">
             </div>
+            <div class="form-group">
+                <label>TX Window</label>
+                <select id="tx_limit" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); padding: 10px 15px; border-radius: 5px; font-size: 14px;">
+                    <option value="10" selected>10 (5+5)</option>
+                    <option value="20">20 (10+10)</option>
+                    <option value="50">50 (25+25)</option>
+                    <option value="100">100 (50+50)</option>
+                </select>
+            </div>
             <div class="form-group" style="justify-content: flex-end;">
                 <button class="btn" onclick="fetchData()">Load Token State</button>
             </div>
@@ -654,8 +663,12 @@
                     token_symbol: document.getElementById('token_symbol').value || undefined,
                     mint_address: document.getElementById('mint_address').value || undefined,
                     signature: document.getElementById('signature').value || undefined,
-                    block_time: document.getElementById('block_time').value || undefined
+                    block_time: document.getElementById('block_time').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
                 };
+            } else {
+                // Add tx_limit to navigation params
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
             }
 
             // Remove undefined params

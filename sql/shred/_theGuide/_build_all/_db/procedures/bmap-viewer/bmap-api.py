@@ -35,6 +35,7 @@ def get_bmap():
     - mint_address: Token mint address (optional)
     - signature: Transaction signature (optional)
     - block_time: Unix timestamp (optional)
+    - tx_limit: Transaction window size (10, 20, 50, 100) - default 10
     """
     token_name = request.args.get('token_name') or None
     token_symbol = request.args.get('token_symbol') or None
@@ -42,6 +43,8 @@ def get_bmap():
     signature = request.args.get('signature') or None
     block_time = request.args.get('block_time')
     block_time = int(block_time) if block_time else None
+    tx_limit = request.args.get('tx_limit')
+    tx_limit = int(tx_limit) if tx_limit else None
 
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -52,7 +55,8 @@ def get_bmap():
             token_symbol,
             mint_address,
             signature,
-            block_time
+            block_time,
+            tx_limit
         ])
 
         # Get the result

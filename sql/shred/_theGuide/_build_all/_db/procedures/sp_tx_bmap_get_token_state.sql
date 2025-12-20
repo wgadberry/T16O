@@ -20,10 +20,10 @@
 --   3. Else use most recent tx
 --
 -- Usage:
---   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, NULL);
---   CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ...', '5KtP...abc', NULL);
---   CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc', NULL);  -- derive token from sig
---   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, 1703000000);  -- nearest to block_time
+--   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, NULL, NULL);
+--   CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ...', '5KtP...abc', NULL, NULL);
+--   CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc', NULL, NULL);  -- derive token from sig
+--   CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL, 1703000000, 20);  -- 20 tx window
 
 DROP PROCEDURE IF EXISTS sp_tx_bmap_get_token_state;
 
@@ -34,7 +34,8 @@ CREATE PROCEDURE sp_tx_bmap_get_token_state(
     IN p_token_symbol VARCHAR(128),
     IN p_mint_address VARCHAR(44),
     IN p_signature VARCHAR(88),
-    IN p_block_time BIGINT UNSIGNED
+    IN p_block_time BIGINT UNSIGNED,
+    IN p_tx_limit TINYINT UNSIGNED  -- 10, 20, 50, 100 (divided by 2 for prev/next)
 )
 BEGIN
     DECLARE v_token_id BIGINT;
@@ -46,11 +47,20 @@ BEGIN
     DECLARE v_block_time BIGINT UNSIGNED;
     DECLARE v_tx_id BIGINT;
 
+    DECLARE v_half_limit TINYINT UNSIGNED;
+
     DECLARE v_nodes_json JSON;
     DECLARE v_edges_json JSON;
     DECLARE v_prev_json JSON;
     DECLARE v_next_json JSON;
     DECLARE v_current_edge_types JSON;
+
+    -- Default tx_limit to 10, validate, and calculate half
+    SET p_tx_limit = COALESCE(p_tx_limit, 10);
+    IF p_tx_limit NOT IN (10, 20, 50, 100) THEN
+        SET p_tx_limit = 10;
+    END IF;
+    SET v_half_limit = p_tx_limit DIV 2;
 
     -- ==========================================================================
     -- STEP 1: Resolve token
@@ -187,51 +197,61 @@ BEGIN
 
     IF v_token_id IS NOT NULL AND v_tx_id IS NOT NULL THEN
         -- ==========================================================================
-        -- STEP 3: Build sliding window of 11 tx_ids (prev 5 + current + next 5)
+        -- STEP 3: Build sliding window of tx_ids (prev N + current + next N)
         -- ==========================================================================
         DROP TEMPORARY TABLE IF EXISTS tmp_window;
         CREATE TEMPORARY TABLE tmp_window (
             tx_id BIGINT PRIMARY KEY,
             signature VARCHAR(88),
             block_time BIGINT UNSIGNED,
-            window_pos TINYINT  -- -5 to +5, 0 = current
+            window_pos TINYINT  -- negative = prev, 0 = current, positive = next
         );
 
         -- Current tx
         INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
         VALUES (v_tx_id, v_signature, v_block_time, 0);
 
-        -- Previous 5
-        INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
-        SELECT t.id, t.signature, t.block_time,
-               -1 * (@prev_row := @prev_row + 1)
-        FROM (SELECT @prev_row := 0) init,
-             (
-                SELECT DISTINCT t.id, t.signature, t.block_time
-                FROM tx_guide g
-                JOIN tx t ON t.id = g.tx_id
-                WHERE g.token_id = v_token_id
-                  AND t.block_time < v_block_time
-                ORDER BY t.block_time DESC
-                LIMIT 5
-             ) t
-        ORDER BY t.block_time DESC;
+        -- Previous N (using prepared statement for dynamic LIMIT)
+        SET @sql_prev = CONCAT('
+            INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
+            SELECT t.id, t.signature, t.block_time,
+                   -1 * (@prev_row := @prev_row + 1)
+            FROM (SELECT @prev_row := 0) init,
+                 (
+                    SELECT DISTINCT t.id, t.signature, t.block_time
+                    FROM tx_guide g
+                    JOIN tx t ON t.id = g.tx_id
+                    WHERE g.token_id = ', v_token_id, '
+                      AND t.block_time < ', v_block_time, '
+                    ORDER BY t.block_time DESC
+                    LIMIT ', v_half_limit, '
+                 ) t
+            ORDER BY t.block_time DESC
+        ');
+        PREPARE stmt_prev FROM @sql_prev;
+        EXECUTE stmt_prev;
+        DEALLOCATE PREPARE stmt_prev;
 
-        -- Next 5
-        INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
-        SELECT t.id, t.signature, t.block_time,
-               @next_row := @next_row + 1
-        FROM (SELECT @next_row := 0) init,
-             (
-                SELECT DISTINCT t.id, t.signature, t.block_time
-                FROM tx_guide g
-                JOIN tx t ON t.id = g.tx_id
-                WHERE g.token_id = v_token_id
-                  AND t.block_time > v_block_time
-                ORDER BY t.block_time ASC
-                LIMIT 5
-             ) t
-        ORDER BY t.block_time ASC;
+        -- Next N (using prepared statement for dynamic LIMIT)
+        SET @sql_next = CONCAT('
+            INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
+            SELECT t.id, t.signature, t.block_time,
+                   @next_row := @next_row + 1
+            FROM (SELECT @next_row := 0) init,
+                 (
+                    SELECT DISTINCT t.id, t.signature, t.block_time
+                    FROM tx_guide g
+                    JOIN tx t ON t.id = g.tx_id
+                    WHERE g.token_id = ', v_token_id, '
+                      AND t.block_time > ', v_block_time, '
+                    ORDER BY t.block_time ASC
+                    LIMIT ', v_half_limit, '
+                 ) t
+            ORDER BY t.block_time ASC
+        ');
+        PREPARE stmt_next FROM @sql_next;
+        EXECUTE stmt_next;
+        DEALLOCATE PREPARE stmt_next;
 
         -- ==========================================================================
         -- STEP 4: Build prev/next navigation JSON from window
