@@ -294,7 +294,7 @@ BEGIN
         ) dt;
 
         -- ==========================================================================
-        -- STEP 5: Build nodes (current holders with balance > 0 at current block_time)
+        -- STEP 5: Build nodes (all addresses in sliding window, with their balance)
         -- ==========================================================================
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes;
         CREATE TEMPORARY TABLE tmp_nodes (
@@ -306,39 +306,55 @@ BEGIN
             funded_by VARCHAR(44) DEFAULT NULL
         );
 
-        -- Calculate net balance for each address: inflows - outflows up to current block_time
-        -- Inflows (to_address receives tokens)
-        INSERT INTO tmp_nodes (address_id, address, label, balance, funded_by)
-        SELECT
+        -- First: Insert all addresses that appear in the sliding window (from OR to)
+        INSERT IGNORE INTO tmp_nodes (address_id, address, label, balance, funded_by)
+        SELECT DISTINCT
             a.id,
             a.address,
             COALESCE(a.label, a.address_type),
-            SUM(g.amount / POW(10, g.decimals)),
+            0,
             f.address
         FROM tx_guide g
-        JOIN tx t ON t.id = g.tx_id
-        JOIN tx_address a ON a.id = g.to_address_id
-        LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
-        WHERE g.token_id = v_token_id
-          AND t.block_time <= v_block_time
-        GROUP BY a.id, a.address, COALESCE(a.label, a.address_type), f.address;
-
-        -- Outflows (from_address sends tokens) - subtract from balance
-        INSERT INTO tmp_nodes (address_id, address, label, balance, funded_by)
-        SELECT
-            a.id,
-            a.address,
-            COALESCE(a.label, a.address_type),
-            -SUM(g.amount / POW(10, g.decimals)),
-            f.address
-        FROM tx_guide g
-        JOIN tx t ON t.id = g.tx_id
+        JOIN tmp_window w ON w.tx_id = g.tx_id
         JOIN tx_address a ON a.id = g.from_address_id
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
-        WHERE g.token_id = v_token_id
-          AND t.block_time <= v_block_time
-        GROUP BY a.id, a.address, COALESCE(a.label, a.address_type), f.address
-        ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance);
+        WHERE g.token_id = v_token_id;
+
+        INSERT IGNORE INTO tmp_nodes (address_id, address, label, balance, funded_by)
+        SELECT DISTINCT
+            a.id,
+            a.address,
+            COALESCE(a.label, a.address_type),
+            0,
+            f.address
+        FROM tx_guide g
+        JOIN tmp_window w ON w.tx_id = g.tx_id
+        JOIN tx_address a ON a.id = g.to_address_id
+        LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
+        WHERE g.token_id = v_token_id;
+
+        -- Now calculate historical balance for each node: inflows - outflows up to current block_time
+        -- Inflows (to_address receives tokens)
+        UPDATE tmp_nodes n
+        SET balance = balance + COALESCE((
+            SELECT SUM(g.amount / POW(10, g.decimals))
+            FROM tx_guide g
+            JOIN tx t ON t.id = g.tx_id
+            WHERE g.token_id = v_token_id
+              AND g.to_address_id = n.address_id
+              AND t.block_time <= v_block_time
+        ), 0);
+
+        -- Outflows (from_address sends tokens) - subtract from balance
+        UPDATE tmp_nodes n
+        SET balance = balance - COALESCE((
+            SELECT SUM(g.amount / POW(10, g.decimals))
+            FROM tx_guide g
+            JOIN tx t ON t.id = g.tx_id
+            WHERE g.token_id = v_token_id
+              AND g.from_address_id = n.address_id
+              AND t.block_time <= v_block_time
+        ), 0);
 
         -- Update SOL balance for each node (latest balance up to current block_time)
         UPDATE tmp_nodes n
@@ -352,7 +368,7 @@ BEGIN
             LIMIT 1
         );
 
-        -- Build JSON only for holders with balance > 0
+        -- Build JSON for ALL addresses in sliding window (not just balance > 0)
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
                 'address', n.address,
@@ -362,8 +378,7 @@ BEGIN
                 'funded_by', n.funded_by
             )
         ) INTO v_nodes_json
-        FROM tmp_nodes n
-        WHERE n.balance > 0;
+        FROM tmp_nodes n;
 
         -- ==========================================================================
         -- STEP 6: Build edges (token activity + SOL transfers between nodes)
@@ -374,10 +389,10 @@ BEGIN
         CREATE TEMPORARY TABLE tmp_window2 AS SELECT * FROM tmp_window;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_from;
-        CREATE TEMPORARY TABLE tmp_nodes_from AS SELECT address_id FROM tmp_nodes WHERE balance > 0;
+        CREATE TEMPORARY TABLE tmp_nodes_from AS SELECT address_id FROM tmp_nodes;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_to;
-        CREATE TEMPORARY TABLE tmp_nodes_to AS SELECT address_id FROM tmp_nodes WHERE balance > 0;
+        CREATE TEMPORARY TABLE tmp_nodes_to AS SELECT address_id FROM tmp_nodes;
 
         SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
         FROM (

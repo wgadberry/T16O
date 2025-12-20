@@ -77,40 +77,11 @@
         .btn:hover { background: var(--accent-hover); }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-        /* Navigation */
-        .nav-section {
-            background: var(--bg-card);
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-
-        .current-tx {
-            text-align: center;
-            padding: 15px;
-            background: var(--bg-input);
-            border-radius: 8px;
-            margin-bottom: 15px;
-        }
-
-        .current-tx .signature {
-            font-family: monospace;
-            font-size: 12px;
-            color: var(--accent);
-            word-break: break-all;
-        }
-
-        .current-tx .time {
-            color: var(--text-secondary);
-            font-size: 14px;
-            margin-top: 5px;
-        }
-
+        /* Edge Type Badges */
         .edge-types {
             display: flex;
             gap: 5px;
             justify-content: center;
-            margin-top: 10px;
             flex-wrap: wrap;
         }
 
@@ -126,39 +97,6 @@
         .edge-type.swap_out { background: #ef4444; }
         .edge-type.spl_transfer { background: #3b82f6; }
         .edge-type.sol_transfer { background: #a855f7; }
-
-        .nav-buttons {
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-        }
-
-        .nav-list {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-            flex: 1;
-        }
-
-        .nav-list.prev { align-items: flex-start; }
-        .nav-list.next { align-items: flex-end; }
-
-        .nav-item {
-            background: var(--bg-input);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            padding: 8px 15px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
-            max-width: 300px;
-        }
-
-        .nav-item:hover { border-color: var(--accent); background: var(--bg-card); }
-
-        .nav-item .sig { font-family: monospace; color: var(--accent); }
-        .nav-item .time { color: var(--text-secondary); font-size: 11px; }
 
         /* Token Info */
         .token-info {
@@ -544,6 +482,120 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+
+        /* Compact Current TX Bar */
+        .current-tx-bar {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .current-tx-bar .sig-section {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .current-tx-bar .signature {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .current-tx-bar .time {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        /* Collapsible Section */
+        .collapsible-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .collapsible-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }
+
+        .collapsible-header:hover {
+            background: #1a4a7a;
+        }
+
+        .collapsible-header h3 {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .collapsible-header .toggle-icon {
+            transition: transform 0.3s;
+            font-size: 12px;
+        }
+
+        .collapsible-header.collapsed .toggle-icon {
+            transform: rotate(-90deg);
+        }
+
+        .collapsible-content {
+            padding: 15px 20px;
+            display: block;
+        }
+
+        .collapsible-content.collapsed {
+            display: none;
+        }
+
+        .nav-compact {
+            display: flex;
+            gap: 20px;
+        }
+
+        .nav-compact .nav-list {
+            flex: 1;
+        }
+
+        .nav-compact .nav-list h4 {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .nav-compact .nav-item {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            border-radius: 5px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .nav-compact .nav-item:hover {
+            border-color: var(--accent);
+        }
     </style>
 </head>
 <body>
@@ -642,7 +694,7 @@
 
             let html = '';
 
-            // Token Info
+            // Token Info (compact bar)
             if (token) {
                 html += `
                     <div class="token-info">
@@ -652,50 +704,19 @@
                 `;
             }
 
-            // Navigation Section
+            // Current TX Bar (compact)
             if (txs) {
                 html += `
-                    <div class="nav-section">
-                        <div class="current-tx">
-                            <div class="signature">${txs.signature}</div>
-                            <div class="time">${txs.block_time_utc} (${txs.block_time})</div>
-                            <div class="edge-types">
-                                ${(txs.edge_types || []).map(t =>
-                                    `<span class="edge-type ${t}">${t}</span>`
-                                ).join('')}
-                            </div>
+                    <div class="current-tx-bar">
+                        <div class="sig-section">
+                            <strong style="color: var(--text-secondary);">Current TX:</strong>
+                            <span class="signature" title="${txs.signature}">${txs.signature}</span>
                         </div>
-                        <div class="nav-buttons">
-                            <div class="nav-list prev">
-                                <strong style="color: var(--text-secondary); margin-bottom: 5px;">← Previous</strong>
-                                ${(txs.prev || []).map(p => `
-                                    <div class="nav-item" onclick="navigateTo('${p.signature}')">
-                                        <div class="sig">${p.signature.slice(0, 20)}...</div>
-                                        <div class="time">${p.block_time_utc}</div>
-                                        <div class="edge-types" style="justify-content: flex-start; margin-top: 5px;">
-                                            ${(p.edge_types || []).map(t =>
-                                                `<span class="edge-type ${t}">${t}</span>`
-                                            ).join('')}
-                                        </div>
-                                    </div>
-                                `).join('')}
-                                ${(txs.prev || []).length === 0 ? '<div style="color: var(--text-secondary);">No previous</div>' : ''}
-                            </div>
-                            <div class="nav-list next">
-                                <strong style="color: var(--text-secondary); margin-bottom: 5px;">Next →</strong>
-                                ${(txs.next || []).map(n => `
-                                    <div class="nav-item" onclick="navigateTo('${n.signature}')">
-                                        <div class="sig">${n.signature.slice(0, 20)}...</div>
-                                        <div class="time">${n.block_time_utc}</div>
-                                        <div class="edge-types" style="justify-content: flex-end; margin-top: 5px;">
-                                            ${(n.edge_types || []).map(t =>
-                                                `<span class="edge-type ${t}">${t}</span>`
-                                            ).join('')}
-                                        </div>
-                                    </div>
-                                `).join('')}
-                                ${(txs.next || []).length === 0 ? '<div style="color: var(--text-secondary);">No next</div>' : ''}
-                            </div>
+                        <div class="time">${txs.block_time_utc}</div>
+                        <div class="edge-types">
+                            ${(txs.edge_types || []).map(t =>
+                                `<span class="edge-type ${t}">${t}</span>`
+                            ).join('')}
                         </div>
                     </div>
                 `;
@@ -746,10 +767,62 @@
                         <div class="legend-item"><div class="legend-dot" style="background: #e94560;"></div> High Balance</div>
                         <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div> Medium Balance</div>
                         <div class="legend-item"><div class="legend-dot" style="background: #22c55e;"></div> Low Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #666;"></div> Zero/Sold (Pools, ATAs)</div>
                         <div class="legend-item"><div class="legend-dot" style="background: #a855f7;"></div> Funded By Link</div>
                     </div>
                 </div>
             `;
+
+            // Collapsible Prev/Next Navigation
+            if (txs) {
+                const prevCount = (txs.prev || []).length;
+                const nextCount = (txs.next || []).length;
+                html += `
+                    <div class="collapsible-section">
+                        <div class="collapsible-header collapsed" onclick="toggleCollapsible(this)">
+                            <h3>
+                                <span class="toggle-icon">▼</span>
+                                Transaction Navigation
+                                <span style="font-weight: normal; color: var(--text-secondary);">(${prevCount} prev / ${nextCount} next)</span>
+                            </h3>
+                        </div>
+                        <div class="collapsible-content collapsed">
+                            <div class="nav-compact">
+                                <div class="nav-list">
+                                    <h4>← Previous (${prevCount})</h4>
+                                    ${(txs.prev || []).map(p => `
+                                        <div class="nav-item" onclick="navigateTo('${p.signature}')">
+                                            <div class="sig" style="font-family: monospace; color: var(--accent);">${p.signature.slice(0, 20)}...</div>
+                                            <div class="time" style="color: var(--text-secondary); font-size: 10px;">${p.block_time_utc}</div>
+                                            <div class="edge-types" style="justify-content: flex-start; margin-top: 4px;">
+                                                ${(p.edge_types || []).map(t =>
+                                                    `<span class="edge-type ${t}">${t}</span>`
+                                                ).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                    ${prevCount === 0 ? '<div style="color: var(--text-secondary); font-size: 12px;">No previous transactions</div>' : ''}
+                                </div>
+                                <div class="nav-list">
+                                    <h4>Next → (${nextCount})</h4>
+                                    ${(txs.next || []).map(n => `
+                                        <div class="nav-item" onclick="navigateTo('${n.signature}')">
+                                            <div class="sig" style="font-family: monospace; color: var(--accent);">${n.signature.slice(0, 20)}...</div>
+                                            <div class="time" style="color: var(--text-secondary); font-size: 10px;">${n.block_time_utc}</div>
+                                            <div class="edge-types" style="justify-content: flex-start; margin-top: 4px;">
+                                                ${(n.edge_types || []).map(t =>
+                                                    `<span class="edge-type ${t}">${t}</span>`
+                                                ).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                    ${nextCount === 0 ? '<div style="color: var(--text-secondary); font-size: 12px;">No next transactions</div>' : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
 
             // Data Grid
             html += '<div class="data-grid">';
@@ -847,10 +920,10 @@
             // Create node map for lookups
             const nodeMap = new Map(nodes.map(n => [n.address, n]));
 
-            // Calculate balance range for sizing
-            const balances = nodes.map(n => n.balance || 0);
-            const maxBalance = Math.max(...balances);
-            const minBalance = Math.min(...balances);
+            // Calculate balance range for sizing (use absolute value, treat 0/negative as minimum)
+            const balances = nodes.map(n => Math.max(0, n.balance || 0));
+            const maxBalance = Math.max(...balances, 1); // Ensure at least 1 to avoid domain issues
+            const minBalance = 0;
 
             // Size scale (radius 8-50 based on balance)
             const sizeScale = d3.scaleSqrt()
@@ -863,15 +936,21 @@
                 .range(['#22c55e', '#3b82f6', '#e94560']);
 
             // Prepare nodes for D3
-            const d3Nodes = nodes.map(n => ({
-                id: n.address,
-                label: n.label || 'wallet',
-                balance: n.balance || 0,
-                sol_balance: n.sol_balance || 0,
-                funded_by: n.funded_by,
-                radius: sizeScale(n.balance || 0),
-                color: colorScale(n.balance || 0)
-            }));
+            const d3Nodes = nodes.map(n => {
+                const displayBalance = Math.max(0, n.balance || 0);
+                const isZeroBalance = (n.balance || 0) <= 0;
+                return {
+                    id: n.address,
+                    label: n.label || 'wallet',
+                    balance: n.balance || 0,
+                    displayBalance: displayBalance,
+                    isZeroBalance: isZeroBalance,
+                    sol_balance: n.sol_balance || 0,
+                    funded_by: n.funded_by,
+                    radius: sizeScale(displayBalance),
+                    color: isZeroBalance ? '#666' : colorScale(displayBalance) // Gray for zero balance
+                };
+            });
 
             // Prepare edges for D3 - only include edges where both nodes exist
             const d3Edges = (edges || [])
@@ -1216,6 +1295,12 @@
                 hour: '2-digit',
                 minute: '2-digit'
             });
+        }
+
+        function toggleCollapsible(header) {
+            header.classList.toggle('collapsed');
+            const content = header.nextElementSibling;
+            content.classList.toggle('collapsed');
         }
 
         // Load with default on page load if URL has params
