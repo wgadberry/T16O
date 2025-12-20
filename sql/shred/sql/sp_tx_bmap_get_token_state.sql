@@ -382,7 +382,7 @@ BEGIN
         SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
         FROM (
             -- Token-specific edges from sliding window
-            SELECT JSON_OBJECT(
+            SELECT DISTINCT JSON_OBJECT(
                 'source', fa.address,
                 'target', ta.address,
                 'amount', ROUND(g.amount / POW(10, g.decimals), 6),
@@ -399,7 +399,7 @@ BEGIN
             JOIN tx_guide_type gt ON gt.id = g.edge_type_id
             WHERE g.token_id = v_token_id
 
-            UNION ALL
+            UNION
 
             -- SOL transfers between nodes in the sliding window
             SELECT JSON_OBJECT(
