@@ -1,0 +1,143 @@
+# sp_tx_bmap_get_token_state
+
+Time-navigable cluster map for token analysis. Returns current holders (balance > 0) and a sliding window of transaction activity.
+
+## Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `p_token_name` | VARCHAR(128) | Token name (optional) |
+| `p_token_symbol` | VARCHAR(128) | Token symbol (optional) |
+| `p_mint_address` | VARCHAR(44) | Token mint address (preferred) |
+| `p_signature` | VARCHAR(88) | Transaction signature (optional - if NULL, uses most recent) |
+
+## Token Resolution Priority
+
+1. If `p_mint_address` provided, use it
+2. Else if `p_token_symbol` provided, use it
+3. Else if `p_token_name` provided, use it
+4. Else if `p_signature` provided (only), derive token from tx_guide activity
+   - Prefers "interesting" tokens over base currencies (SOL, WSOL, USDC, USDT, etc.)
+
+## Usage Examples
+
+```sql
+-- By mint address (preferred)
+CALL sp_tx_bmap_get_token_state(NULL, NULL, 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', NULL);
+
+-- By token symbol
+CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, NULL);
+
+-- By token name
+CALL sp_tx_bmap_get_token_state('Bonk', NULL, NULL, NULL);
+
+-- By signature only (derives token automatically)
+CALL sp_tx_bmap_get_token_state(NULL, NULL, NULL, '5KtP...abc');
+
+-- Specific signature for a token
+CALL sp_tx_bmap_get_token_state(NULL, 'BONK', NULL, '5KtP...abc');
+```
+
+## Response Structure
+
+### Success Response
+
+```json
+{
+  "result": {
+    "txs": {
+      "signature": "5KtP...abc",
+      "block_time": 1703000000,
+      "block_time_utc": "2023-12-19 12:00:00",
+      "edge_types": ["spl_transfer", "swap_in"],
+      "prev": [
+        {
+          "signature": "4JkM...xyz",
+          "block_time": 1702999900,
+          "block_time_utc": "2023-12-19 11:58:20",
+          "edge_types": ["spl_transfer"]
+        }
+      ],
+      "next": [
+        {
+          "signature": "6LnQ...def",
+          "block_time": 1703000100,
+          "block_time_utc": "2023-12-19 12:01:40",
+          "edge_types": ["swap_out"]
+        }
+      ]
+    },
+    "token": {
+      "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+      "symbol": "BONK"
+    },
+    "nodes": [
+      {
+        "address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "label": "whale",
+        "balance": 1000000.123456,
+        "sol_balance": 5.432100000,
+        "funded_by": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+      }
+    ],
+    "edges": [
+      {
+        "source": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "target": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "amount": 50000.000000,
+        "type": "spl_transfer",
+        "signature": "5KtP...abc",
+        "block_time": 1703000000,
+        "block_time_utc": "2023-12-19 12:00:00"
+      }
+    ]
+  }
+}
+```
+
+### Error Responses
+
+```json
+// Token not found
+{"result": {"error": "Token not found"}}
+
+// Signature exists but not for this token
+{"result": {"error": "Signature not found for this token", "signature": "...", "mint": "..."}}
+
+// Signature doesn't exist
+{"result": {"error": "Signature not found", "signature": "..."}}
+
+// No transactions for token
+{"result": {"error": "No transactions found for this token", "mint": "..."}}
+```
+
+## Output Details
+
+### txs (Transaction Navigation)
+- `signature`: Current transaction signature
+- `block_time`: Unix timestamp
+- `block_time_utc`: Human-readable UTC timestamp
+- `edge_types`: Array of edge types in current transaction
+- `prev`: Array of up to 5 previous transactions (most recent first)
+- `next`: Array of up to 5 next transactions (oldest first)
+
+### nodes (Token Holders)
+- Only addresses with balance > 0 at the current `block_time`
+- `label`: Address label or address_type if no label
+- `balance`: Token balance (human-readable, adjusted for decimals)
+- `sol_balance`: SOL balance at current block_time
+- `funded_by`: Address that initially funded this wallet (for clustering)
+
+### edges (Activity)
+- Token-specific edges from the 11-tx sliding window (5 prev + current + 5 next)
+- SOL transfers between token holders within the sliding window
+- `type`: Edge type code (spl_transfer, swap_in, swap_out, sol_transfer, etc.)
+
+## Notes
+
+- When deriving token from signature only, base currencies are deprioritized:
+  - SOL, WSOL (native/wrapped)
+  - USDC, USDT, PYUSD, USDH, UXD (stablecoins)
+  - MSOL, JITOSOL, BSOL, LSTSOL (liquid staking tokens)
+- Nodes represent the state of token holders at the specified transaction's block_time
+- Use `prev`/`next` arrays to navigate through transaction history
