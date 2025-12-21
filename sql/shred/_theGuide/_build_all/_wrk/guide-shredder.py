@@ -66,6 +66,7 @@ RABBITMQ_USER = 'admin'
 RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE_IN = 'tx.guide.signatures'
 RABBITMQ_QUEUE_OUT = 'tx.guide.addresses'
+RABBITMQ_QUEUE_DETAIL = 'tx.detail.transactions'
 
 
 # =============================================================================
@@ -169,7 +170,8 @@ class GuideConsumerV2:
     """RabbitMQ consumer for signature batches - v2 with SP processing"""
 
     def __init__(self, db_conn, channel, solscan_session: requests.Session,
-                 max_messages: int = 0, dry_run: bool = False, no_funding: bool = False):
+                 max_messages: int = 0, dry_run: bool = False, no_funding: bool = False,
+                 no_detail: bool = False):
         self.db_conn = db_conn
         self.cursor = db_conn.cursor()
         self.channel = channel
@@ -177,16 +179,26 @@ class GuideConsumerV2:
         self.max_messages = max_messages
         self.dry_run = dry_run
         self.no_funding = no_funding
+        self.no_detail = no_detail
         self.message_count = 0
         self.total_tx = 0
         self.total_edges = 0
         self.total_addresses = 0
+        self.total_detail_queued = 0
         self.should_stop = False
 
         # Declare output queue for addresses
         if not no_funding:
             channel.queue_declare(
                 queue=RABBITMQ_QUEUE_OUT,
+                durable=True,
+                arguments={'x-max-priority': 10}
+            )
+
+        # Declare output queue for detail enrichment
+        if not no_detail:
+            channel.queue_declare(
+                queue=RABBITMQ_QUEUE_DETAIL,
                 durable=True,
                 arguments={'x-max-priority': 10}
             )
@@ -208,6 +220,24 @@ class GuideConsumerV2:
             )
         )
         return len(addresses)
+
+    def publish_to_detail_queue(self, signatures: list):
+        """Publish signatures to detail enrichment queue"""
+        if not signatures or self.no_detail:
+            return 0
+
+        # Send as JSON object with signatures array
+        body = json.dumps({'signatures': signatures})
+        self.channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_QUEUE_DETAIL,
+            body=body.encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # persistent
+                priority=5
+            )
+        )
+        return len(signatures)
 
     def call_shred_batch(self, json_data: dict) -> tuple:
         """Call sp_tx_shred_batch with JSON, return (tx_count, edge_count, address_count)"""
@@ -289,6 +319,15 @@ class GuideConsumerV2:
             if addr_queued > 0:
                 print(f"  [>] Queued {addr_queued} addresses for funding")
 
+            # === Phase 4: Queue signatures for detail enrichment ===
+            detail_queued = 0
+            if not self.no_detail:
+                detail_queued = self.publish_to_detail_queue(signatures)
+                self.total_detail_queued += detail_queued
+
+            if detail_queued > 0:
+                print(f"  [>] Queued {detail_queued} signatures for detail enrichment")
+
             self.total_tx += tx_count
             self.total_edges += edge_count
             self.total_addresses += address_count
@@ -345,6 +384,8 @@ def main():
     parser.add_argument('--rabbitmq-pass', default=RABBITMQ_PASS, help='RabbitMQ password')
     parser.add_argument('--no-funding', action='store_true',
                         help='Skip sending addresses to funding queue')
+    parser.add_argument('--no-detail', action='store_true',
+                        help='Skip sending signatures to detail enrichment queue')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be processed without making changes')
 
@@ -362,10 +403,12 @@ def main():
     print(f"{'='*60}")
     print(f"RabbitMQ: {args.rabbitmq_host}:{args.rabbitmq_port}")
     print(f"Queue In:  {RABBITMQ_QUEUE_IN}")
-    print(f"Queue Out: {RABBITMQ_QUEUE_OUT}")
+    print(f"Queue Out (addresses): {RABBITMQ_QUEUE_OUT}")
+    print(f"Queue Out (detail):    {RABBITMQ_QUEUE_DETAIL}")
     print(f"Prefetch: {args.prefetch}")
     print(f"Max messages: {args.max_messages if args.max_messages > 0 else 'unlimited'}")
     print(f"Address queue: {'DISABLED' if args.no_funding else 'ENABLED'}")
+    print(f"Detail queue:  {'DISABLED' if args.no_detail else 'ENABLED'}")
     if args.dry_run:
         print(f"MODE: DRY RUN")
     print()
@@ -406,7 +449,7 @@ def main():
     # Start consumer
     consumer = GuideConsumerV2(
         db_conn, channel, solscan_session,
-        args.max_messages, args.dry_run, args.no_funding
+        args.max_messages, args.dry_run, args.no_funding, args.no_detail
     )
 
     try:

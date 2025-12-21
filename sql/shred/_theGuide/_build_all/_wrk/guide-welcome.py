@@ -41,6 +41,12 @@ WORKERS = [
         "color": "Cyan",
     },
     {
+        "name": "Detailer",
+        "script": "guide-detailer.py",
+        "needs_mint": False,
+        "color": "Blue",
+    },
+    {
         "name": "Funder",
         "script": "guide-funder.py",
         "needs_mint": False,

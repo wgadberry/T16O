@@ -27,8 +27,15 @@ Usage:
     # Combine CLI addresses with mint sync
     python guide-producer.py addr1 addr2 --sync-mint-transactions
 
+    # Sync only top N mints by transaction count
+    python guide-producer.py --sync-mint-transactions --top-address-limit 10
+
     # Force full fetch (bypass smart sync, let dups be handled downstream)
     python guide-producer.py addr1 --force-all
+
+    # Direct-to-detail: queue shredded txs for detail enrichment
+    python guide-producer.py --direct-to-detail
+    python guide-producer.py --direct-to-detail --detail-max-batches 100
 
     # Limit signatures per address
     python guide-producer.py addr1 --max-signatures 5000
@@ -77,6 +84,7 @@ RABBITMQ_PORT = 5692
 RABBITMQ_USER = 'admin'
 RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE = 'tx.guide.signatures'
+RABBITMQ_QUEUE_DETAIL = 'tx.detail.transactions'
 
 
 # =============================================================================
@@ -259,6 +267,26 @@ def publish_batch(channel, signatures: List[str], priority: int = 5) -> bool:
         return False
 
 
+def publish_batch_to_detail(channel, signatures: List[str], priority: int = 5) -> bool:
+    """Publish a batch of signatures to detail queue"""
+    try:
+        message = {"signatures": signatures}
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_QUEUE_DETAIL,
+            body=orjson.dumps(message),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Persistent
+                content_type='application/json',
+                priority=priority
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"  [!] Publish error: {e}")
+        return False
+
+
 # =============================================================================
 # Address Loading
 # =============================================================================
@@ -321,6 +349,34 @@ def get_all_mints(cursor) -> List[str]:
     return [row[0] for row in cursor.fetchall()]
 
 
+def get_top_mints(cursor, limit: int) -> List[str]:
+    """Get top N mint addresses by transaction count in tx_guide, excluding SOL/WSOL"""
+    SOL_MINT = 'So11111111111111111111111111111111111111111'
+    WSOL_MINT = 'So11111111111111111111111111111111111111112'
+
+    cursor.execute("""
+        SELECT a.address, COUNT(DISTINCT g.tx_id) as tx_count
+        FROM tx_address a
+        JOIN tx_token tk ON tk.mint_address_id = a.id
+        JOIN tx_guide g ON g.token_id = tk.id
+        WHERE a.address_type = 'mint'
+          AND a.address NOT IN (%s, %s)
+        GROUP BY a.id, a.address
+        ORDER BY tx_count DESC
+        LIMIT %s
+    """, (SOL_MINT, WSOL_MINT, limit))
+    
+    results = cursor.fetchall()
+    if results:
+        print(f"  Top {len(results)} mints by tx_count:")
+        for addr, count in results[:5]:  # Show first 5
+            print(f"    {addr[:16]}... : {count} txs")
+        if len(results) > 5:
+            print(f"    ... and {len(results) - 5} more")
+    
+    return [row[0] for row in results]
+
+
 def get_last_known_signature(cursor, address: str) -> Optional[str]:
     """Get the most recent signature for an address from tx_guide
 
@@ -361,6 +417,45 @@ def get_last_known_signature(cursor, address: str) -> Optional[str]:
     return row[0] if row else None
 
 
+def get_signatures_needing_detail(cursor, batch_size: int = 20, max_batches: int = 0) -> Generator[List[str], None, None]:
+    """Generator that yields batches of signatures that need detail enrichment.
+    
+    Queries tx table for tx_state = 'shredded' (processed by shredder but not detailed).
+    
+    Args:
+        cursor: MySQL cursor
+        batch_size: Number of signatures per batch
+        max_batches: Maximum batches to yield (0 = unlimited)
+        
+    Yields:
+        Lists of signature strings
+    """
+    offset = 0
+    batch_num = 0
+    
+    while True:
+        cursor.execute("""
+            SELECT signature 
+            FROM tx 
+            WHERE tx_state = 'shredded'
+            ORDER BY block_time DESC
+            LIMIT %s OFFSET %s
+        """, (batch_size, offset))
+        
+        rows = cursor.fetchall()
+        if not rows:
+            break
+            
+        signatures = [row[0] for row in rows]
+        yield signatures
+        
+        batch_num += 1
+        offset += batch_size
+        
+        if max_batches > 0 and batch_num >= max_batches:
+            break
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -377,6 +472,8 @@ def main():
                         help='Maximum signatures per address (default: all)')
     parser.add_argument('--sync-mint-transactions', action='store_true',
                         help='Sync transactions for all mints in tx_address (incremental)')
+    parser.add_argument('--top-address-limit', type=int, default=None,
+                        help='Limit to top N mints by tx_guide transaction count (use with --sync-mint-transactions)')
     parser.add_argument('--force-all', action='store_true',
                         help='Force full fetch for all addresses, bypass smart sync')
     parser.add_argument('--batch-size', type=int, default=20,
@@ -400,6 +497,10 @@ def main():
                         help='Fetch and print only, do not publish to RabbitMQ')
     parser.add_argument('--include-failed', action='store_true',
                         help='Include failed transactions (default: skip)')
+    parser.add_argument('--direct-to-detail', action='store_true',
+                        help='Query DB for shredded txs missing detail and send to tx.detail.transactions queue')
+    parser.add_argument('--detail-max-batches', type=int, default=0,
+                        help='Max batches to send in direct-to-detail mode (0 = unlimited)')
 
     args = parser.parse_args()
 
@@ -418,10 +519,10 @@ def main():
     if args.address_file:
         addresses.extend(load_addresses_from_file(args.address_file))
 
-    # Validate: need addresses OR --sync-mint-transactions
-    if not addresses and not args.sync_mint_transactions:
+    # Validate: need addresses OR --sync-mint-transactions OR --direct-to-detail
+    if not addresses and not args.sync_mint_transactions and not args.direct_to_detail:
         print("Error: No addresses provided")
-        print("Usage: python guide-producer.py <address> [--address-file file.txt] [--sync-mint-transactions]")
+        print("Usage: python guide-producer.py <address> [--address-file file.txt] [--sync-mint-transactions] [--direct-to-detail]")
         return 1
 
     # Check dependencies
@@ -430,8 +531,8 @@ def main():
         print("Install with: pip install pika")
         return 1
 
-    # DB required for --sync-mint-transactions or smart sync (unless --force-all)
-    needs_db = args.sync_mint_transactions or args.filter_existing or (not args.force_all and addresses)
+    # DB required for --sync-mint-transactions, smart sync, or --direct-to-detail
+    needs_db = args.sync_mint_transactions or args.filter_existing or args.direct_to_detail or (not args.force_all and addresses)
     if needs_db and not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")
         print("Install with: pip install mysql-connector-python")
@@ -441,6 +542,8 @@ def main():
     print(f"{'='*60}")
     print(f"CLI Addresses: {len(addresses)}")
     print(f"Sync mint transactions: {args.sync_mint_transactions}")
+    if args.top_address_limit:
+        print(f"Top address limit: {args.top_address_limit}")
     print(f"Max signatures per address: {args.max_signatures}")
     print(f"Batch size: {args.batch_size}")
     print(f"Smart sync: {not args.force_all} (force-all: {args.force_all})")
@@ -467,6 +570,15 @@ def main():
             args.rabbitmq_user, args.rabbitmq_pass
         )
         print(f"  Connected to queue: {RABBITMQ_QUEUE}")
+        
+        # Also declare detail queue if needed
+        if args.direct_to_detail:
+            rabbitmq_channel.queue_declare(
+                queue=RABBITMQ_QUEUE_DETAIL,
+                durable=True,
+                arguments={'x-max-priority': 10}
+            )
+            print(f"  Also connected to queue: {RABBITMQ_QUEUE_DETAIL}")
 
     if needs_db:
         print(f"Connecting to MySQL...")
@@ -480,12 +592,66 @@ def main():
         db_cursor = db_conn.cursor()
         print(f"  Connected")
 
+    # =========================================================================
+    # Direct-to-Detail Mode
+    # =========================================================================
+    if args.direct_to_detail:
+        print()
+        print("--- Direct-to-Detail Mode ---")
+        print(f"Querying for shredded transactions needing detail...")
+        
+        # Count total needing detail
+        db_cursor.execute("SELECT COUNT(*) FROM tx WHERE tx_state = 'shredded'")
+        total_needing = db_cursor.fetchone()[0]
+        print(f"  Found {total_needing} transactions needing detail")
+        
+        if total_needing == 0:
+            print(f"  Nothing to do!")
+        else:
+            detail_batches = 0
+            detail_signatures = 0
+            
+            try:
+                for batch in get_signatures_needing_detail(db_cursor, args.batch_size, args.detail_max_batches):
+                    if args.dry_run:
+                        print(f"  [DRY RUN] Batch {detail_batches + 1}: {len(batch)} signatures")
+                        print(f"    First: {batch[0][:20]}...")
+                    else:
+                        if publish_batch_to_detail(rabbitmq_channel, batch, args.priority):
+                            detail_batches += 1
+                            detail_signatures += len(batch)
+                            
+                            if detail_batches % 10 == 0:
+                                print(f"  Published {detail_batches} batches ({detail_signatures} signatures)")
+                                
+            except KeyboardInterrupt:
+                print("\nInterrupted by user")
+            
+            print()
+            print("=" * 60)
+            print(f"Direct-to-Detail Complete!")
+            print(f"  Batches published: {detail_batches}")
+            print(f"  Signatures queued: {detail_signatures}")
+            print(f"{'='*60}")
+        
+        # Cleanup and exit
+        if rabbitmq_conn:
+            rabbitmq_conn.close()
+        if db_conn:
+            db_conn.close()
+        return 0
+
     # Load mints if --sync-mint-transactions
     mint_addresses = []
     if args.sync_mint_transactions:
-        print(f"Loading mints from tx_address...")
-        mint_addresses = get_all_mints(db_cursor)
-        print(f"  Found {len(mint_addresses)} mints")
+        if args.top_address_limit:
+            print(f"Loading top {args.top_address_limit} mints by tx_guide count...")
+            mint_addresses = get_top_mints(db_cursor, args.top_address_limit)
+            print(f"  Selected {len(mint_addresses)} mints")
+        else:
+            print(f"Loading all mints from tx_address...")
+            mint_addresses = get_all_mints(db_cursor)
+            print(f"  Found {len(mint_addresses)} mints")
 
     # Combine all addresses: CLI addresses + mints
     all_addresses = addresses + mint_addresses
