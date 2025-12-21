@@ -401,12 +401,15 @@ BEGIN
         FROM tmp_nodes n;
 
         -- ==========================================================================
-        -- STEP 6: Build edges (token activity + SOL transfers between nodes)
+        -- STEP 6: Build edges (enriched with swap/transfer details)
         -- ==========================================================================
 
         -- Copy temp tables to avoid MySQL "Can't reopen table" limitation
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
         CREATE TEMPORARY TABLE tmp_window2 AS SELECT * FROM tmp_window;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_window3;
+        CREATE TEMPORARY TABLE tmp_window3 AS SELECT * FROM tmp_window;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_from;
         CREATE TEMPORARY TABLE tmp_nodes_from AS SELECT address_id FROM tmp_nodes;
@@ -416,12 +419,16 @@ BEGIN
 
         SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
         FROM (
-            -- Token-specific edges from sliding window
-            SELECT DISTINCT JSON_OBJECT(
+            -- Swap edges (swap_in, swap_out) - enriched with DEX name, pool, program
+            SELECT JSON_OBJECT(
                 'source', fa.address,
                 'target', ta.address,
                 'amount', ROUND(g.amount / POW(10, g.decimals), 6),
                 'type', gt.type_code,
+                'dex', s.name,
+                'pool', pool_addr.address,
+                'program', prog_addr.address,
+                'ins_index', g.ins_index,
                 'signature', t.signature,
                 'block_time', t.block_time,
                 'block_time_utc', FROM_UNIXTIME(t.block_time)
@@ -432,16 +439,26 @@ BEGIN
             JOIN tx_address fa ON fa.id = g.from_address_id
             JOIN tx_address ta ON ta.id = g.to_address_id
             JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            LEFT JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
+            LEFT JOIN tx_pool pool ON pool.id = s.amm_id
+            LEFT JOIN tx_address pool_addr ON pool_addr.id = pool.pool_address_id
+            LEFT JOIN tx_program prog ON prog.id = s.program_id
+            LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
             WHERE g.token_id = v_token_id
+              AND gt.type_code IN ('swap_in', 'swap_out')
 
-            UNION
+            UNION ALL
 
-            -- SOL transfers between nodes in the sliding window
+            -- Transfer edges (spl_transfer) - enriched with program
             SELECT JSON_OBJECT(
                 'source', fa.address,
                 'target', ta.address,
-                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 9),
+                'amount', ROUND(g.amount / POW(10, g.decimals), 6),
                 'type', gt.type_code,
+                'dex', NULL,
+                'pool', NULL,
+                'program', prog_addr.address,
+                'ins_index', g.ins_index,
                 'signature', t.signature,
                 'block_time', t.block_time,
                 'block_time_utc', FROM_UNIXTIME(t.block_time)
@@ -452,13 +469,45 @@ BEGIN
             JOIN tx_address fa ON fa.id = g.from_address_id
             JOIN tx_address ta ON ta.id = g.to_address_id
             JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            LEFT JOIN tx_transfer xf ON xf.tx_id = g.tx_id AND xf.ins_index = g.ins_index
+            LEFT JOIN tx_program prog ON prog.id = xf.program_id
+            LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
+            WHERE g.token_id = v_token_id
+              AND gt.type_code = 'spl_transfer'
+
+            UNION ALL
+
+            -- SOL transfers between nodes in the sliding window
+            SELECT JSON_OBJECT(
+                'source', fa.address,
+                'target', ta.address,
+                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 9),
+                'type', gt.type_code,
+                'dex', NULL,
+                'pool', NULL,
+                'program', prog_addr.address,
+                'ins_index', g.ins_index,
+                'signature', t.signature,
+                'block_time', t.block_time,
+                'block_time_utc', FROM_UNIXTIME(t.block_time)
+            ) AS edge_data
+            FROM tx_guide g
+            JOIN tmp_window3 w ON w.tx_id = g.tx_id
+            JOIN tx t ON t.id = g.tx_id
+            JOIN tx_address fa ON fa.id = g.from_address_id
+            JOIN tx_address ta ON ta.id = g.to_address_id
+            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
             JOIN tmp_nodes_from fn ON fn.address_id = g.from_address_id
             JOIN tmp_nodes_to tn ON tn.address_id = g.to_address_id
+            LEFT JOIN tx_transfer xf ON xf.tx_id = g.tx_id AND xf.ins_index = g.ins_index
+            LEFT JOIN tx_program prog ON prog.id = xf.program_id
+            LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
             WHERE g.token_id IS NULL
               AND gt.type_code = 'sol_transfer'
         ) edges;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
+        DROP TEMPORARY TABLE IF EXISTS tmp_window3;
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_from;
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_to;
 

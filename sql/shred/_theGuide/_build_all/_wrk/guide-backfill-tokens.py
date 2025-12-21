@@ -11,6 +11,7 @@ Enriches tx_token table.
 
 Usage:
     python guide-backfill-tokens.py [--limit 100] [--delay 0.2]
+    python guide-backfill-tokens.py --daemon --interval 60
 """
 
 import argparse
@@ -92,6 +93,8 @@ def main():
     parser.add_argument('--limit', type=int, default=1000, help='Max tokens to process')
     parser.add_argument('--delay', type=float, default=0.2, help='Delay between API calls (seconds)')
     parser.add_argument('--max-attempts', type=int, default=3, help='Skip tokens with more than N failed attempts')
+    parser.add_argument('--daemon', action='store_true', help='Run continuously as a daemon')
+    parser.add_argument('--interval', type=int, default=60, help='Seconds between batches in daemon mode')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
     parser.add_argument('--db-user', default='root', help='MySQL user')
@@ -99,6 +102,12 @@ def main():
     parser.add_argument('--db-name', default='t16o_db', help='MySQL database')
 
     args = parser.parse_args()
+
+    if args.daemon:
+        print(f"Guide Backfill Tokens (Daemon Mode)")
+        print(f"{'='*60}")
+        print(f"Interval: {args.interval}s | Limit: {args.limit} | Max attempts: {args.max_attempts}")
+        print(f"{'='*60}")
 
     print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
     conn = mysql.connector.connect(
@@ -110,60 +119,91 @@ def main():
     )
     cursor = conn.cursor()
 
-    # Get tokens needing metadata
-    tokens = get_tokens_missing_metadata(cursor, args.limit, args.max_attempts)
-    print(f"Found {len(tokens)} tokens missing metadata (max_attempts={args.max_attempts})")
-
-    if not tokens:
-        print("Nothing to do!")
-        return 0
-
     # Create API session
     session = create_api_session()
 
-    updated = 0
-    failed = 0
+    total_updated = 0
+    total_failed = 0
+    batch_num = 0
 
     try:
-        for i, (token_id, mint) in enumerate(tokens, 1):
-            print(f"[{i}/{len(tokens)}] Fetching {mint[:16]}...", end=" ")
+        while True:
+            batch_num += 1
 
-            # Increment attempt count before trying
-            increment_attempt_count(cursor, conn, token_id)
+            # Get tokens needing metadata
+            tokens = get_tokens_missing_metadata(cursor, args.limit, args.max_attempts)
 
-            try:
-                response = fetch_token_meta(session, mint)
-
-                if response.get('success') and response.get('data'):
-                    data = response['data']
-                    name = data.get('name')
-                    symbol = data.get('symbol')
-                    icon = data.get('icon')
-                    decimals = data.get('decimals')
-
-                    if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals):
-                        print(f"✓ {symbol or 'unnamed'} ({decimals} dec)")
-                        updated += 1
-                    else:
-                        print("no change")
+            if not tokens:
+                if args.daemon:
+                    print(f"[Batch {batch_num}] No tokens to process, sleeping {args.interval}s...")
+                    time.sleep(args.interval)
+                    continue
                 else:
-                    print("not found")
+                    print("Nothing to do!")
+                    break
+
+            if args.daemon:
+                print(f"\n[Batch {batch_num}] Processing {len(tokens)} tokens...")
+
+            else:
+                print(f"Found {len(tokens)} tokens missing metadata (max_attempts={args.max_attempts})")
+
+            updated = 0
+            failed = 0
+
+            for i, (token_id, mint) in enumerate(tokens, 1):
+                print(f"  [{i}/{len(tokens)}] Fetching {mint[:16]}...", end=" ")
+
+                # Increment attempt count before trying
+                increment_attempt_count(cursor, conn, token_id)
+
+                try:
+                    response = fetch_token_meta(session, mint)
+
+                    if response.get('success') and response.get('data'):
+                        data = response['data']
+                        name = data.get('name')
+                        symbol = data.get('symbol')
+                        icon = data.get('icon')
+                        decimals = data.get('decimals')
+
+                        if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals):
+                            print(f"{symbol or 'unnamed'} ({decimals} dec)")
+                            updated += 1
+                        else:
+                            print("no change")
+                    else:
+                        print("not found")
+                        failed += 1
+
+                except requests.RequestException as e:
+                    print(f"API error: {e}")
                     failed += 1
 
-            except requests.RequestException as e:
-                print(f"✗ API error: {e}")
-                failed += 1
+                # Rate limiting
+                if i < len(tokens) and args.delay > 0:
+                    time.sleep(args.delay)
 
-            # Rate limiting
-            if i < len(tokens) and args.delay > 0:
-                time.sleep(args.delay)
+            total_updated += updated
+            total_failed += failed
+
+            if args.daemon:
+                print(f"  [+] Batch complete: {updated} updated, {failed} failed")
+                print(f"      Totals: {total_updated} updated, {total_failed} failed")
+                print(f"      Sleeping {args.interval}s...")
+                time.sleep(args.interval)
+            else:
+                break
+
+    except KeyboardInterrupt:
+        print("\n\nShutting down...")
 
     finally:
         session.close()
         conn.close()
 
     print(f"\n{'='*60}")
-    print(f"Done! Updated: {updated}, Failed: {failed}")
+    print(f"Done! Updated: {total_updated}, Failed: {total_failed}")
     print(f"{'='*60}")
 
     return 0
