@@ -956,11 +956,19 @@
                                     <span class="addr" title="${e.target}">${e.target.slice(0, 12)}...</span>
                                     <span class="amount">${formatNumber(e.amount)}</span>
                                     <span class="edge-type ${e.type}">${e.type}</span>
+                                    ${e.dex ? `<span style="color: var(--warning); font-size: 10px;">${e.dex}</span>` : ''}
                                 </div>
                                 <div class="meta">
                                     <span>${e.block_time_utc}</span>
                                     <span title="${e.signature}">${e.signature.slice(0, 16)}...</span>
+                                    ${e.ins_index !== null ? `<span style="color: var(--text-secondary);">#${e.ins_index}</span>` : ''}
                                 </div>
+                                ${e.pool || e.program ? `
+                                <div class="meta" style="margin-top: 4px;">
+                                    ${e.pool ? `<span title="${e.pool}">Pool: ${e.pool.slice(0, 8)}...</span>` : ''}
+                                    ${e.program ? `<span title="${e.program}">Prog: ${e.program.slice(0, 8)}...</span>` : ''}
+                                </div>
+                                ` : ''}
                             </div>
                         `).join('')}
                         ${(edges || []).length === 0 ? '<div style="color: var(--text-secondary);">No edges</div>' : ''}
@@ -1064,7 +1072,11 @@
                     amount: e.amount,
                     type: e.type,
                     signature: e.signature,
-                    block_time_utc: e.block_time_utc
+                    block_time_utc: e.block_time_utc,
+                    dex: e.dex,
+                    pool: e.pool,
+                    program: e.program,
+                    ins_index: e.ins_index
                 }));
 
             // Add funded_by edges
@@ -1134,11 +1146,19 @@
                     tooltip.html(`
                         <div style="margin-bottom: 8px;">
                             <span class="edge-type ${d.type}" style="display: inline-block; margin-bottom: 5px;">${d.type}</span>
+                            ${d.dex ? `<span style="color: #fbbf24; font-size: 11px; margin-left: 8px;">${d.dex}</span>` : ''}
                         </div>
                         <div class="stats">
                             Amount: <span>${formatNumber(d.amount)}</span><br>
                             Time: ${d.block_time_utc || 'N/A'}
+                            ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
+                        ${d.pool || d.program ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 10px;">
+                            ${d.pool ? `<div style="margin-bottom: 4px;">Pool: <span style="color: #e94560;">${d.pool.slice(0,12)}...</span></div>` : ''}
+                            ${d.program ? `<div>Program: <span style="color: #3b82f6;">${d.program.slice(0,12)}...</span></div>` : ''}
+                        </div>
+                        ` : ''}
                         <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
                             <div style="color: #aaa; font-size: 10px; margin-bottom: 3px;">Click to navigate:</div>
                             <div class="address" style="font-size: 10px;">${d.signature}</div>
