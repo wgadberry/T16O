@@ -24,9 +24,14 @@ Usage:
 import argparse
 import sys
 import time
+import random
 from datetime import datetime, timezone
 import mysql.connector
 from mysql.connector import Error
+
+# Deadlock retry settings
+MAX_DEADLOCK_RETRIES = 5
+DEADLOCK_BASE_DELAY = 0.1  # seconds
 
 # Database configuration
 DB_CONFIG = {
@@ -85,15 +90,40 @@ def get_max_guide_id(cursor) -> int:
     return row[0] if row[0] else 0
 
 
-def sync_funding_edges(cursor, conn, last_id: int, max_id: int) -> int:
+def execute_with_deadlock_retry(cursor, conn, query: str, params: tuple, max_retries: int = MAX_DEADLOCK_RETRIES) -> int:
     """
-    Sync new records to tx_funding_edge.
+    Execute a query with deadlock retry logic.
+    Returns rowcount on success.
+    """
+    for attempt in range(max_retries):
+        try:
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.rowcount
+        except mysql.connector.Error as e:
+            # Error 1213 = Deadlock found, Error 1205 = Lock wait timeout
+            if e.errno in (1213, 1205) and attempt < max_retries - 1:
+                conn.rollback()
+                # Exponential backoff with jitter
+                delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                time.sleep(delay)
+            else:
+                raise
+    return 0
+
+
+def sync_funding_edges(cursor, conn, last_id: int, max_id: int, batch_size: int = 10000) -> int:
+    """
+    Sync new records to tx_funding_edge in batches with deadlock retry.
     Returns number of rows affected.
     """
     if last_id >= max_id:
         return 0
 
-    cursor.execute("""
+    total_rows = 0
+    current_id = last_id
+
+    query = """
         INSERT INTO tx_funding_edge (
             from_address_id,
             to_address_id,
@@ -131,25 +161,30 @@ def sync_funding_edges(cursor, conn, last_id: int, max_id: int) -> int:
             transfer_count = transfer_count + VALUES(transfer_count),
             first_transfer_time = LEAST(first_transfer_time, VALUES(first_transfer_time)),
             last_transfer_time = GREATEST(last_transfer_time, VALUES(last_transfer_time))
-    """, (last_id, max_id))
-
-    rows = cursor.rowcount
-    conn.commit()
-    return rows
-
-
-def sync_token_participants(cursor, conn, last_id: int, max_id: int) -> int:
     """
-    Sync new records to tx_token_participant.
+
+    while current_id < max_id:
+        batch_end = min(current_id + batch_size, max_id)
+        rows = execute_with_deadlock_retry(cursor, conn, query, (current_id, batch_end))
+        total_rows += rows
+        current_id = batch_end
+
+    return total_rows
+
+
+def sync_token_participants(cursor, conn, last_id: int, max_id: int, batch_size: int = 10000) -> int:
+    """
+    Sync new records to tx_token_participant in batches with deadlock retry.
     Returns number of rows affected.
     """
     if last_id >= max_id:
         return 0
 
     total_rows = 0
+    current_id = last_id
 
     # Buys (swap_in - wallet receives tokens)
-    cursor.execute("""
+    query_buys = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen,
             buy_count, buy_volume, net_position
@@ -176,12 +211,10 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int) -> int:
             buy_count = buy_count + VALUES(buy_count),
             buy_volume = buy_volume + VALUES(buy_volume),
             net_position = net_position + VALUES(buy_volume)
-    """, (last_id, max_id))
-    total_rows += cursor.rowcount
-    conn.commit()
+    """
 
     # Sells (swap_out - wallet sends tokens)
-    cursor.execute("""
+    query_sells = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen,
             sell_count, sell_volume, net_position
@@ -208,12 +241,10 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int) -> int:
             sell_count = sell_count + VALUES(sell_count),
             sell_volume = sell_volume + VALUES(sell_volume),
             net_position = net_position - VALUES(sell_volume)
-    """, (last_id, max_id))
-    total_rows += cursor.rowcount
-    conn.commit()
+    """
 
     # Transfers in (spl_transfer to wallet)
-    cursor.execute("""
+    query_xfer_in = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen, transfer_in_count
         )
@@ -235,12 +266,10 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int) -> int:
             first_seen = LEAST(first_seen, VALUES(first_seen)),
             last_seen = GREATEST(last_seen, VALUES(last_seen)),
             transfer_in_count = transfer_in_count + VALUES(transfer_in_count)
-    """, (last_id, max_id))
-    total_rows += cursor.rowcount
-    conn.commit()
+    """
 
     # Transfers out (spl_transfer from wallet)
-    cursor.execute("""
+    query_xfer_out = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen, transfer_out_count
         )
@@ -262,14 +291,23 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int) -> int:
             first_seen = LEAST(first_seen, VALUES(first_seen)),
             last_seen = GREATEST(last_seen, VALUES(last_seen)),
             transfer_out_count = transfer_out_count + VALUES(transfer_out_count)
-    """, (last_id, max_id))
-    total_rows += cursor.rowcount
-    conn.commit()
+    """
+
+    while current_id < max_id:
+        batch_end = min(current_id + batch_size, max_id)
+        params = (current_id, batch_end)
+
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_buys, params)
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_sells, params)
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_xfer_in, params)
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_xfer_out, params)
+
+        current_id = batch_end
 
     return total_rows
 
 
-def run_sync(cursor, conn, table: str = 'both', verbose: bool = True) -> dict:
+def run_sync(cursor, conn, table: str = 'both', batch_size: int = 10000, verbose: bool = True) -> dict:
     """
     Run sync for specified table(s).
     Returns dict with sync statistics.
@@ -289,9 +327,9 @@ def run_sync(cursor, conn, table: str = 'both', verbose: bool = True) -> dict:
 
         if last_id < max_id:
             if verbose:
-                print(f"  funding_edge: syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} new records)")
+                print(f"  funding_edge: syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} new records, batch={batch_size:,})")
 
-            rows = sync_funding_edges(cursor, conn, last_id, max_id)
+            rows = sync_funding_edges(cursor, conn, last_id, max_id, batch_size)
             set_last_processed_id(cursor, conn, FUNDING_EDGE_KEY, max_id)
 
             stats['funding_edge']['new_id'] = max_id
@@ -309,9 +347,9 @@ def run_sync(cursor, conn, table: str = 'both', verbose: bool = True) -> dict:
 
         if last_id < max_id:
             if verbose:
-                print(f"  token_participant: syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} new records)")
+                print(f"  token_participant: syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} new records, batch={batch_size:,})")
 
-            rows = sync_token_participants(cursor, conn, last_id, max_id)
+            rows = sync_token_participants(cursor, conn, last_id, max_id, batch_size)
             set_last_processed_id(cursor, conn, TOKEN_PARTICIPANT_KEY, max_id)
 
             stats['token_participant']['new_id'] = max_id
@@ -341,6 +379,8 @@ Examples:
 
     parser.add_argument('--table', '-t', choices=['funding', 'participant', 'both'],
                         default='both', help='Which table(s) to sync')
+    parser.add_argument('--batch-size', '-b', type=int, default=10000,
+                        help='Batch size for inserts to prevent deadlocks (default: 10000)')
     parser.add_argument('--daemon', '-d', action='store_true',
                         help='Run continuously in daemon mode')
     parser.add_argument('--interval', '-i', type=int, default=60,
@@ -378,7 +418,7 @@ Examples:
                     if not args.quiet:
                         print(f"[{timestamp}] Running sync...")
 
-                    stats = run_sync(cursor, conn, args.table, verbose=not args.quiet)
+                    stats = run_sync(cursor, conn, args.table, args.batch_size, verbose=not args.quiet)
 
                     if not args.quiet:
                         total_rows = stats['funding_edge']['rows'] + stats['token_participant']['rows']
@@ -400,7 +440,7 @@ Examples:
             if not args.quiet:
                 print(f"Syncing funding tables...")
 
-            stats = run_sync(cursor, conn, args.table, verbose=not args.quiet)
+            stats = run_sync(cursor, conn, args.table, args.batch_size, verbose=not args.quiet)
 
             if not args.quiet:
                 total_rows = stats['funding_edge']['rows'] + stats['token_participant']['rows']

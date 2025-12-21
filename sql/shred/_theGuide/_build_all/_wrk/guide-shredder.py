@@ -193,6 +193,7 @@ class GuideConsumerV2:
         self.total_addresses = 0
         self.total_transfers = 0
         self.total_swaps = 0
+        self.total_activities = 0
         self.total_detail_queued = 0
         self.should_stop = False
 
@@ -249,14 +250,14 @@ class GuideConsumerV2:
         return len(signatures)
 
     def call_shred_batch(self, json_data: dict) -> tuple:
-        """Call sp_tx_shred_batch with JSON, return (tx_count, edge_count, address_count, transfer_count, swap_count)"""
+        """Call sp_tx_shred_batch with JSON, return (tx_count, edge_count, address_count, transfer_count, swap_count, activity_count)"""
         # Convert to JSON string
         json_str = json.dumps(json_data)
 
         # Call stored procedure using session variables (callproc doesn't bind OUT params properly)
-        self.cursor.execute("SET @p_tx = 0, @p_edge = 0, @p_addr = 0, @p_xfer = 0, @p_swap = 0")
-        self.cursor.execute("CALL sp_tx_shred_batch(%s, @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap)", (json_str,))
-        self.cursor.execute("SELECT @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap")
+        self.cursor.execute("SET @p_tx = 0, @p_edge = 0, @p_addr = 0, @p_xfer = 0, @p_swap = 0, @p_act = 0")
+        self.cursor.execute("CALL sp_tx_shred_batch(%s, @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap, @p_act)", (json_str,))
+        self.cursor.execute("SELECT @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap, @p_act")
         result = self.cursor.fetchone()
 
         self.db_conn.commit()
@@ -266,8 +267,9 @@ class GuideConsumerV2:
         address_count = result[2] or 0
         transfer_count = result[3] or 0
         swap_count = result[4] or 0
+        activity_count = result[5] or 0
 
-        return tx_count, edge_count, address_count, transfer_count, swap_count
+        return tx_count, edge_count, address_count, transfer_count, swap_count, activity_count
 
     def on_message(self, channel, method, properties, body):
         """Handle incoming message"""
@@ -325,12 +327,12 @@ class GuideConsumerV2:
 
             # === Phase 3: Call stored procedure to process JSON ===
             sp_start = time.time()
-            tx_count, edge_count, address_count, transfer_count, swap_count = self.call_shred_batch(decoded_response)
+            tx_count, edge_count, address_count, transfer_count, swap_count, activity_count = self.call_shred_batch(decoded_response)
             sp_time = time.time() - sp_start
 
             total_time = time.time() - start_time
 
-            print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} addrs={address_count} "
+            print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} acts={activity_count} addrs={address_count} "
                   f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
 
             if addr_queued > 0:
@@ -350,6 +352,7 @@ class GuideConsumerV2:
             self.total_addresses += address_count
             self.total_transfers += transfer_count
             self.total_swaps += swap_count
+            self.total_activities += activity_count
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
             self.message_count += 1
@@ -484,6 +487,7 @@ def main():
     print(f"  Total edges: {consumer.total_edges}")
     print(f"  Total transfers: {consumer.total_transfers}")
     print(f"  Total swaps: {consumer.total_swaps}")
+    print(f"  Total activities: {consumer.total_activities}")
     print(f"  Total addresses: {consumer.total_addresses}")
     print(f"{'='*60}")
 

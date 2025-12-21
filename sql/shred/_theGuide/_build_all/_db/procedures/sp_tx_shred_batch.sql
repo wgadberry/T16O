@@ -11,7 +11,8 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_shred_batch`(
     OUT p_edge_count INT,
     OUT p_address_count INT,
     OUT p_transfer_count INT,
-    OUT p_swap_count INT
+    OUT p_swap_count INT,
+    OUT p_activity_count INT
 )
 BEGIN
     DECLARE v_source_transfer_id TINYINT UNSIGNED;
@@ -22,6 +23,7 @@ BEGIN
     SET p_address_count = 0;
     SET p_transfer_count = 0;
     SET p_swap_count = 0;
+    SET p_activity_count = 0;
 
     
     SELECT id INTO v_source_transfer_id FROM tx_guide_source WHERE source_code = 'tx_transfer' LIMIT 1;
@@ -171,11 +173,43 @@ BEGIN
 
         UNION ALL
 
-        
+
         SELECT token_account_2_2, 'ata'
         FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
             token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2'
         )) AS jt WHERE token_account_2_2 IS NOT NULL
+
+        UNION ALL
+
+        -- Program IDs from activities
+        SELECT program_id, 'program'
+        FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
+            program_id VARCHAR(44) PATH '$.program_id'
+        )) AS jt WHERE program_id IS NOT NULL
+
+        UNION ALL
+
+        -- Outer program IDs from activities
+        SELECT outer_program_id, 'program'
+        FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id'
+        )) AS jt WHERE outer_program_id IS NOT NULL
+
+        UNION ALL
+
+        -- Program IDs from transfers
+        SELECT program_id, 'program'
+        FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
+            program_id VARCHAR(44) PATH '$.program_id'
+        )) AS jt WHERE program_id IS NOT NULL
+
+        UNION ALL
+
+        -- Outer program IDs from transfers
+        SELECT outer_program_id, 'program'
+        FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id'
+        )) AS jt WHERE outer_program_id IS NOT NULL
 
     ) AS all_addresses;
 
@@ -230,6 +264,22 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta22;
     CREATE TEMPORARY TABLE tmp_addr_ta22 AS SELECT address, address_id FROM tmp_address;
     ALTER TABLE tmp_addr_ta22 ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_program;
+    CREATE TEMPORARY TABLE tmp_addr_program AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_program ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_outer_program;
+    CREATE TEMPORARY TABLE tmp_addr_outer_program AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_outer_program ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_xfer_program;
+    CREATE TEMPORARY TABLE tmp_addr_xfer_program AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_xfer_program ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_xfer_outer_program;
+    CREATE TEMPORARY TABLE tmp_addr_xfer_outer_program AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_xfer_outer_program ADD PRIMARY KEY (address);
 
     -- =========================================================================
     -- PHASE 3: Ensure tokens exist
@@ -537,14 +587,19 @@ BEGIN
     -- PHASE 6: Insert into tx_transfer
     -- =========================================================================
     INSERT INTO tx_transfer (
-        tx_id, ins_index, transfer_type, token_id, decimals, amount,
+        tx_id, ins_index, outer_ins_index, transfer_type,
+        program_id, outer_program_id,
+        token_id, decimals, amount,
         source_address_id, source_owner_address_id,
         destination_address_id, destination_owner_address_id
     )
     SELECT
         tt.tx_id,
         jt.ins_index,
+        jt.outer_ins_index,
         jt.transfer_type,
+        prog.address_id,
+        outer_prog.address_id,
         tok.token_id,
         jt.decimals,
         jt.amount,
@@ -555,18 +610,23 @@ BEGIN
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
         NESTED PATH '$.transfers[*]' COLUMNS (
+            ins_index SMALLINT PATH '$.ins_index',
+            outer_ins_index SMALLINT PATH '$.outer_ins_index',
+            transfer_type VARCHAR(50) PATH '$.transfer_type',
+            program_id VARCHAR(44) PATH '$.program_id',
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id',
             source_owner VARCHAR(44) PATH '$.source_owner',
             destination_owner VARCHAR(44) PATH '$.destination_owner',
             source VARCHAR(44) PATH '$.source',
             destination VARCHAR(44) PATH '$.destination',
             token_address VARCHAR(44) PATH '$.token_address',
             amount BIGINT UNSIGNED PATH '$.amount',
-            decimals TINYINT UNSIGNED PATH '$.decimals',
-            transfer_type VARCHAR(50) PATH '$.transfer_type',
-            ins_index SMALLINT PATH '$.ins_index'
+            decimals TINYINT UNSIGNED PATH '$.decimals'
         )
     )) AS jt
     JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
+    LEFT JOIN tmp_addr_xfer_program prog ON prog.address = jt.program_id
+    LEFT JOIN tmp_addr_xfer_outer_program outer_prog ON outer_prog.address = jt.outer_program_id
     LEFT JOIN tmp_addr_src_ata src_ata ON src_ata.address = jt.source
     LEFT JOIN tmp_addr_src_owner src_owner ON src_owner.address = jt.source_owner
     LEFT JOIN tmp_addr_dst_ata dst_ata ON dst_ata.address = jt.destination
@@ -575,6 +635,8 @@ BEGIN
     WHERE tt.tx_id IS NOT NULL
     ON DUPLICATE KEY UPDATE
         transfer_type = VALUES(transfer_type),
+        program_id = VALUES(program_id),
+        outer_program_id = VALUES(outer_program_id),
         amount = VALUES(amount);
 
     SET p_transfer_count = ROW_COUNT();
@@ -583,7 +645,8 @@ BEGIN
     -- PHASE 8: Insert into tx_swap
     -- =========================================================================
     INSERT INTO tx_swap (
-        tx_id, ins_index, activity_type, amm_id, account_address_id,
+        tx_id, ins_index, outer_ins_index, name, activity_type,
+        program_id, outer_program_id, amm_id, account_address_id,
         token_1_id, token_2_id, amount_1, amount_2, decimals_1, decimals_2,
         token_account_1_1_address_id, token_account_1_2_address_id,
         token_account_2_1_address_id, token_account_2_2_address_id
@@ -591,7 +654,11 @@ BEGIN
     SELECT
         tt.tx_id,
         jt.ins_index,
+        jt.outer_ins_index,
+        jt.name,
         jt.activity_type,
+        prog.address_id,
+        outer_prog.address_id,
         pool.pool_id,
         acct.address_id,
         tok1.token_id,
@@ -607,7 +674,12 @@ BEGIN
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
         NESTED PATH '$.activities[*]' COLUMNS (
+            ins_index SMALLINT PATH '$.ins_index',
+            outer_ins_index SMALLINT PATH '$.outer_ins_index',
+            name VARCHAR(50) PATH '$.name',
             activity_type VARCHAR(50) PATH '$.activity_type',
+            program_id VARCHAR(44) PATH '$.program_id',
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id',
             account VARCHAR(44) PATH '$.data.account',
             amm_id VARCHAR(44) PATH '$.data.amm_id',
             token_1 VARCHAR(44) PATH '$.data.token_1',
@@ -619,13 +691,14 @@ BEGIN
             token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1',
             token_account_1_2 VARCHAR(44) PATH '$.data.token_account_1_2',
             token_account_2_1 VARCHAR(44) PATH '$.data.token_account_2_1',
-            token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2',
-            ins_index SMALLINT PATH '$.ins_index'
+            token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2'
         )
     )) AS jt
     JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
     LEFT JOIN tmp_pool pool ON pool.pool_address = jt.amm_id
     LEFT JOIN tmp_addr_acct acct ON acct.address = jt.account
+    LEFT JOIN tmp_addr_program prog ON prog.address = jt.program_id
+    LEFT JOIN tmp_addr_outer_program outer_prog ON outer_prog.address = jt.outer_program_id
     LEFT JOIN tmp_token tok1 ON tok1.token_address = jt.token_1
     LEFT JOIN tmp_token2 tok2 ON tok2.token_address = jt.token_2
     LEFT JOIN tmp_addr_ta11 ta_1_1 ON ta_1_1.address = jt.token_account_1_1
@@ -635,11 +708,54 @@ BEGIN
     WHERE jt.activity_type IN ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP')
       AND tt.tx_id IS NOT NULL
     ON DUPLICATE KEY UPDATE
+        name = VALUES(name),
         activity_type = VALUES(activity_type),
+        program_id = VALUES(program_id),
+        outer_program_id = VALUES(outer_program_id),
         amount_1 = VALUES(amount_1),
         amount_2 = VALUES(amount_2);
 
     SET p_swap_count = ROW_COUNT();
+
+    -- =========================================================================
+    -- PHASE 9: Insert into tx_activity
+    -- =========================================================================
+    INSERT INTO tx_activity (
+        tx_id, ins_index, outer_ins_index, name, activity_type,
+        program_id, outer_program_id, account_address_id
+    )
+    SELECT
+        tt.tx_id,
+        jt.ins_index,
+        jt.outer_ins_index,
+        jt.name,
+        jt.activity_type,
+        prog.address_id,
+        outer_prog.address_id,
+        acct.address_id
+    FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
+        tx_hash VARCHAR(90) PATH '$.tx_hash',
+        NESTED PATH '$.activities[*]' COLUMNS (
+            ins_index SMALLINT PATH '$.ins_index',
+            outer_ins_index SMALLINT PATH '$.outer_ins_index',
+            name VARCHAR(50) PATH '$.name',
+            activity_type VARCHAR(50) PATH '$.activity_type',
+            program_id VARCHAR(44) PATH '$.program_id',
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id',
+            account VARCHAR(44) PATH '$.data.account'
+        )
+    )) AS jt
+    JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
+    LEFT JOIN tmp_addr_program prog ON prog.address = jt.program_id
+    LEFT JOIN tmp_addr_outer_program outer_prog ON outer_prog.address = jt.outer_program_id
+    LEFT JOIN tmp_addr_acct acct ON acct.address = jt.account
+    WHERE tt.tx_id IS NOT NULL
+      AND jt.activity_type IS NOT NULL
+    ON DUPLICATE KEY UPDATE
+        name = VALUES(name),
+        activity_type = VALUES(activity_type);
+
+    SET p_activity_count = ROW_COUNT();
 
     -- =========================================================================
     -- CLEANUP
@@ -655,6 +771,10 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta12;
     DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta21;
     DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta22;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_program;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_outer_program;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_xfer_program;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_xfer_outer_program;
     DROP TEMPORARY TABLE IF EXISTS tmp_token;
     DROP TEMPORARY TABLE IF EXISTS tmp_token2;
     DROP TEMPORARY TABLE IF EXISTS tmp_pool;
