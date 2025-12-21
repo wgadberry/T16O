@@ -2,21 +2,21 @@
 """
 Guide Detailer - Transaction detail enrichment daemon
 
-Consumes signature batches from RabbitMQ, fetches decoded AND detail data
-from Solscan in parallel, and calls sp_tx_detail_batch for DB processing.
+Consumes signature batches from RabbitMQ and fetches detail data from Solscan
+to populate balance change tables via sp_tx_detail_batch.
 
 Pipeline position:
     guide-shredder.py → tx.detail.transactions queue
                              ↓
                     guide-detailer.py (this script)
                              ↓
-              sp_tx_detail_batch → tx_detail (balances, etc.)
+              sp_tx_detail_batch → tx_sol_balance_change, tx_token_balance_change
 
 Flow:
 1. Consume batch of signatures from RabbitMQ queue 'tx.detail.transactions'
 2. Pre-filter: skip signatures not in tx table (must exist from shredder)
-3. Call Solscan /transaction/actions/multi AND /transaction/detail/multi in PARALLEL
-4. Pass combined JSON to sp_tx_detail_batch (DB handles all parsing)
+3. Call Solscan /transaction/detail/multi for balance change data
+4. Pass JSON to sp_tx_detail_batch (DB handles all parsing)
 5. ACK message on success
 
 Usage:
@@ -104,17 +104,9 @@ async def fetch_endpoint(session: aiohttp.ClientSession, endpoint: str, signatur
     raise Exception(f"Failed after {max_retries} retries")
 
 
-async def fetch_decoded_and_detail_parallel(session: aiohttp.ClientSession, signatures: list) -> tuple:
-    """Fetch both decoded and detail data in parallel"""
-    decoded_task = asyncio.create_task(
-        fetch_endpoint(session, "transaction/actions/multi", signatures)
-    )
-    detail_task = asyncio.create_task(
-        fetch_endpoint(session, "transaction/detail/multi", signatures)
-    )
-
-    decoded_response, detail_response = await asyncio.gather(decoded_task, detail_task)
-    return decoded_response, detail_response
+async def fetch_detail(session: aiohttp.ClientSession, signatures: list) -> dict:
+    """Fetch detail data for transactions (sp_tx_detail_batch only uses detail, not decoded)"""
+    return await fetch_endpoint(session, "transaction/detail/multi", signatures)
 
 
 async def create_api_session() -> aiohttp.ClientSession:
@@ -142,10 +134,9 @@ def sanitize_large_ints(obj):
     return obj
 
 
-def combine_responses(decoded_response: dict, detail_response: dict) -> dict:
-    """Combine decoded and detail responses into unified format"""
+def wrap_detail_response(detail_response: dict) -> dict:
+    """Wrap detail response in expected format for sp_tx_detail_batch"""
     return {
-        "decoded": sanitize_large_ints(decoded_response),
         "detail": sanitize_large_ints(detail_response)
     }
 
@@ -239,7 +230,7 @@ class GuideDetailerConsumer:
             print(f"  [>] Processing detail batch of {len(signatures)} signatures...")
 
             if self.dry_run:
-                print(f"      DRY RUN - would fetch decoded+detail:")
+                print(f"      DRY RUN - would fetch detail:")
                 for sig in signatures[:3]:
                     print(f"        {sig[:20]}...")
                 if len(signatures) > 3:
@@ -262,32 +253,27 @@ class GuideDetailerConsumer:
                 self.message_count += 1
                 return
 
-            # === Phase 1: Fetch decoded AND detail data in PARALLEL ===
+            # === Phase 1: Fetch detail data from Solscan ===
             start_time = time.time()
 
             # Run async fetch in event loop with lazy session creation
             async def fetch_with_session(sigs):
                 session = await self.get_api_session()
-                return await fetch_decoded_and_detail_parallel(session, sigs)
+                return await fetch_detail(session, sigs)
 
-            decoded_response, detail_response = self.loop.run_until_complete(
+            detail_response = self.loop.run_until_complete(
                 fetch_with_session(signatures)
             )
 
             fetch_time = time.time() - start_time
-
-            if not decoded_response.get('success'):
-                print(f"  [!] Decoded API returned unsuccessful response")
-                channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-                return
 
             if not detail_response.get('success'):
                 print(f"  [!] Detail API returned unsuccessful response")
                 channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                 return
 
-            # === Phase 2: Combine responses ===
-            combined = combine_responses(decoded_response, detail_response)
+            # === Phase 2: Wrap response for stored procedure ===
+            combined = wrap_detail_response(detail_response)
 
             # === Phase 3: Call stored procedure to process JSON ===
             sp_start = time.time()
@@ -375,7 +361,7 @@ def main():
         print("Install with: pip install aiohttp")
         return 1
 
-    print(f"Guide Detailer (Decoded + Detail enrichment)")
+    print(f"Guide Detailer (Balance change enrichment)")
     print(f"{'='*60}")
     print(f"RabbitMQ: {args.rabbitmq_host}:{args.rabbitmq_port}")
     print(f"Queue In:  {RABBITMQ_QUEUE_IN}")
