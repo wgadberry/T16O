@@ -596,50 +596,108 @@
         .nav-compact .nav-item:hover {
             border-color: var(--accent);
         }
+
+        /* Funder Filter Panel */
+        .funder-panel { background: var(--bg-input); border-radius: 8px; padding: 12px; margin: 10px; max-height: 300px; overflow-y: auto; }
+        .funder-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        .funder-panel-header h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin: 0; }
+        .funder-clear-btn { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .funder-clear-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .funder-clear-btn.hidden { display: none; }
+        .funder-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 6px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+        .funder-item:hover { border-color: var(--accent); background: rgba(233, 69, 96, 0.1); }
+        .funder-item.active { border-color: var(--accent); background: rgba(233, 69, 96, 0.2); }
+        .funder-dot { width: 10px; height: 10px; border-radius: 50%; background: #a855f7; flex-shrink: 0; }
+        .funder-address { font-family: monospace; font-size: 11px; color: var(--accent); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .funder-count { background: var(--bg-input); padding: 2px 8px; border-radius: 10px; font-size: 10px; color: var(--text-secondary); }
+        .funder-empty { color: var(--text-secondary); font-size: 12px; text-align: center; padding: 20px; }
+        .bubble-map-layout { display: flex; gap: 0; }
+        .bubble-map-main { flex: 1; min-width: 0; }
+        .bubble-map-sidebar { width: 280px; flex-shrink: 0; background: var(--bg-card); border-left: 1px solid var(--border); }
+        @media (max-width: 900px) { .bubble-map-layout { flex-direction: column; } .bubble-map-sidebar { width: 100%; border-left: none; border-top: 1px solid var(--border); } }
+        .filter-active-badge { background: var(--accent); color: white; padding: 2px 8px; border-radius: 10px; font-size: 10px; margin-left: 10px; }
+
+        /* Main Layout with Left Sidebar */
+        .main-layout { display: flex; gap: 15px; }
+        .left-sidebar { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 15px; }
+        .main-content { flex: 1; min-width: 0; }
+        @media (max-width: 1100px) { .main-layout { flex-direction: column; } .left-sidebar { width: 100%; } }
+        
+        /* Compact Query Form for Sidebar */
+        .query-form-compact { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .query-form-compact .form-group { margin-bottom: 10px; }
+        .query-form-compact .form-group:last-child { margin-bottom: 0; }
+        .query-form-compact input, .query-form-compact select { width: 100%; padding: 8px 10px; font-size: 12px; }
+        .query-form-compact .btn { width: 100%; padding: 10px; font-size: 12px; }
+        
+        /* Token Info Sidebar Card */
+        .token-sidebar { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .token-sidebar .symbol { font-size: 20px; font-weight: bold; color: var(--accent); margin-bottom: 8px; }
+        .token-sidebar .info-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+        .token-sidebar .info-row:last-child { border-bottom: none; }
+        .token-sidebar .info-label { color: var(--text-secondary); }
+        .token-sidebar .info-value { color: var(--text-primary); font-family: monospace; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+        
+        /* Current TX Sidebar Card */
+        .tx-sidebar { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .tx-sidebar h4 { font-size: 11px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 10px; }
+        .tx-sidebar .sig { font-family: monospace; font-size: 10px; color: var(--accent); word-break: break-all; margin-bottom: 8px; }
+        .tx-sidebar .time { font-size: 11px; color: var(--text-secondary); }
+        
+        /* Fetch Status Toast */
+        .fetch-toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg-card); border: 1px solid var(--accent); padding: 15px 20px; border-radius: 8px; z-index: 2000; display: none; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        .fetch-toast.show { display: block; }
+        .fetch-toast.success { border-color: var(--success); }
+        .fetch-toast.error { border-color: #ef4444; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>BMap Token State Viewer</h1>
-
-        <!-- Query Form -->
-        <div class="query-form">
-            <div class="form-group">
-                <label>Token Symbol</label>
-                <input type="text" id="token_symbol" placeholder="e.g. BONK, soltit">
+        <h1 style="margin-bottom: 15px;">BMap Token State Viewer</h1>
+        
+        <div class="main-layout">
+            <!-- Left Sidebar -->
+            <div class="left-sidebar">
+                <!-- Query Form -->
+                <div class="query-form-compact">
+                    <div class="form-group">
+                        <label>Token Symbol</label>
+                        <input type="text" id="token_symbol" placeholder="e.g. BONK">
+                    </div>
+                    <div class="form-group">
+                        <label>Mint Address</label>
+                        <input type="text" id="mint_address" placeholder="Mint address...">
+                    </div>
+                    <div class="form-group">
+                        <label>TX Window</label>
+                        <select id="tx_limit" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); padding: 8px 10px; border-radius: 5px; font-size: 12px; width: 100%;">
+                            <option value="10" selected>10 (5+5)</option>
+                            <option value="20">20 (10+10)</option>
+                            <option value="50">50 (25+25)</option>
+                            <option value="100">100 (50+50)</option>
+                        </select>
+                    </div>
+                    <input type="hidden" id="token_name">
+                    <input type="hidden" id="signature">
+                    <input type="hidden" id="block_time">
+                    <button class="btn" onclick="fetchData()">Load Token</button>
+                </div>
+                
+                <!-- Token Info (populated dynamically) -->
+                <div id="sidebar-token-info"></div>
+                
+                <!-- Current TX Info (populated dynamically) -->
+                <div id="sidebar-tx-info"></div>
             </div>
-            <div class="form-group">
-                <label>Token Name</label>
-                <input type="text" id="token_name" placeholder="e.g. Bonk">
-            </div>
-            <div class="form-group">
-                <label>Mint Address</label>
-                <input type="text" id="mint_address" placeholder="e.g. DezXAZ...">
-            </div>
-            <div class="form-group">
-                <label>Signature</label>
-                <input type="text" id="signature" placeholder="e.g. 5KtP...">
-            </div>
-            <div class="form-group">
-                <label>Block Time (Unix)</label>
-                <input type="number" id="block_time" placeholder="e.g. 1703000000">
-            </div>
-            <div class="form-group">
-                <label>TX Window</label>
-                <select id="tx_limit" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); padding: 10px 15px; border-radius: 5px; font-size: 14px;">
-                    <option value="10" selected>10 (5+5)</option>
-                    <option value="20">20 (10+10)</option>
-                    <option value="50">50 (25+25)</option>
-                    <option value="100">100 (50+50)</option>
-                </select>
-            </div>
-            <div class="form-group" style="justify-content: flex-end;">
-                <button class="btn" onclick="fetchData()">Load Token State</button>
+            
+            <!-- Main Content -->
+            <div class="main-content">
+                <div id="results"></div>
             </div>
         </div>
-
-        <!-- Results Container -->
-        <div id="results"></div>
+        
+        <!-- Fetch Toast -->
+        <div id="fetch-toast" class="fetch-toast"></div>
     </div>
 
     <script>
@@ -705,28 +763,37 @@
 
             const { txs, token, nodes, edges } = data.result;
 
-            let html = '';
-
-            // Token Info (compact bar)
-            if (token) {
-                html += `
-                    <div class="token-info">
+            // Update sidebar token info
+            const sidebarToken = document.getElementById('sidebar-token-info');
+            if (sidebarToken && token) {
+                sidebarToken.innerHTML = `
+                    <div class="token-sidebar">
                         <div class="symbol">${token.symbol || 'Unknown'}</div>
-                        <div class="mint">${token.mint}</div>
+                        <div class="info-row">
+                            <span class="info-label">Mint</span>
+                            <span class="info-value" title="${token.mint}">${token.mint.slice(0,8)}...${token.mint.slice(-6)}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Holders</span>
+                            <span class="info-value">${(nodes || []).length}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Edges</span>
+                            <span class="info-value">${(edges || []).length}</span>
+                        </div>
                     </div>
                 `;
             }
 
-            // Current TX Bar (compact)
-            if (txs) {
-                html += `
-                    <div class="current-tx-bar">
-                        <div class="sig-section">
-                            <strong style="color: var(--text-secondary);">Current TX:</strong>
-                            <span class="signature" title="${txs.signature}">${txs.signature}</span>
-                        </div>
+            // Update sidebar TX info
+            const sidebarTx = document.getElementById('sidebar-tx-info');
+            if (sidebarTx && txs) {
+                sidebarTx.innerHTML = `
+                    <div class="tx-sidebar">
+                        <h4>Current Transaction</h4>
+                        <div class="sig">${txs.signature}</div>
                         <div class="time">${txs.block_time_utc}</div>
-                        <div class="edge-types">
+                        <div class="edge-types" style="margin-top: 8px; justify-content: flex-start;">
                             ${(txs.edge_types || []).map(t =>
                                 `<span class="edge-type ${t}">${t}</span>`
                             ).join('')}
@@ -734,6 +801,8 @@
                     </div>
                 `;
             }
+
+            let html = '';
 
             // Timeline Slider (visible if we have timeline data)
             const timelineVisible = timelineData.minTime > 0 ? 'block' : 'none';
@@ -765,17 +834,30 @@
                 </div>
             `;
 
-            // Bubble Map
+            // Bubble Map with Funder Sidebar
             html += `
                 <div class="bubble-map-container">
                     <div class="bubble-map-header">
-                        <h3>Bubble Map</h3>
+                        <h3>Bubble Map<span id="filter-badge" class="filter-active-badge" style="display:none;">Filtered</span></h3>
                         <div class="bubble-map-controls">
                             <button onclick="resetZoom()">Reset Zoom</button>
                             <button onclick="toggleLabels()">Toggle Labels</button>
                         </div>
                     </div>
-                    <div id="bubble-map"></div>
+                    <div class="bubble-map-layout">
+                        <div class="bubble-map-main">
+                            <div id="bubble-map"></div>
+                        </div>
+                        <div class="bubble-map-sidebar">
+                            <div class="funder-panel">
+                                <div class="funder-panel-header">
+                                    <h4>Funders</h4>
+                                    <button class="funder-clear-btn hidden" id="funder-clear-btn" onclick="clearFunderFilter()">Clear</button>
+                                </div>
+                                <div id="funder-list"></div>
+                            </div>
+                        </div>
+                    </div>
                     <div class="legend">
                         <div class="legend-item"><div class="legend-dot" style="background: #e94560;"></div> High Balance</div>
                         <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div> Medium Balance</div>
@@ -890,8 +972,13 @@
 
             resultsDiv.innerHTML = html;
 
-            // Render bubble map after DOM is ready
-            setTimeout(() => renderBubbleMap(nodes, edges), 100);
+            // Store nodes/edges and render bubble map
+            allNodes = nodes;
+            allEdges = edges;
+            setTimeout(() => {
+                renderBubbleMap(nodes, edges);
+                renderFunderList(nodes);
+            }, 100);
 
             // Initialize/update timeline
             if (token) {
@@ -913,6 +1000,9 @@
         let zoom = null;
         let showLabels = true;
         let currentTransform = d3.zoomIdentity; // Preserve zoom state
+        let activeFunder = null; // Currently selected funder for filtering
+        let allNodes = null; // Store all nodes for filtering
+        let allEdges = null; // Store all edges for filtering
 
         function renderBubbleMap(nodes, edges) {
             const container = document.getElementById('bubble-map');
@@ -1092,12 +1182,20 @@
                             SOL: <span>${d.sol_balance.toFixed(4)}</span>
                             ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
                         </div>
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
+                            Click to fetch wallet transactions
+                        </div>
                     `)
                     .style('left', (event.pageX + 10) + 'px')
                     .style('top', (event.pageY - 10) + 'px');
                 })
                 .on('mouseout', () => {
                     tooltip.transition().duration(500).style('opacity', 0);
+                })
+                .on('click', (event, d) => {
+                    event.stopPropagation();
+                    tooltip.style('opacity', 0);
+                    fetchWalletTransactions(d.id);
                 });
 
             // Create labels
@@ -1160,6 +1258,120 @@
         function toggleLabels() {
             showLabels = !showLabels;
             d3.selectAll('.node-label').style('display', showLabels ? 'block' : 'none');
+        }
+
+        // Extract and render distinct funders
+        function renderFunderList(nodes) {
+            const funderList = document.getElementById('funder-list');
+            if (!funderList || !nodes) return;
+
+            // Count funded wallets per funder
+            const funderCounts = new Map();
+            nodes.forEach(n => {
+                if (n.funded_by) {
+                    funderCounts.set(n.funded_by, (funderCounts.get(n.funded_by) || 0) + 1);
+                }
+            });
+
+            if (funderCounts.size === 0) {
+                funderList.innerHTML = '<div class="funder-empty">No funding relationships found</div>';
+                return;
+            }
+
+            // Sort by count descending
+            const sortedFunders = [...funderCounts.entries()].sort((a, b) => b[1] - a[1]);
+
+            let html = '';
+            sortedFunders.forEach(([funder, count]) => {
+                const isActive = activeFunder === funder;
+                html += `
+                    <div class="funder-item ${isActive ? 'active' : ''}" 
+                         onclick="filterByFunder('${funder}')"
+                         title="${funder}">
+                        <div class="funder-dot"></div>
+                        <div class="funder-address">${funder.slice(0, 8)}...${funder.slice(-6)}</div>
+                        <div class="funder-count">${count}</div>
+                    </div>
+                `;
+            });
+
+            funderList.innerHTML = html;
+        }
+
+        // Filter map by selected funder
+        function filterByFunder(funderAddress) {
+            if (activeFunder === funderAddress) {
+                // Toggle off if already selected
+                clearFunderFilter();
+                return;
+            }
+
+            activeFunder = funderAddress;
+
+            // Get nodes funded by this address (and the funder itself if present)
+            const fundedNodes = allNodes.filter(n => 
+                n.funded_by === funderAddress || n.address === funderAddress
+            );
+
+            // Get addresses of filtered nodes
+            const filteredAddresses = new Set(fundedNodes.map(n => n.address));
+
+            // Get edges involving these nodes
+            const filteredEdges = allEdges.filter(e => 
+                filteredAddresses.has(e.source) || filteredAddresses.has(e.target)
+            );
+
+            // Re-render bubble map with filtered data
+            renderBubbleMap(fundedNodes, filteredEdges);
+            renderFunderList(allNodes); // Update UI to show active state
+
+            // Show filter badge and clear button
+            document.getElementById('filter-badge').style.display = 'inline';
+            document.getElementById('funder-clear-btn').classList.remove('hidden');
+        }
+
+        // Clear funder filter
+        function clearFunderFilter() {
+            activeFunder = null;
+            renderBubbleMap(allNodes, allEdges);
+            renderFunderList(allNodes);
+
+            // Hide filter badge and clear button
+            document.getElementById('filter-badge').style.display = 'none';
+            document.getElementById('funder-clear-btn').classList.add('hidden');
+        }
+
+        // Fetch wallet transactions via guide-producer
+        async function fetchWalletTransactions(address) {
+            showToast(`Fetching transactions for ${address.slice(0,8)}...`, 'pending');
+            
+            try {
+                const response = await fetch('/api/fetch-wallet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast(`Queued ${result.message || 'wallet fetch'}`, 'success');
+                } else {
+                    showToast(`Error: ${result.error || 'Unknown error'}`, 'error');
+                }
+            } catch (error) {
+                showToast(`Error: ${error.message}`, 'error');
+            }
+        }
+        
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('fetch-toast');
+            toast.textContent = message;
+            toast.className = 'fetch-toast show ' + type;
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 4000);
         }
 
         function formatNumber(num) {

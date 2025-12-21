@@ -10,6 +10,14 @@ from flask_cors import CORS
 import mysql.connector
 import json
 import os
+import subprocess
+import threading
+
+# Path to guide-producer.py
+GUIDE_PRODUCER_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__),
+    '..', '..', '..', '_wrk', 'guide-producer.py'
+))
 
 app = Flask(__name__)
 CORS(app)
@@ -139,6 +147,58 @@ def get_timerange():
         return jsonify({'error': f'Database error: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'error': f'Error: {str(e)}'}), 500
+
+@app.route('/api/fetch-wallet', methods=['POST'])
+def fetch_wallet():
+    """
+    Trigger guide-producer.py to fetch transactions for a wallet address
+    POST body: { "address": "<solana_address>" }
+    """
+    try:
+        data = request.get_json()
+        if not data or 'address' not in data:
+            return jsonify({'success': False, 'error': 'address required'}), 400
+        
+        address = data['address']
+        
+        # Validate address format (basic check - 32-44 chars, base58)
+        if not address or len(address) < 32 or len(address) > 44:
+            return jsonify({'success': False, 'error': 'Invalid address format'}), 400
+        
+        # Log the path for debugging
+        print(f"[fetch-wallet] Address: {address}")
+        print(f"[fetch-wallet] Producer path: {GUIDE_PRODUCER_PATH}")
+        print(f"[fetch-wallet] Path exists: {os.path.exists(GUIDE_PRODUCER_PATH)}")
+        
+        if not os.path.exists(GUIDE_PRODUCER_PATH):
+            return jsonify({'success': False, 'error': f'guide-producer.py not found at {GUIDE_PRODUCER_PATH}'}), 500
+        
+        # Run guide-producer in background thread
+        def run_producer():
+            try:
+                print(f"[fetch-wallet] Starting guide-producer for {address}")
+                result = subprocess.run(
+                    ['python', GUIDE_PRODUCER_PATH, address],
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 min timeout
+                )
+                print(f"[fetch-wallet] Producer stdout: {result.stdout[:500] if result.stdout else 'none'}")
+                if result.stderr:
+                    print(f"[fetch-wallet] Producer stderr: {result.stderr[:500]}")
+            except Exception as e:
+                print(f"[fetch-wallet] guide-producer error: {e}")
+        
+        thread = threading.Thread(target=run_producer, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Fetching transactions for {address[:8]}...{address[-6:]}'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
     print("=" * 60)
