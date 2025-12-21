@@ -9,16 +9,19 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_shred_batch`(
     IN p_json LONGTEXT,
     OUT p_tx_count INT,
     OUT p_edge_count INT,
-    OUT p_address_count INT
+    OUT p_address_count INT,
+    OUT p_transfer_count INT,
+    OUT p_swap_count INT
 )
 BEGIN
     DECLARE v_source_transfer_id TINYINT UNSIGNED;
     DECLARE v_source_swap_id TINYINT UNSIGNED;
 
-    
     SET p_tx_count = 0;
     SET p_edge_count = 0;
     SET p_address_count = 0;
+    SET p_transfer_count = 0;
+    SET p_swap_count = 0;
 
     
     SELECT id INTO v_source_transfer_id FROM tx_guide_source WHERE source_code = 'tx_transfer' LIMIT 1;
@@ -186,14 +189,51 @@ BEGIN
     SELECT address, address_type FROM tmp_address
     ON DUPLICATE KEY UPDATE id = id;
 
-    
+    -- Lookup address IDs
     UPDATE tmp_address ta
     JOIN tx_address a ON a.address = ta.address
     SET ta.address_id = a.id;
 
-    
-    
-    
+    -- Create copies for multiple joins (MySQL can't reopen same temp table)
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_src_ata;
+    CREATE TEMPORARY TABLE tmp_addr_src_ata AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_src_ata ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_src_owner;
+    CREATE TEMPORARY TABLE tmp_addr_src_owner AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_src_owner ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_dst_ata;
+    CREATE TEMPORARY TABLE tmp_addr_dst_ata AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_dst_ata ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_dst_owner;
+    CREATE TEMPORARY TABLE tmp_addr_dst_owner AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_dst_owner ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_acct;
+    CREATE TEMPORARY TABLE tmp_addr_acct AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_acct ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta11;
+    CREATE TEMPORARY TABLE tmp_addr_ta11 AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_ta11 ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta12;
+    CREATE TEMPORARY TABLE tmp_addr_ta12 AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_ta12 ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta21;
+    CREATE TEMPORARY TABLE tmp_addr_ta21 AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_ta21 ADD PRIMARY KEY (address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta22;
+    CREATE TEMPORARY TABLE tmp_addr_ta22 AS SELECT address, address_id FROM tmp_address;
+    ALTER TABLE tmp_addr_ta22 ADD PRIMARY KEY (address);
+
+    -- =========================================================================
+    -- PHASE 3: Ensure tokens exist
+    -- =========================================================================
     DROP TEMPORARY TABLE IF EXISTS tmp_token;
     CREATE TEMPORARY TABLE tmp_token (
         token_address VARCHAR(44) NOT NULL,
@@ -241,14 +281,56 @@ BEGIN
     WHERE address_id IS NOT NULL
     ON DUPLICATE KEY UPDATE id = id;
 
-    
+    -- Lookup token IDs
     UPDATE tmp_token tt
     JOIN tx_token t ON t.mint_address_id = tt.address_id
     SET tt.token_id = t.id;
 
-    
-    
-    
+    -- Create token copies for swap join
+    DROP TEMPORARY TABLE IF EXISTS tmp_token2;
+    CREATE TEMPORARY TABLE tmp_token2 AS SELECT token_address, token_id FROM tmp_token;
+    ALTER TABLE tmp_token2 ADD PRIMARY KEY (token_address);
+
+    -- =========================================================================
+    -- PHASE 4: Ensure pools exist in tx_pool
+    -- =========================================================================
+    DROP TEMPORARY TABLE IF EXISTS tmp_pool;
+    CREATE TEMPORARY TABLE tmp_pool (
+        pool_address VARCHAR(44) NOT NULL,
+        address_id INT UNSIGNED,
+        pool_id BIGINT UNSIGNED,
+        PRIMARY KEY (pool_address)
+    ) ENGINE=MEMORY;
+
+    -- Collect pool addresses from swap activities
+    INSERT IGNORE INTO tmp_pool (pool_address)
+    SELECT DISTINCT amm_id
+    FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
+        activity_type VARCHAR(50) PATH '$.activity_type',
+        amm_id VARCHAR(44) PATH '$.data.amm_id'
+    )) AS jt
+    WHERE activity_type IN ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP')
+      AND amm_id IS NOT NULL;
+
+    -- Lookup address IDs for pools
+    UPDATE tmp_pool tp
+    JOIN tmp_address ta ON ta.address = tp.pool_address
+    SET tp.address_id = ta.address_id;
+
+    -- Ensure pools exist in tx_pool
+    INSERT INTO tx_pool (pool_address_id)
+    SELECT address_id FROM tmp_pool
+    WHERE address_id IS NOT NULL
+    ON DUPLICATE KEY UPDATE id = id;
+
+    -- Lookup pool IDs
+    UPDATE tmp_pool tp
+    JOIN tx_pool p ON p.pool_address_id = tp.address_id
+    SET tp.pool_id = p.id;
+
+    -- =========================================================================
+    -- PHASE 5: Insert transactions
+    -- =========================================================================
     INSERT INTO tx (signature, block_id, block_time, block_time_utc, fee, priority_fee, tx_state)
     SELECT
         tx_hash,
@@ -451,12 +533,131 @@ BEGIN
 
     SET p_edge_count = ROW_COUNT();
 
-    
-    
-    
+    -- =========================================================================
+    -- PHASE 6: Insert into tx_transfer
+    -- =========================================================================
+    INSERT INTO tx_transfer (
+        tx_id, ins_index, transfer_type, token_id, decimals, amount,
+        source_address_id, source_owner_address_id,
+        destination_address_id, destination_owner_address_id
+    )
+    SELECT
+        tt.tx_id,
+        jt.ins_index,
+        jt.transfer_type,
+        tok.token_id,
+        jt.decimals,
+        jt.amount,
+        src_ata.address_id,
+        src_owner.address_id,
+        dst_ata.address_id,
+        dst_owner.address_id
+    FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
+        tx_hash VARCHAR(90) PATH '$.tx_hash',
+        NESTED PATH '$.transfers[*]' COLUMNS (
+            source_owner VARCHAR(44) PATH '$.source_owner',
+            destination_owner VARCHAR(44) PATH '$.destination_owner',
+            source VARCHAR(44) PATH '$.source',
+            destination VARCHAR(44) PATH '$.destination',
+            token_address VARCHAR(44) PATH '$.token_address',
+            amount BIGINT UNSIGNED PATH '$.amount',
+            decimals TINYINT UNSIGNED PATH '$.decimals',
+            transfer_type VARCHAR(50) PATH '$.transfer_type',
+            ins_index SMALLINT PATH '$.ins_index'
+        )
+    )) AS jt
+    JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
+    LEFT JOIN tmp_addr_src_ata src_ata ON src_ata.address = jt.source
+    LEFT JOIN tmp_addr_src_owner src_owner ON src_owner.address = jt.source_owner
+    LEFT JOIN tmp_addr_dst_ata dst_ata ON dst_ata.address = jt.destination
+    LEFT JOIN tmp_addr_dst_owner dst_owner ON dst_owner.address = jt.destination_owner
+    LEFT JOIN tmp_token tok ON tok.token_address = jt.token_address
+    WHERE tt.tx_id IS NOT NULL
+    ON DUPLICATE KEY UPDATE
+        transfer_type = VALUES(transfer_type),
+        amount = VALUES(amount);
+
+    SET p_transfer_count = ROW_COUNT();
+
+    -- =========================================================================
+    -- PHASE 8: Insert into tx_swap
+    -- =========================================================================
+    INSERT INTO tx_swap (
+        tx_id, ins_index, activity_type, amm_id, account_address_id,
+        token_1_id, token_2_id, amount_1, amount_2, decimals_1, decimals_2,
+        token_account_1_1_address_id, token_account_1_2_address_id,
+        token_account_2_1_address_id, token_account_2_2_address_id
+    )
+    SELECT
+        tt.tx_id,
+        jt.ins_index,
+        jt.activity_type,
+        pool.pool_id,
+        acct.address_id,
+        tok1.token_id,
+        tok2.token_id,
+        jt.amount_1,
+        jt.amount_2,
+        jt.token_decimal_1,
+        jt.token_decimal_2,
+        ta_1_1.address_id,
+        ta_1_2.address_id,
+        ta_2_1.address_id,
+        ta_2_2.address_id
+    FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
+        tx_hash VARCHAR(90) PATH '$.tx_hash',
+        NESTED PATH '$.activities[*]' COLUMNS (
+            activity_type VARCHAR(50) PATH '$.activity_type',
+            account VARCHAR(44) PATH '$.data.account',
+            amm_id VARCHAR(44) PATH '$.data.amm_id',
+            token_1 VARCHAR(44) PATH '$.data.token_1',
+            token_2 VARCHAR(44) PATH '$.data.token_2',
+            amount_1 BIGINT UNSIGNED PATH '$.data.amount_1',
+            amount_2 BIGINT UNSIGNED PATH '$.data.amount_2',
+            token_decimal_1 TINYINT UNSIGNED PATH '$.data.token_decimal_1',
+            token_decimal_2 TINYINT UNSIGNED PATH '$.data.token_decimal_2',
+            token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1',
+            token_account_1_2 VARCHAR(44) PATH '$.data.token_account_1_2',
+            token_account_2_1 VARCHAR(44) PATH '$.data.token_account_2_1',
+            token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2',
+            ins_index SMALLINT PATH '$.ins_index'
+        )
+    )) AS jt
+    JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
+    LEFT JOIN tmp_pool pool ON pool.pool_address = jt.amm_id
+    LEFT JOIN tmp_addr_acct acct ON acct.address = jt.account
+    LEFT JOIN tmp_token tok1 ON tok1.token_address = jt.token_1
+    LEFT JOIN tmp_token2 tok2 ON tok2.token_address = jt.token_2
+    LEFT JOIN tmp_addr_ta11 ta_1_1 ON ta_1_1.address = jt.token_account_1_1
+    LEFT JOIN tmp_addr_ta12 ta_1_2 ON ta_1_2.address = jt.token_account_1_2
+    LEFT JOIN tmp_addr_ta21 ta_2_1 ON ta_2_1.address = jt.token_account_2_1
+    LEFT JOIN tmp_addr_ta22 ta_2_2 ON ta_2_2.address = jt.token_account_2_2
+    WHERE jt.activity_type IN ('ACTIVITY_TOKEN_SWAP', 'ACTIVITY_AGG_TOKEN_SWAP')
+      AND tt.tx_id IS NOT NULL
+    ON DUPLICATE KEY UPDATE
+        activity_type = VALUES(activity_type),
+        amount_1 = VALUES(amount_1),
+        amount_2 = VALUES(amount_2);
+
+    SET p_swap_count = ROW_COUNT();
+
+    -- =========================================================================
+    -- CLEANUP
+    -- =========================================================================
     DROP TEMPORARY TABLE IF EXISTS tmp_tx;
     DROP TEMPORARY TABLE IF EXISTS tmp_address;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_src_ata;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_src_owner;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_dst_ata;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_dst_owner;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_acct;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta11;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta12;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta21;
+    DROP TEMPORARY TABLE IF EXISTS tmp_addr_ta22;
     DROP TEMPORARY TABLE IF EXISTS tmp_token;
+    DROP TEMPORARY TABLE IF EXISTS tmp_token2;
+    DROP TEMPORARY TABLE IF EXISTS tmp_pool;
     DROP TEMPORARY TABLE IF EXISTS tmp_edge;
 
 END;;

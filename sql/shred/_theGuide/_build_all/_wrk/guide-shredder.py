@@ -98,25 +98,32 @@ def create_solscan_session() -> requests.Session:
 # Pre-filter: Check for existing signatures before Solscan call
 # =============================================================================
 
-def filter_existing_signatures(cursor, signatures: list) -> list:
+def filter_existing_signatures(cursor, signatures: list) -> tuple:
     """
-    Filter out signatures that already exist in tx table.
-    Returns only signatures that need to be fetched from Solscan.
+    Filter signatures based on existence and detail status.
+    Returns tuple: (new_signatures, need_detail_signatures)
+      - new_signatures: don't exist in tx table, need full shredding
+      - need_detail_signatures: exist but tx_state != 'detailed', need detail enrichment
     """
     if not signatures:
-        return []
+        return [], []
 
     placeholders = ','.join(['%s'] * len(signatures))
     cursor.execute(f"""
-        SELECT signature FROM tx WHERE signature IN ({placeholders})
+        SELECT signature, tx_state FROM tx WHERE signature IN ({placeholders})
     """, signatures)
 
-    existing = {row[0] for row in cursor.fetchall()}
+    existing = {}
+    for row in cursor.fetchall():
+        existing[row[0]] = row[1]  # signature -> tx_state
 
     if not existing:
-        return signatures
+        return signatures, []
 
-    return [sig for sig in signatures if sig not in existing]
+    new_sigs = [sig for sig in signatures if sig not in existing]
+    need_detail = [sig for sig, state in existing.items() if state != 'detailed']
+
+    return new_sigs, need_detail
 
 
 # =============================================================================
@@ -184,6 +191,8 @@ class GuideConsumerV2:
         self.total_tx = 0
         self.total_edges = 0
         self.total_addresses = 0
+        self.total_transfers = 0
+        self.total_swaps = 0
         self.total_detail_queued = 0
         self.should_stop = False
 
@@ -240,14 +249,14 @@ class GuideConsumerV2:
         return len(signatures)
 
     def call_shred_batch(self, json_data: dict) -> tuple:
-        """Call sp_tx_shred_batch with JSON, return (tx_count, edge_count, address_count)"""
+        """Call sp_tx_shred_batch with JSON, return (tx_count, edge_count, address_count, transfer_count, swap_count)"""
         # Convert to JSON string
         json_str = json.dumps(json_data)
 
         # Call stored procedure using session variables (callproc doesn't bind OUT params properly)
-        self.cursor.execute("SET @p_tx = 0, @p_edge = 0, @p_addr = 0")
-        self.cursor.execute("CALL sp_tx_shred_batch(%s, @p_tx, @p_edge, @p_addr)", (json_str,))
-        self.cursor.execute("SELECT @p_tx, @p_edge, @p_addr")
+        self.cursor.execute("SET @p_tx = 0, @p_edge = 0, @p_addr = 0, @p_xfer = 0, @p_swap = 0")
+        self.cursor.execute("CALL sp_tx_shred_batch(%s, @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap)", (json_str,))
+        self.cursor.execute("SELECT @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap")
         result = self.cursor.fetchone()
 
         self.db_conn.commit()
@@ -255,8 +264,10 @@ class GuideConsumerV2:
         tx_count = result[0] or 0
         edge_count = result[1] or 0
         address_count = result[2] or 0
+        transfer_count = result[3] or 0
+        swap_count = result[4] or 0
 
-        return tx_count, edge_count, address_count
+        return tx_count, edge_count, address_count, transfer_count, swap_count
 
     def on_message(self, channel, method, properties, body):
         """Handle incoming message"""
@@ -283,14 +294,20 @@ class GuideConsumerV2:
 
             # === Phase 0: Pre-filter existing signatures (save API calls) ===
             original_count = len(signatures)
-            signatures = filter_existing_signatures(self.cursor, signatures)
-            skipped_count = original_count - len(signatures)
+            signatures, need_detail_sigs = filter_existing_signatures(self.cursor, signatures)
+            skipped_count = original_count - len(signatures) - len(need_detail_sigs)
+
+            # Queue existing signatures that need detail enrichment
+            if need_detail_sigs and not self.no_detail:
+                detail_backfill = self.publish_to_detail_queue(need_detail_sigs)
+                self.total_detail_queued += detail_backfill
+                print(f"  [>] Queued {detail_backfill} existing sigs for detail enrichment")
 
             if skipped_count > 0:
-                print(f"  [~] Skipped {skipped_count}/{original_count} existing signatures")
+                print(f"  [~] Skipped {skipped_count}/{original_count} already detailed signatures")
 
             if not signatures:
-                print(f"  [=] All signatures already exist, ACK and skip")
+                print(f"  [=] No new signatures to shred, ACK and skip")
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 self.message_count += 1
                 return
@@ -308,12 +325,12 @@ class GuideConsumerV2:
 
             # === Phase 3: Call stored procedure to process JSON ===
             sp_start = time.time()
-            tx_count, edge_count, address_count = self.call_shred_batch(decoded_response)
+            tx_count, edge_count, address_count, transfer_count, swap_count = self.call_shred_batch(decoded_response)
             sp_time = time.time() - sp_start
 
             total_time = time.time() - start_time
 
-            print(f"  [+] tx={tx_count} edges={edge_count} addrs={address_count} "
+            print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} addrs={address_count} "
                   f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
 
             if addr_queued > 0:
@@ -331,6 +348,8 @@ class GuideConsumerV2:
             self.total_tx += tx_count
             self.total_edges += edge_count
             self.total_addresses += address_count
+            self.total_transfers += transfer_count
+            self.total_swaps += swap_count
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
             self.message_count += 1
@@ -463,6 +482,8 @@ def main():
     print(f"Done! Processed {consumer.message_count} messages")
     print(f"  Total transactions: {consumer.total_tx}")
     print(f"  Total edges: {consumer.total_edges}")
+    print(f"  Total transfers: {consumer.total_transfers}")
+    print(f"  Total swaps: {consumer.total_swaps}")
     print(f"  Total addresses: {consumer.total_addresses}")
     print(f"{'='*60}")
 
