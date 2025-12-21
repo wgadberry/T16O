@@ -438,6 +438,14 @@ BEGIN
     CREATE TEMPORARY TABLE tmp_program_xfer2 AS SELECT program_address, program_id FROM tmp_program;
     ALTER TABLE tmp_program_xfer2 ADD PRIMARY KEY (program_address);
 
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_act;
+    CREATE TEMPORARY TABLE tmp_program_act AS SELECT program_address, program_id FROM tmp_program;
+    ALTER TABLE tmp_program_act ADD PRIMARY KEY (program_address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_act2;
+    CREATE TEMPORARY TABLE tmp_program_act2 AS SELECT program_address, program_id FROM tmp_program;
+    ALTER TABLE tmp_program_act2 ADD PRIMARY KEY (program_address);
+
     -- =========================================================================
     -- PHASE 5: Insert transactions
     -- =========================================================================
@@ -790,8 +798,8 @@ BEGIN
         jt.outer_ins_index,
         jt.name,
         jt.activity_type,
-        prog.address_id,
-        outer_prog.address_id,
+        prog.program_id,
+        outer_prog.program_id,
         acct.address_id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
@@ -806,8 +814,8 @@ BEGIN
         )
     )) AS jt
     JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
-    LEFT JOIN tmp_addr_program prog ON prog.address = jt.program_id
-    LEFT JOIN tmp_addr_outer_program outer_prog ON outer_prog.address = jt.outer_program_id
+    LEFT JOIN tmp_program_act prog ON prog.program_address = jt.program_id
+    LEFT JOIN tmp_program_act2 outer_prog ON outer_prog.program_address = jt.outer_program_id
     LEFT JOIN tmp_addr_acct acct ON acct.address = jt.account
     WHERE tt.tx_id IS NOT NULL
       AND jt.activity_type IS NOT NULL
@@ -842,6 +850,8 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_program2;
     DROP TEMPORARY TABLE IF EXISTS tmp_program_xfer;
     DROP TEMPORARY TABLE IF EXISTS tmp_program_xfer2;
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_act;
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_act2;
     DROP TEMPORARY TABLE IF EXISTS tmp_edge;
 
 END;;
