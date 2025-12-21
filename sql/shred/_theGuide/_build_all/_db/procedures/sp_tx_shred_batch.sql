@@ -379,6 +379,66 @@ BEGIN
     SET tp.pool_id = p.id;
 
     -- =========================================================================
+    -- PHASE 4b: Ensure programs exist in tx_program
+    -- =========================================================================
+    DROP TEMPORARY TABLE IF EXISTS tmp_program;
+    CREATE TEMPORARY TABLE tmp_program (
+        program_address VARCHAR(44) NOT NULL,
+        address_id INT UNSIGNED,
+        program_id BIGINT UNSIGNED,
+        PRIMARY KEY (program_address)
+    ) ENGINE=MEMORY;
+
+    -- Collect all program addresses (from activities and transfers)
+    INSERT IGNORE INTO tmp_program (program_address)
+    SELECT DISTINCT program_id FROM (
+        SELECT program_id FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
+            program_id VARCHAR(44) PATH '$.program_id'
+        )) AS jt WHERE program_id IS NOT NULL
+        UNION ALL
+        SELECT outer_program_id FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id'
+        )) AS jt WHERE outer_program_id IS NOT NULL
+        UNION ALL
+        SELECT program_id FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
+            program_id VARCHAR(44) PATH '$.program_id'
+        )) AS jt WHERE program_id IS NOT NULL
+        UNION ALL
+        SELECT outer_program_id FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
+            outer_program_id VARCHAR(44) PATH '$.outer_program_id'
+        )) AS jt WHERE outer_program_id IS NOT NULL
+    ) AS all_programs;
+
+    -- Lookup address IDs for programs
+    UPDATE tmp_program tp
+    JOIN tmp_address ta ON ta.address = tp.program_address
+    SET tp.address_id = ta.address_id;
+
+    -- Ensure programs exist in tx_program
+    INSERT INTO tx_program (program_address_id)
+    SELECT address_id FROM tmp_program
+    WHERE address_id IS NOT NULL
+    ON DUPLICATE KEY UPDATE id = id;
+
+    -- Lookup program IDs
+    UPDATE tmp_program tp
+    JOIN tx_program p ON p.program_address_id = tp.address_id
+    SET tp.program_id = p.id;
+
+    -- Create copies for multiple joins
+    DROP TEMPORARY TABLE IF EXISTS tmp_program2;
+    CREATE TEMPORARY TABLE tmp_program2 AS SELECT program_address, program_id FROM tmp_program;
+    ALTER TABLE tmp_program2 ADD PRIMARY KEY (program_address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_xfer;
+    CREATE TEMPORARY TABLE tmp_program_xfer AS SELECT program_address, program_id FROM tmp_program;
+    ALTER TABLE tmp_program_xfer ADD PRIMARY KEY (program_address);
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_xfer2;
+    CREATE TEMPORARY TABLE tmp_program_xfer2 AS SELECT program_address, program_id FROM tmp_program;
+    ALTER TABLE tmp_program_xfer2 ADD PRIMARY KEY (program_address);
+
+    -- =========================================================================
     -- PHASE 5: Insert transactions
     -- =========================================================================
     INSERT INTO tx (signature, block_id, block_time, block_time_utc, fee, priority_fee, tx_state)
@@ -598,8 +658,8 @@ BEGIN
         jt.ins_index,
         jt.outer_ins_index,
         jt.transfer_type,
-        prog.address_id,
-        outer_prog.address_id,
+        prog.program_id,
+        outer_prog.program_id,
         tok.token_id,
         jt.decimals,
         jt.amount,
@@ -625,8 +685,8 @@ BEGIN
         )
     )) AS jt
     JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
-    LEFT JOIN tmp_addr_xfer_program prog ON prog.address = jt.program_id
-    LEFT JOIN tmp_addr_xfer_outer_program outer_prog ON outer_prog.address = jt.outer_program_id
+    LEFT JOIN tmp_program_xfer prog ON prog.program_address = jt.program_id
+    LEFT JOIN tmp_program_xfer2 outer_prog ON outer_prog.program_address = jt.outer_program_id
     LEFT JOIN tmp_addr_src_ata src_ata ON src_ata.address = jt.source
     LEFT JOIN tmp_addr_src_owner src_owner ON src_owner.address = jt.source_owner
     LEFT JOIN tmp_addr_dst_ata dst_ata ON dst_ata.address = jt.destination
@@ -657,8 +717,8 @@ BEGIN
         jt.outer_ins_index,
         jt.name,
         jt.activity_type,
-        prog.address_id,
-        outer_prog.address_id,
+        prog.program_id,
+        outer_prog.program_id,
         pool.pool_id,
         acct.address_id,
         tok1.token_id,
@@ -697,8 +757,8 @@ BEGIN
     JOIN tmp_tx tt ON tt.tx_hash = jt.tx_hash
     LEFT JOIN tmp_pool pool ON pool.pool_address = jt.amm_id
     LEFT JOIN tmp_addr_acct acct ON acct.address = jt.account
-    LEFT JOIN tmp_addr_program prog ON prog.address = jt.program_id
-    LEFT JOIN tmp_addr_outer_program outer_prog ON outer_prog.address = jt.outer_program_id
+    LEFT JOIN tmp_program prog ON prog.program_address = jt.program_id
+    LEFT JOIN tmp_program2 outer_prog ON outer_prog.program_address = jt.outer_program_id
     LEFT JOIN tmp_token tok1 ON tok1.token_address = jt.token_1
     LEFT JOIN tmp_token2 tok2 ON tok2.token_address = jt.token_2
     LEFT JOIN tmp_addr_ta11 ta_1_1 ON ta_1_1.address = jt.token_account_1_1
@@ -778,6 +838,10 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_token;
     DROP TEMPORARY TABLE IF EXISTS tmp_token2;
     DROP TEMPORARY TABLE IF EXISTS tmp_pool;
+    DROP TEMPORARY TABLE IF EXISTS tmp_program;
+    DROP TEMPORARY TABLE IF EXISTS tmp_program2;
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_xfer;
+    DROP TEMPORARY TABLE IF EXISTS tmp_program_xfer2;
     DROP TEMPORARY TABLE IF EXISTS tmp_edge;
 
 END;;

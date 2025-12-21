@@ -45,20 +45,31 @@ def fetch_token_meta(session: requests.Session, mint_address: str) -> dict:
     return response.json()
 
 
-def get_tokens_missing_metadata(cursor, limit: int) -> list:
-    """Get tokens missing symbol, name, or decimals"""
+def get_tokens_missing_metadata(cursor, limit: int, max_attempts: int = 3) -> list:
+    """Get tokens missing symbol, name, or decimals (excluding those with too many failed attempts)"""
     cursor.execute("""
         SELECT t.id, a.address as mint
         FROM tx_token t
         JOIN tx_address a ON a.id = t.mint_address_id
-        WHERE t.token_symbol IS NULL
+        WHERE (t.token_symbol IS NULL
            OR t.token_symbol = ''
            OR t.token_name IS NULL
            OR t.token_name = ''
-           OR t.decimals IS NULL
+           OR t.decimals IS NULL)
+          AND COALESCE(t.attempt_cnt, 0) <= %s
         LIMIT %s
-    """, (limit,))
+    """, (max_attempts, limit))
     return cursor.fetchall()
+
+
+def increment_attempt_count(cursor, conn, token_id: int):
+    """Increment the attempt count for a token"""
+    cursor.execute("""
+        UPDATE tx_token
+        SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+        WHERE id = %s
+    """, (token_id,))
+    conn.commit()
 
 
 def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
@@ -80,6 +91,7 @@ def main():
     parser = argparse.ArgumentParser(description='Backfill missing token metadata from Solscan')
     parser.add_argument('--limit', type=int, default=1000, help='Max tokens to process')
     parser.add_argument('--delay', type=float, default=0.2, help='Delay between API calls (seconds)')
+    parser.add_argument('--max-attempts', type=int, default=3, help='Skip tokens with more than N failed attempts')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
     parser.add_argument('--db-user', default='root', help='MySQL user')
@@ -99,8 +111,8 @@ def main():
     cursor = conn.cursor()
 
     # Get tokens needing metadata
-    tokens = get_tokens_missing_metadata(cursor, args.limit)
-    print(f"Found {len(tokens)} tokens missing metadata")
+    tokens = get_tokens_missing_metadata(cursor, args.limit, args.max_attempts)
+    print(f"Found {len(tokens)} tokens missing metadata (max_attempts={args.max_attempts})")
 
     if not tokens:
         print("Nothing to do!")
@@ -115,6 +127,9 @@ def main():
     try:
         for i, (token_id, mint) in enumerate(tokens, 1):
             print(f"[{i}/{len(tokens)}] Fetching {mint[:16]}...", end=" ")
+
+            # Increment attempt count before trying
+            increment_attempt_count(cursor, conn, token_id)
 
             try:
                 response = fetch_token_meta(session, mint)
