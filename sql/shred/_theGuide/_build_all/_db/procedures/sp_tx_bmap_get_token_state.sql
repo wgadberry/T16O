@@ -54,10 +54,13 @@ BEGIN
     DECLARE v_prev_json JSON;
     DECLARE v_next_json JSON;
     DECLARE v_current_edge_types JSON;
+    DECLARE v_related_tokens_json JSON;
+    DECLARE v_signature_only_mode TINYINT DEFAULT 0;  -- 1 = show all tokens in tx
 
     -- Default tx_limit to 10, validate, and calculate half
+    -- Valid values: 1 (single tx), 10, 20, 50, 100
     SET p_tx_limit = COALESCE(p_tx_limit, 10);
-    IF p_tx_limit NOT IN (10, 20, 50, 100) THEN
+    IF p_tx_limit NOT IN (1, 10, 20, 50, 100) THEN
         SET p_tx_limit = 10;
     END IF;
     SET v_half_limit = p_tx_limit DIV 2;
@@ -73,23 +76,30 @@ BEGIN
         WHERE mint.address = p_mint_address
         LIMIT 1;
     ELSEIF p_token_symbol IS NOT NULL THEN
+        -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
         SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
+        LEFT JOIN (SELECT token_id, COUNT(*) AS cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
         WHERE tk.token_symbol = p_token_symbol
-        ORDER BY tk.id
+        ORDER BY COALESCE(g.cnt, 0) DESC, (mint.address_type = 'mint') DESC, tk.id
         LIMIT 1;
     ELSEIF p_token_name IS NOT NULL THEN
+        -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
         SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
+        LEFT JOIN (SELECT token_id, COUNT(*) AS cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
         WHERE tk.token_name = p_token_name
-        ORDER BY tk.id
+        ORDER BY COALESCE(g.cnt, 0) DESC, (mint.address_type = 'mint') DESC, tk.id
         LIMIT 1;
     ELSEIF p_signature IS NOT NULL THEN
-        -- Derive token from signature's tx_guide activity
+        -- Signature-only mode: show ALL tokens in the transaction
+        SET v_signature_only_mode = 1;
+
+        -- Derive primary token from signature's tx_guide activity (for display only)
         -- Prefer "interesting" tokens over base currencies (SOL, WSOL, stablecoins)
         SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.decimals
         INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_decimals
@@ -196,8 +206,13 @@ BEGIN
     END IF;
 
     IF v_token_id IS NOT NULL AND v_tx_id IS NOT NULL THEN
+        -- Always show all tokens in the transaction (not just the searched token)
+        -- The token_id is used for navigation (finding prev/next), but display is unfiltered
+        SET v_signature_only_mode = 1;
+
         -- ==========================================================================
         -- STEP 3: Build sliding window of tx_ids (prev N + current + next N)
+        -- Always fetch 5 prev + 5 next for NAVIGATION, but filter nodes/edges by v_half_limit
         -- ==========================================================================
         DROP TEMPORARY TABLE IF EXISTS tmp_window;
         CREATE TEMPORARY TABLE tmp_window (
@@ -211,7 +226,7 @@ BEGIN
         INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
         VALUES (v_tx_id, v_signature, v_block_time, 0);
 
-        -- Previous N (using prepared statement for dynamic LIMIT)
+        -- Previous 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
         SET @sql_prev = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
             SELECT t.id, t.signature, t.block_time,
@@ -224,7 +239,7 @@ BEGIN
                     WHERE g.token_id = ', v_token_id, '
                       AND t.block_time < ', v_block_time, '
                     ORDER BY t.block_time DESC
-                    LIMIT ', v_half_limit, '
+                    LIMIT 5
                  ) t
             ORDER BY t.block_time DESC
         ');
@@ -232,7 +247,7 @@ BEGIN
         EXECUTE stmt_prev;
         DEALLOCATE PREPARE stmt_prev;
 
-        -- Next N (using prepared statement for dynamic LIMIT)
+        -- Next 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
         SET @sql_next = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
             SELECT t.id, t.signature, t.block_time,
@@ -245,13 +260,25 @@ BEGIN
                     WHERE g.token_id = ', v_token_id, '
                       AND t.block_time > ', v_block_time, '
                     ORDER BY t.block_time ASC
-                    LIMIT ', v_half_limit, '
+                    LIMIT 5
                  ) t
             ORDER BY t.block_time ASC
         ');
         PREPARE stmt_next FROM @sql_next;
         EXECUTE stmt_next;
         DEALLOCATE PREPARE stmt_next;
+
+        -- ==========================================================================
+        -- STEP 3b: Create display window (filtered by v_half_limit for nodes/edges)
+        -- Navigation uses full tmp_window (5 prev + 5 next)
+        -- Display uses tmp_display_window (v_half_limit prev + v_half_limit next)
+        -- ==========================================================================
+        DROP TEMPORARY TABLE IF EXISTS tmp_display_window;
+        CREATE TEMPORARY TABLE tmp_display_window AS
+        SELECT * FROM tmp_window
+        WHERE window_pos = 0
+           OR (window_pos < 0 AND window_pos >= -v_half_limit)
+           OR (window_pos > 0 AND window_pos <= v_half_limit);
 
         -- ==========================================================================
         -- STEP 4: Build prev/next navigation JSON from window
@@ -321,37 +348,55 @@ BEGIN
             address_id INT UNSIGNED PRIMARY KEY,
             address VARCHAR(44),
             label VARCHAR(200),
+            address_type VARCHAR(30),
+            pool_label VARCHAR(255) DEFAULT NULL,
+            token_name VARCHAR(255) DEFAULT NULL,
             balance DECIMAL(30,9) DEFAULT 0,
             sol_balance DECIMAL(20,9) DEFAULT NULL,
             funded_by VARCHAR(44) DEFAULT NULL
         );
 
-        -- First: Insert all addresses that appear in the sliding window (from OR to)
-        INSERT IGNORE INTO tmp_nodes (address_id, address, label, balance, funded_by)
+        -- First: Insert all addresses that appear in the DISPLAY window (from OR to)
+        -- Uses tmp_display_window (filtered by tx_limit) not tmp_window (full nav window)
+        INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
         SELECT DISTINCT
             a.id,
             a.address,
             COALESCE(a.label, a.address_type),
+            a.address_type,
             0,
             f.address
         FROM tx_guide g
-        JOIN tmp_window w ON w.tx_id = g.tx_id
+        JOIN tmp_display_window w ON w.tx_id = g.tx_id
         JOIN tx_address a ON a.id = g.from_address_id
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
-        WHERE g.token_id = v_token_id;
+        WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id);
 
-        INSERT IGNORE INTO tmp_nodes (address_id, address, label, balance, funded_by)
+        INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
         SELECT DISTINCT
             a.id,
             a.address,
             COALESCE(a.label, a.address_type),
+            a.address_type,
             0,
             f.address
         FROM tx_guide g
-        JOIN tmp_window w ON w.tx_id = g.tx_id
+        JOIN tmp_display_window w ON w.tx_id = g.tx_id
         JOIN tx_address a ON a.id = g.to_address_id
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
-        WHERE g.token_id = v_token_id;
+        WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id);
+
+        -- Enrich pool nodes with pool_label
+        UPDATE tmp_nodes n
+        JOIN tx_pool p ON p.pool_address_id = n.address_id
+        SET n.pool_label = p.pool_label
+        WHERE p.pool_label IS NOT NULL;
+
+        -- Enrich mint nodes with token_name
+        UPDATE tmp_nodes n
+        JOIN tx_token tk ON tk.mint_address_id = n.address_id
+        SET n.token_name = tk.token_name
+        WHERE tk.token_name IS NOT NULL;
 
         -- Now calculate historical balance for each node: inflows - outflows up to current block_time
         -- Inflows (to_address receives tokens)
@@ -393,6 +438,9 @@ BEGIN
             JSON_OBJECT(
                 'address', n.address,
                 'label', n.label,
+                'address_type', n.address_type,
+                'pool_label', n.pool_label,
+                'token_name', n.token_name,
                 'balance', ROUND(n.balance, 6),
                 'sol_balance', ROUND(COALESCE(n.sol_balance, 0), 9),
                 'funded_by', n.funded_by
@@ -402,14 +450,15 @@ BEGIN
 
         -- ==========================================================================
         -- STEP 6: Build edges (enriched with swap/transfer details)
+        -- Uses tmp_display_window (filtered by tx_limit) for edges
         -- ==========================================================================
 
         -- Copy temp tables to avoid MySQL "Can't reopen table" limitation
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
-        CREATE TEMPORARY TABLE tmp_window2 AS SELECT * FROM tmp_window;
+        CREATE TEMPORARY TABLE tmp_window2 AS SELECT * FROM tmp_display_window;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_window3;
-        CREATE TEMPORARY TABLE tmp_window3 AS SELECT * FROM tmp_window;
+        CREATE TEMPORARY TABLE tmp_window3 AS SELECT * FROM tmp_display_window;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_from;
         CREATE TEMPORARY TABLE tmp_nodes_from AS SELECT address_id FROM tmp_nodes;
@@ -422,11 +471,16 @@ BEGIN
             -- Swap edges (swap_in, swap_out) - enriched with DEX name, pool, program
             SELECT JSON_OBJECT(
                 'source', fa.address,
+                'source_label', COALESCE(fa.label, fa.address_type),
                 'target', ta.address,
-                'amount', ROUND(g.amount / POW(10, g.decimals), 6),
+                'target_label', COALESCE(ta.label, ta.address_type),
+                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 6),
                 'type', gt.type_code,
+                'category', gt.category,
+                'token_symbol', COALESCE(tk.token_symbol, CASE WHEN g.token_id IS NULL THEN 'SOL' ELSE 'Unknown' END),
                 'dex', s.name,
                 'pool', pool_addr.address,
+                'pool_label', pool.pool_label,
                 'program', prog_addr.address,
                 'ins_index', g.ins_index,
                 'signature', t.signature,
@@ -434,29 +488,35 @@ BEGIN
                 'block_time_utc', FROM_UNIXTIME(t.block_time)
             ) AS edge_data
             FROM tx_guide g
-            JOIN tmp_window w ON w.tx_id = g.tx_id
+            JOIN tmp_display_window w ON w.tx_id = g.tx_id
             JOIN tx t ON t.id = g.tx_id
             JOIN tx_address fa ON fa.id = g.from_address_id
             JOIN tx_address ta ON ta.id = g.to_address_id
             JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            LEFT JOIN tx_token tk ON tk.id = g.token_id
             LEFT JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
             LEFT JOIN tx_pool pool ON pool.id = s.amm_id
             LEFT JOIN tx_address pool_addr ON pool_addr.id = pool.pool_address_id
             LEFT JOIN tx_program prog ON prog.id = s.program_id
             LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
-            WHERE g.token_id = v_token_id
+            WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id)
               AND gt.type_code IN ('swap_in', 'swap_out')
 
             UNION ALL
 
-            -- Transfer edges (spl_transfer) - enriched with program
+            -- ALL other edge types (transfers, burns, mints, stake, liquidity, etc.)
             SELECT JSON_OBJECT(
                 'source', fa.address,
+                'source_label', COALESCE(fa.label, fa.address_type),
                 'target', ta.address,
-                'amount', ROUND(g.amount / POW(10, g.decimals), 6),
+                'target_label', COALESCE(ta.label, ta.address_type),
+                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 6),
                 'type', gt.type_code,
+                'category', gt.category,
+                'token_symbol', COALESCE(tk.token_symbol, CASE WHEN g.token_id IS NULL THEN 'SOL' ELSE 'Unknown' END),
                 'dex', NULL,
                 'pool', NULL,
+                'pool_label', NULL,
                 'program', prog_addr.address,
                 'ins_index', g.ins_index,
                 'signature', t.signature,
@@ -469,41 +529,12 @@ BEGIN
             JOIN tx_address fa ON fa.id = g.from_address_id
             JOIN tx_address ta ON ta.id = g.to_address_id
             JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            LEFT JOIN tx_token tk ON tk.id = g.token_id
             LEFT JOIN tx_transfer xf ON xf.tx_id = g.tx_id AND xf.ins_index = g.ins_index
             LEFT JOIN tx_program prog ON prog.id = xf.program_id
             LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
-            WHERE g.token_id = v_token_id
-              AND gt.type_code = 'spl_transfer'
-
-            UNION ALL
-
-            -- SOL transfers between nodes in the sliding window
-            SELECT JSON_OBJECT(
-                'source', fa.address,
-                'target', ta.address,
-                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 9),
-                'type', gt.type_code,
-                'dex', NULL,
-                'pool', NULL,
-                'program', prog_addr.address,
-                'ins_index', g.ins_index,
-                'signature', t.signature,
-                'block_time', t.block_time,
-                'block_time_utc', FROM_UNIXTIME(t.block_time)
-            ) AS edge_data
-            FROM tx_guide g
-            JOIN tmp_window3 w ON w.tx_id = g.tx_id
-            JOIN tx t ON t.id = g.tx_id
-            JOIN tx_address fa ON fa.id = g.from_address_id
-            JOIN tx_address ta ON ta.id = g.to_address_id
-            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
-            JOIN tmp_nodes_from fn ON fn.address_id = g.from_address_id
-            JOIN tmp_nodes_to tn ON tn.address_id = g.to_address_id
-            LEFT JOIN tx_transfer xf ON xf.tx_id = g.tx_id AND xf.ins_index = g.ins_index
-            LEFT JOIN tx_program prog ON prog.id = xf.program_id
-            LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
-            WHERE g.token_id IS NULL
-              AND gt.type_code = 'sol_transfer'
+            WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id OR g.token_id IS NULL)
+              AND gt.type_code NOT IN ('swap_in', 'swap_out')
         ) edges;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
@@ -512,7 +543,46 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes_to;
 
         -- ==========================================================================
-        -- STEP 7: Return JSON
+        -- STEP 7: Find related tokens (other tokens swapped in same transactions)
+        -- ==========================================================================
+
+        -- Get tx_ids from display window where our target token has swap activity
+        DROP TEMPORARY TABLE IF EXISTS tmp_swap_txs;
+        CREATE TEMPORARY TABLE tmp_swap_txs AS
+        SELECT DISTINCT g.tx_id
+        FROM tx_guide g
+        JOIN tmp_display_window w ON w.tx_id = g.tx_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.token_id = v_token_id
+          AND gt.type_code IN ('swap_in', 'swap_out');
+
+        -- Find other tokens in those same transactions (with swap edges)
+        SELECT JSON_ARRAYAGG(related_data) INTO v_related_tokens_json
+        FROM (
+            SELECT JSON_OBJECT(
+                'mint', mint_addr.address,
+                'symbol', COALESCE(tk.token_symbol, 'Unknown'),
+                'name', tk.token_name,
+                'swap_count', COUNT(DISTINCT g.tx_id),
+                'total_volume', ROUND(SUM(g.amount / POW(10, COALESCE(g.decimals, 9))), 6)
+            ) AS related_data
+            FROM tx_guide g
+            JOIN tmp_swap_txs stx ON stx.tx_id = g.tx_id
+            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            JOIN tx_token tk ON tk.id = g.token_id
+            JOIN tx_address mint_addr ON mint_addr.id = tk.mint_address_id
+            WHERE g.token_id IS NOT NULL
+              AND g.token_id != v_token_id
+              AND gt.type_code IN ('swap_in', 'swap_out')
+            GROUP BY tk.id, mint_addr.address, tk.token_symbol, tk.token_name
+            ORDER BY COUNT(DISTINCT g.tx_id) DESC, SUM(g.amount) DESC
+            LIMIT 20
+        ) related_outer;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_swap_txs;
+
+        -- ==========================================================================
+        -- STEP 8: Return JSON
         -- ==========================================================================
         SELECT JSON_OBJECT(
             'result', JSON_OBJECT(
@@ -529,13 +599,15 @@ BEGIN
                     'symbol', v_token_symbol
                 ),
                 'nodes', COALESCE(v_nodes_json, JSON_ARRAY()),
-                'edges', COALESCE(v_edges_json, JSON_ARRAY())
+                'edges', COALESCE(v_edges_json, JSON_ARRAY()),
+                'related_tokens', COALESCE(v_related_tokens_json, JSON_ARRAY())
             )
         ) AS guide;
 
         -- Cleanup
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes;
         DROP TEMPORARY TABLE IF EXISTS tmp_window;
+        DROP TEMPORARY TABLE IF EXISTS tmp_display_window;
     END IF;
 END //
 
