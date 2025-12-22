@@ -27,6 +27,9 @@ Usage:
     python guide-funder.py --prefetch 100
     python guide-funder.py --batch-delay 2  # 2 second delay between batches
     python guide-funder.py --dry-run
+    python guide-funder.py --address-file wallets.txt  # Read from local file instead of queue
+    python guide-funder.py --sync-db-missing  # Query DB for missing funders
+    python guide-funder.py --sync-db-missing --limit 500  # Process max 500 addresses
 """
 
 import argparse
@@ -308,7 +311,7 @@ class AddressHistoryWorker:
         return result
 
     def mark_addresses_initialized(self, addresses: List[str]):
-        """Mark addresses as having their initial transactions fetched"""
+        """Mark addresses as completed (init_tx_fetched = 1)"""
         if not addresses or self.dry_run:
             return
 
@@ -319,6 +322,28 @@ class AddressHistoryWorker:
             WHERE address IN ({placeholders})
         """, addresses)
         self.db_conn.commit()
+
+    def claim_addresses(self, addresses: List[str]) -> List[str]:
+        """
+        Atomically claim addresses for processing (init_tx_fetched = 0 -> 2).
+        Returns list of addresses successfully claimed.
+        This prevents duplicate processing when multiple workers run.
+        """
+        if not addresses or self.dry_run:
+            return addresses  # In dry-run, pretend we claimed all
+
+        claimed = []
+        for addr in addresses:
+            # Atomic claim: only succeeds if init_tx_fetched is still 0 (or NULL)
+            self.cursor.execute("""
+                UPDATE tx_address
+                SET init_tx_fetched = 2
+                WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+            """, (addr,))
+            if self.cursor.rowcount > 0:
+                claimed.append(addr)
+        self.db_conn.commit()
+        return claimed
 
     def ensure_addresses_exist(self, addresses: List[str]):
         """Ensure all addresses exist in tx_address table"""
@@ -335,7 +360,8 @@ class AddressHistoryWorker:
 
     def save_funding_info(self, target_address: str, funding_info: Dict):
         """
-        Save funding info to tx_address table.
+        Save funding info to tx_address table and create tx_funding_edge.
+        Also aggregates existing transfers from tx_guide for complete edge data.
         funding_info has: funder, signature, amount, block_time
         """
         if self.dry_run:
@@ -357,6 +383,11 @@ class AddressHistoryWorker:
         funder_row = self.cursor.fetchone()
         funder_id = funder_row['id'] if funder_row else None
 
+        # Get target address ID
+        self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
+        target_row = self.cursor.fetchone()
+        target_id = target_row['id'] if target_row else None
+
         # Ensure transaction exists and get ID
         tx_id = None
         if signature:
@@ -377,6 +408,64 @@ class AddressHistoryWorker:
                 first_seen_block_time = %s
             WHERE address = %s AND funded_by_address_id IS NULL
         """, (funder_id, tx_id, amount, block_time, target_address))
+
+        # Create tx_funding_edge record with full details
+        # Amount from Solscan is in lamports, convert to SOL
+        sol_amount = float(amount) / 1e9 if amount else 0
+
+        if funder_id and target_id:
+            # First, aggregate existing transfers from tx_guide between these addresses
+            self.cursor.execute("""
+                SELECT
+                    SUM(CASE WHEN gt.type_code IN ('sol_transfer', 'wallet_funded')
+                        THEN g.amount / POW(10, COALESCE(g.decimals, 9))
+                        ELSE 0 END) as guide_sol,
+                    SUM(CASE WHEN gt.type_code = 'spl_transfer'
+                        THEN g.amount / POW(10, COALESCE(g.decimals, 9))
+                        ELSE 0 END) as guide_tokens,
+                    COUNT(*) as guide_count,
+                    MIN(g.block_time) as first_time,
+                    MAX(g.block_time) as last_time
+                FROM tx_guide g
+                JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+                WHERE g.from_address_id = %s AND g.to_address_id = %s
+                  AND gt.type_code IN ('sol_transfer', 'spl_transfer', 'wallet_funded')
+            """, (funder_id, target_id))
+            guide_row = self.cursor.fetchone()
+
+            # Combine Solscan amount with tx_guide aggregates
+            guide_sol = float(guide_row['guide_sol'] or 0) if guide_row else 0
+            guide_tokens = float(guide_row['guide_tokens'] or 0) if guide_row else 0
+            guide_count = int(guide_row['guide_count'] or 0) if guide_row else 0
+            guide_first = guide_row['first_time'] if guide_row else None
+            guide_last = guide_row['last_time'] if guide_row else None
+
+            # Total SOL includes Solscan discovery + tx_guide history
+            total_sol = sol_amount + guide_sol
+            total_tokens = guide_tokens
+            total_count = 1 + guide_count  # 1 for Solscan + guide count
+
+            # Determine time range
+            first_time = block_time
+            last_time = block_time
+            if guide_first and (first_time is None or guide_first < first_time):
+                first_time = guide_first
+            if guide_last and (last_time is None or guide_last > last_time):
+                last_time = guide_last
+
+            self.cursor.execute("""
+                INSERT INTO tx_funding_edge (
+                    from_address_id, to_address_id,
+                    total_sol, total_tokens, transfer_count,
+                    first_transfer_time, last_transfer_time
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    total_sol = VALUES(total_sol),
+                    total_tokens = VALUES(total_tokens),
+                    transfer_count = VALUES(transfer_count),
+                    first_transfer_time = LEAST(COALESCE(first_transfer_time, VALUES(first_transfer_time)), VALUES(first_transfer_time)),
+                    last_transfer_time = GREATEST(COALESCE(last_transfer_time, VALUES(last_transfer_time)), VALUES(last_transfer_time))
+            """, (funder_id, target_id, total_sol, total_tokens, total_count, first_time, last_time))
 
         self.db_conn.commit()
 
@@ -480,16 +569,23 @@ class AddressHistoryWorker:
         address_info = self.get_address_info(list(all_addresses))
 
         # Step 4: Filter to addresses that need funding lookup
-        addresses_to_process = []
+        candidates = []
         for addr in all_addresses:
             info = address_info.get(addr, {})
+            # 0 or NULL = not processed, 1 = done, 2 = in progress by another worker
             if not info.get('init_tx_fetched'):
-                addresses_to_process.append(addr)
+                candidates.append(addr)
             else:
                 self.addresses_skipped += 1
 
-        print(f"  Need funding lookup: {len(addresses_to_process)}")
-        print(f"  Already processed: {len(all_addresses) - len(addresses_to_process)}")
+        print(f"  Candidates for lookup: {len(candidates)}")
+        print(f"  Already processed/claimed: {len(all_addresses) - len(candidates)}")
+
+        # Step 4b: Atomically claim addresses (prevents duplicate work)
+        addresses_to_process = self.claim_addresses(candidates)
+        if len(addresses_to_process) < len(candidates):
+            skipped_by_claim = len(candidates) - len(addresses_to_process)
+            print(f"  Claimed by this worker: {len(addresses_to_process)} (skipped {skipped_by_claim} claimed by others)")
 
         if self.dry_run:
             print(f"  DRY RUN - would lookup funding for {len(addresses_to_process)} addresses")
@@ -610,6 +706,12 @@ def main():
     parser.add_argument('--rabbitmq-port', type=int, default=RABBITMQ_PORT, help='RabbitMQ port')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be processed without making changes')
+    parser.add_argument('--address-file', type=str, default=None,
+                        help='Path to .txt file with addresses (one per line). Skips RabbitMQ when provided.')
+    parser.add_argument('--sync-db-missing', action='store_true',
+                        help='Query DB for addresses with funded_by_address_id=NULL and init_tx_fetched=0, then process them.')
+    parser.add_argument('--limit', type=int, default=0,
+                        help='Max addresses to process in --sync-db-missing mode (0 = unlimited)')
 
     args = parser.parse_args()
 
@@ -617,19 +719,24 @@ def main():
         print("Error: mysql-connector-python not installed")
         return 1
 
-    if not HAS_PIKA:
-        print("Error: pika not installed")
+    # File mode doesn't need RabbitMQ
+    if not args.address_file and not HAS_PIKA:
+        print("Error: pika not installed (required for queue mode)")
         return 1
 
     print(f"Address Funding Worker")
     print(f"{'='*60}")
-    print(f"Prefetch: {args.prefetch} messages")
+    if args.address_file:
+        print(f"MODE: File input ({args.address_file})")
+    else:
+        print(f"MODE: Queue consumer")
+        print(f"Queue: {RABBITMQ_QUEUE_IN}")
+    print(f"Batch size: {args.prefetch}")
     print(f"TX limit: {args.tx_limit} per address")
     print(f"API delay: {args.api_delay}s")
     print(f"Batch delay: {args.batch_delay}s")
-    print(f"Queue: {RABBITMQ_QUEUE_IN}")
     if args.dry_run:
-        print(f"MODE: DRY RUN")
+        print(f"DRY RUN: Yes")
     print()
 
     # Connect to MySQL
@@ -657,7 +764,314 @@ def main():
         print("Column added successfully")
     cursor.close()
 
-    # Connect to RabbitMQ
+    # Create Solscan client
+    solscan = SolscanClient()
+
+    # FILE MODE or SYNC-DB-MISSING MODE: Process addresses from file or DB query
+    if args.address_file or args.sync_db_missing:
+        import os
+
+        # Determine source of addresses
+        if args.address_file:
+            if not os.path.exists(args.address_file):
+                print(f"Error: Address file not found: {args.address_file}")
+                return 1
+
+            # Read addresses from file
+            print(f"Reading addresses from {args.address_file}...")
+            with open(args.address_file, 'r') as f:
+                all_addresses = []
+                for line in f:
+                    addr = line.strip()
+                    # Skip empty lines and comments
+                    if addr and not addr.startswith('#') and len(addr) >= 32:
+                        all_addresses.append(addr)
+
+            # Filter out known programs
+            all_addresses = [a for a in all_addresses if a not in KNOWN_PROGRAMS]
+            print(f"Loaded {len(all_addresses)} addresses from file")
+        else:
+            # sync-db-missing mode: will query DB after FileWorker is created
+            all_addresses = None  # Placeholder, will be populated below
+
+        # For file mode, check we have addresses
+        if args.address_file and not all_addresses:
+            print("No valid addresses found in file")
+            return 0
+
+        # Create a mock worker for file processing (no channel needed)
+        class FileWorker:
+            def __init__(self, db_conn, solscan, tx_limit, dry_run, api_delay, batch_delay):
+                self.db_conn = db_conn
+                self.cursor = db_conn.cursor(dictionary=True)
+                self.solscan = solscan
+                self.tx_limit = tx_limit
+                self.dry_run = dry_run
+                self.api_delay = api_delay
+                self.batch_delay = batch_delay
+                self.addresses_processed = 0
+                self.addresses_skipped = 0
+                self.funders_found = 0
+                self.funders_not_found = 0
+
+            def get_address_info(self, addresses):
+                if not addresses:
+                    return {}
+                placeholders = ','.join(['%s'] * len(addresses))
+                self.cursor.execute(f"""
+                    SELECT id, address, address_type, init_tx_fetched
+                    FROM tx_address WHERE address IN ({placeholders})
+                """, addresses)
+                return {row['address']: row for row in self.cursor.fetchall()}
+
+            def ensure_addresses_exist(self, addresses):
+                if not addresses:
+                    return
+                values = [(addr, 'unknown') for addr in addresses]
+                self.cursor.executemany("""
+                    INSERT IGNORE INTO tx_address (address, address_type) VALUES (%s, %s)
+                """, values)
+                self.db_conn.commit()
+
+            def mark_addresses_initialized(self, addresses):
+                if not addresses or self.dry_run:
+                    return
+                placeholders = ','.join(['%s'] * len(addresses))
+                self.cursor.execute(f"""
+                    UPDATE tx_address SET init_tx_fetched = 1
+                    WHERE address IN ({placeholders})
+                """, addresses)
+                self.db_conn.commit()
+
+            def claim_addresses(self, addresses):
+                """Atomically claim addresses (0/NULL -> 2). Returns claimed list."""
+                if not addresses or self.dry_run:
+                    return addresses
+                claimed = []
+                for addr in addresses:
+                    self.cursor.execute("""
+                        UPDATE tx_address SET init_tx_fetched = 2
+                        WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+                    """, (addr,))
+                    if self.cursor.rowcount > 0:
+                        claimed.append(addr)
+                self.db_conn.commit()
+                return claimed
+
+            def find_funder_for_address(self, address):
+                if address in KNOWN_PROGRAMS:
+                    return None
+                time.sleep(self.api_delay)
+                data = self.solscan.get_account_transfers(address, self.tx_limit)
+                if not data:
+                    return None
+                return self.solscan.find_funding_wallet(address, data)
+
+            def save_funding_info(self, target_address, funding_info):
+                if self.dry_run:
+                    return
+                funder = funding_info['funder']
+                signature = funding_info['signature']
+                amount = funding_info['amount']
+                block_time = funding_info['block_time']
+
+                self.cursor.execute("""
+                    INSERT IGNORE INTO tx_address (address, address_type) VALUES (%s, 'wallet')
+                """, (funder,))
+                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
+                funder_row = self.cursor.fetchone()
+                funder_id = funder_row['id'] if funder_row else None
+
+                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
+                target_row = self.cursor.fetchone()
+                target_id = target_row['id'] if target_row else None
+
+                tx_id = None
+                if signature:
+                    self.cursor.execute("""
+                        INSERT IGNORE INTO tx (signature, block_time, tx_state) VALUES (%s, %s, 'shredded')
+                    """, (signature, block_time))
+                    self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
+                    tx_row = self.cursor.fetchone()
+                    tx_id = tx_row['id'] if tx_row else None
+
+                self.cursor.execute("""
+                    UPDATE tx_address
+                    SET funded_by_address_id = %s, funding_tx_id = %s, funding_amount = %s, first_seen_block_time = %s
+                    WHERE address = %s AND funded_by_address_id IS NULL
+                """, (funder_id, tx_id, amount, block_time, target_address))
+
+                sol_amount = float(amount) / 1e9 if amount else 0
+                if funder_id and target_id:
+                    self.cursor.execute("""
+                        INSERT INTO tx_funding_edge (from_address_id, to_address_id, total_sol, transfer_count, first_transfer_time, last_transfer_time)
+                        VALUES (%s, %s, %s, 1, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            total_sol = VALUES(total_sol),
+                            transfer_count = transfer_count + 1,
+                            last_transfer_time = VALUES(last_transfer_time)
+                    """, (funder_id, target_id, sol_amount, block_time, block_time))
+                self.db_conn.commit()
+
+            def get_missing_addresses(self, limit: int) -> list:
+                """
+                Fetch addresses from DB where funded_by_address_id IS NULL
+                and init_tx_fetched = 0 (or NULL).
+                """
+                query = """
+                    SELECT address FROM tx_address
+                    WHERE funded_by_address_id IS NULL
+                      AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+                    LIMIT %s
+                """
+                self.cursor.execute(query, (limit,))
+                return [row['address'] for row in self.cursor.fetchall()]
+
+        worker = FileWorker(db_conn, solscan, args.tx_limit, args.dry_run, args.api_delay, args.batch_delay)
+
+        # SYNC-DB-MISSING MODE: Query DB in batches until exhausted
+        if args.sync_db_missing:
+            batch_size = args.prefetch
+            total_limit = args.limit if args.limit > 0 else float('inf')
+            batch_num = 0
+
+            print(f"Sync DB Missing Mode")
+            print(f"  Batch size: {batch_size}")
+            print(f"  Limit: {args.limit if args.limit > 0 else 'unlimited'}")
+            print()
+
+            while worker.addresses_processed < total_limit:
+                remaining = int(min(batch_size, total_limit - worker.addresses_processed))
+                candidates = worker.get_missing_addresses(remaining)
+
+                if not candidates:
+                    print("\nNo more addresses to process.")
+                    break
+
+                # Filter out known programs
+                candidates = [a for a in candidates if a not in KNOWN_PROGRAMS]
+
+                if not candidates:
+                    print("\nNo valid candidates (all were known programs).")
+                    break
+
+                batch_num += 1
+                print(f"\n{'='*60}")
+                print(f"Batch {batch_num}: Found {len(candidates)} candidates")
+
+                # Atomically claim addresses
+                addresses_to_process = worker.claim_addresses(candidates)
+                if len(addresses_to_process) < len(candidates):
+                    skipped = len(candidates) - len(addresses_to_process)
+                    print(f"  Claimed: {len(addresses_to_process)} (skipped {skipped} claimed by others)")
+
+                if not addresses_to_process:
+                    print("  No addresses claimed, retrying...")
+                    time.sleep(1)
+                    continue
+
+                if args.dry_run:
+                    print(f"  DRY RUN - would lookup funding for {len(addresses_to_process)} addresses")
+                    for addr in addresses_to_process[:5]:
+                        print(f"    {addr[:20]}...")
+                    if len(addresses_to_process) > 5:
+                        print(f"    ... and {len(addresses_to_process) - 5} more")
+                    # In dry-run, simulate progress
+                    worker.addresses_processed += len(addresses_to_process)
+                else:
+                    initialized = []
+                    for j, addr in enumerate(addresses_to_process):
+                        print(f"  [{j + 1}/{len(addresses_to_process)}] {addr[:20]}...", end='')
+                        funding_info = worker.find_funder_for_address(addr)
+                        if funding_info:
+                            print(f" -> funded by {funding_info['funder'][:16]}...")
+                            worker.save_funding_info(addr, funding_info)
+                            worker.funders_found += 1
+                        else:
+                            print(f" -> no funder found")
+                            worker.funders_not_found += 1
+                        initialized.append(addr)
+                        worker.addresses_processed += 1
+
+                        # Check limit
+                        if worker.addresses_processed >= total_limit:
+                            print(f"\n  Reached limit of {args.limit} addresses")
+                            break
+
+                    worker.mark_addresses_initialized(initialized)
+
+                print(f"  Batch complete. Total processed: {worker.addresses_processed}")
+
+                if args.batch_delay > 0:
+                    print(f"  Waiting {args.batch_delay}s before next batch...")
+                    time.sleep(args.batch_delay)
+
+        # FILE MODE: Process addresses from file
+        else:
+            # Ensure all addresses exist
+            worker.ensure_addresses_exist(all_addresses)
+
+            # Get address info and filter to unprocessed
+            address_info = worker.get_address_info(all_addresses)
+            candidates = []
+            for addr in all_addresses:
+                info = address_info.get(addr, {})
+                if not info.get('init_tx_fetched'):
+                    candidates.append(addr)
+                else:
+                    worker.addresses_skipped += 1
+
+            print(f"Candidates for lookup: {len(candidates)}")
+            print(f"Already processed/claimed: {worker.addresses_skipped}")
+
+            # Atomically claim addresses (prevents duplicate work with other workers)
+            addresses_to_process = worker.claim_addresses(candidates)
+            if len(addresses_to_process) < len(candidates):
+                skipped = len(candidates) - len(addresses_to_process)
+                print(f"Claimed by this worker: {len(addresses_to_process)} (skipped {skipped} claimed by others)")
+
+            if args.dry_run:
+                print(f"\nDRY RUN - would lookup funding for {len(addresses_to_process)} addresses")
+            else:
+                # Process in batches
+                batch_size = args.prefetch
+                for i in range(0, len(addresses_to_process), batch_size):
+                    batch = addresses_to_process[i:i + batch_size]
+                    print(f"\nBatch {i // batch_size + 1}: Processing {len(batch)} addresses...")
+
+                    initialized = []
+                    for j, addr in enumerate(batch):
+                        print(f"  [{i + j + 1}/{len(addresses_to_process)}] {addr[:20]}...", end='')
+                        funding_info = worker.find_funder_for_address(addr)
+                        if funding_info:
+                            print(f" -> funded by {funding_info['funder'][:16]}...")
+                            worker.save_funding_info(addr, funding_info)
+                            worker.funders_found += 1
+                        else:
+                            print(f" -> no funder found")
+                            worker.funders_not_found += 1
+                        initialized.append(addr)
+                        worker.addresses_processed += 1
+
+                    worker.mark_addresses_initialized(initialized)
+
+                    if args.batch_delay > 0 and i + batch_size < len(addresses_to_process):
+                        print(f"  Waiting {args.batch_delay}s before next batch...")
+                        time.sleep(args.batch_delay)
+
+        solscan.close()
+        db_conn.close()
+
+        print(f"\n{'='*60}")
+        print(f"Done!")
+        print(f"  Addresses processed: {worker.addresses_processed}")
+        print(f"  Addresses skipped: {worker.addresses_skipped}")
+        print(f"  Funders found: {worker.funders_found}")
+        print(f"  Funders not found: {worker.funders_not_found}")
+        print(f"{'='*60}")
+        return 0
+
+    # QUEUE MODE: Connect to RabbitMQ and consume messages
     print(f"Connecting to RabbitMQ {args.rabbitmq_host}:{args.rabbitmq_port}...")
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
     connection = pika.BlockingConnection(
@@ -675,9 +1089,6 @@ def main():
         durable=True,
         arguments={'x-max-priority': 10}
     )
-
-    # Create Solscan client
-    solscan = SolscanClient()
 
     # Create and start worker
     worker = AddressHistoryWorker(
