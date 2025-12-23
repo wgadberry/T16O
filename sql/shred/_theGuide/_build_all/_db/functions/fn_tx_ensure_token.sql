@@ -9,7 +9,7 @@ CREATE DEFINER=`root`@`%` FUNCTION `fn_tx_ensure_token`(
     p_address VARCHAR(44),
     p_token_name VARCHAR(256),
     p_token_symbol VARCHAR(256),
-    p_token_icon VARCHAR(500),
+    p_token_icon text,
     p_decimals TINYINT UNSIGNED
 ) RETURNS bigint
     DETERMINISTIC

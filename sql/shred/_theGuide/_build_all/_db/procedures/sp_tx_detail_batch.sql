@@ -179,6 +179,7 @@ BEGIN
     WHERE tt.tx_id IS NOT NULL
       AND a.address_id IS NOT NULL
       AND jt.address IS NOT NULL
+      AND jt.change_amount != 0  -- Skip zero-change records
     ON DUPLICATE KEY UPDATE
         pre_balance = VALUES(pre_balance),
         post_balance = VALUES(post_balance),
@@ -224,6 +225,7 @@ BEGIN
       AND oa.address_id IS NOT NULL
       AND tok.token_id IS NOT NULL
       AND jt.address IS NOT NULL
+      AND CAST(jt.change_amount AS DECIMAL(38,0)) != 0  -- Skip zero-change records
     ON DUPLICATE KEY UPDATE
         pre_balance = VALUES(pre_balance),
         post_balance = VALUES(post_balance),

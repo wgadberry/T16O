@@ -219,6 +219,72 @@ def solscan_get_account(session: requests.Session, address: str) -> Optional[dic
         return None
 
 
+def solscan_get_data_decoded(session: requests.Session, address: str) -> Optional[dict]:
+    """Get decoded account data from Solscan API - reveals Pool structure etc."""
+    url = f"{SOLSCAN_API}/account/data-decoded"
+    headers = {"token": SOLSCAN_TOKEN}
+    params = {"address": address}
+
+    try:
+        response = session.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        result = response.json()
+        # Return the full response as it contains data_decoded at top level
+        return result if result.get('data_decoded') else None
+    except Exception as e:
+        print(f"    Solscan data-decoded error for {address[:16]}...: {e}")
+        return None
+
+
+def solscan_get_metadata(session: requests.Session, address: str) -> Optional[dict]:
+    """Get account metadata from Solscan API - labels, tags, funding info"""
+    url = f"{SOLSCAN_API}/account/metadata"
+    headers = {"token": SOLSCAN_TOKEN}
+    params = {"address": address}
+
+    try:
+        response = session.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        result = response.json()
+        return result.get('data') if result.get('success') else None
+    except Exception as e:
+        print(f"    Solscan metadata error for {address[:16]}...: {e}")
+        return None
+
+
+def extract_pool_data(decoded: dict) -> Optional[dict]:
+    """Extract pool structure from decoded account data"""
+    if not decoded or not decoded.get('data_decoded'):
+        return None
+
+    dd = decoded['data_decoded']
+    if dd.get('name') != 'Pool':
+        return None
+
+    data = dd.get('data', {})
+
+    pool_info = {
+        'base_mint': data.get('base_mint', {}).get('data'),
+        'quote_mint': data.get('quote_mint', {}).get('data'),
+        'lp_mint': data.get('lp_mint', {}).get('data'),
+        'pool_base_token_account': data.get('pool_base_token_account', {}).get('data'),
+        'pool_quote_token_account': data.get('pool_quote_token_account', {}).get('data'),
+        'creator': data.get('creator', {}).get('data'),
+        'coin_creator': data.get('coin_creator', {}).get('data'),
+        'lp_supply': data.get('lp_supply', {}).get('data'),
+    }
+
+    # Only return if we got meaningful data
+    if pool_info['base_mint'] or pool_info['quote_mint']:
+        return pool_info
+
+    return None
+
+
 def classify_from_solscan(account_data: dict) -> str:
     """Classify address type from Solscan account data"""
     if not account_data:
@@ -286,18 +352,22 @@ def process_batch_rpc(session: requests.Session, addresses: List[str]) -> Dict[s
     return results
 
 
-def run_classification(addresses: List[str], dry_run: bool = False) -> Dict[str, str]:
+def run_classification(addresses: List[str], dry_run: bool = False, enrich_pools: bool = True) -> Tuple[Dict[str, str], Dict[str, dict]]:
     """
     Run full classification pipeline:
     1. RPC batch classification
-    2. Solscan for low-confidence results
-    3. Return final classifications
+    2. Solscan /account for low-confidence results
+    3. Solscan /account/data-decoded for unknowns (detect Pools)
+    4. Solscan /account/metadata for detected pools (get labels)
+
+    Returns (classifications, pool_data) where pool_data has decoded pool info
     """
 
     print(f"\n{'='*70}")
     print(f"ADDRESS CLASSIFIER - Processing {len(addresses)} addresses")
     print(f"{'='*70}")
     print(f"Dry run: {dry_run}")
+    print(f"Enrich pools: {enrich_pools}")
     print(f"RPC batch size: {RPC_BATCH_SIZE}")
     print()
 
@@ -306,6 +376,7 @@ def run_classification(addresses: List[str], dry_run: bool = False) -> Dict[str,
 
     all_results = {}
     low_confidence = []
+    pool_data = {}  # address -> {pool_info, metadata}
 
     # ==========================================================================
     # Phase 1: RPC Batch Classification
@@ -343,10 +414,10 @@ def run_classification(addresses: List[str], dry_run: bool = False) -> Dict[str,
     print(f"  Low confidence (needs Solscan): {len(low_confidence)}")
 
     # ==========================================================================
-    # Phase 2: Solscan for Low-Confidence Results
+    # Phase 2: Solscan /account for Low-Confidence Results
     # ==========================================================================
     if low_confidence:
-        print(f"\nPHASE 2: Solscan Verification ({len(low_confidence)} addresses)")
+        print(f"\nPHASE 2: Solscan /account Verification ({len(low_confidence)} addresses)")
         print(f"-" * 50)
 
         for i, addr in enumerate(low_confidence):
@@ -364,6 +435,67 @@ def run_classification(addresses: List[str], dry_run: bool = False) -> Dict[str,
         print(f"  Completed Solscan verification")
 
     # ==========================================================================
+    # Phase 3: Solscan /account/data-decoded for remaining unknowns
+    # ==========================================================================
+    still_unknown = [addr for addr, t in all_results.items() if t == 'unknown']
+
+    if still_unknown and enrich_pools:
+        print(f"\nPHASE 3: Solscan /account/data-decoded ({len(still_unknown)} unknowns)")
+        print(f"-" * 50)
+
+        pools_found = 0
+        for i, addr in enumerate(still_unknown):
+            decoded = solscan_get_data_decoded(solscan_session, addr)
+
+            if decoded:
+                pool_info = extract_pool_data(decoded)
+                if pool_info:
+                    all_results[addr] = 'pool'
+                    pool_data[addr] = {'pool_info': pool_info, 'metadata': None}
+                    pools_found += 1
+                    print(f"    [{i+1}] {addr[:20]}... -> Pool detected!")
+
+            if (i + 1) % 50 == 0:
+                print(f"  Checked {i + 1}/{len(still_unknown)} addresses...")
+
+            time.sleep(SOLSCAN_DELAY)
+
+        print(f"  Found {pools_found} pools via data-decoded")
+
+    # ==========================================================================
+    # Phase 4: Solscan /account/metadata for detected pools (get labels)
+    # ==========================================================================
+    # Also include pools classified in Phase 1 that need enrichment
+    all_pools = [addr for addr, t in all_results.items() if t == 'pool']
+
+    if all_pools and enrich_pools:
+        print(f"\nPHASE 4: Solscan /account/metadata for {len(all_pools)} pools")
+        print(f"-" * 50)
+
+        for i, addr in enumerate(all_pools):
+            # Get metadata
+            metadata = solscan_get_metadata(solscan_session, addr)
+
+            if addr in pool_data:
+                pool_data[addr]['metadata'] = metadata
+            else:
+                # Pool from Phase 1 - need to get decoded data too
+                decoded = solscan_get_data_decoded(solscan_session, addr)
+                pool_info = extract_pool_data(decoded) if decoded else None
+                pool_data[addr] = {'pool_info': pool_info, 'metadata': metadata}
+                time.sleep(SOLSCAN_DELAY)
+
+            if metadata and metadata.get('account_label'):
+                print(f"    [{i+1}] {addr[:16]}... -> {metadata['account_label'][:40]}")
+
+            if (i + 1) % 20 == 0:
+                print(f"  Enriched {i + 1}/{len(all_pools)} pools...")
+
+            time.sleep(SOLSCAN_DELAY)
+
+        print(f"  Completed pool enrichment")
+
+    # ==========================================================================
     # Final Summary
     # ==========================================================================
     print(f"\n{'='*70}")
@@ -378,11 +510,100 @@ def run_classification(addresses: List[str], dry_run: bool = False) -> Dict[str,
         pct = (c / len(addresses)) * 100
         print(f"  {t:15} : {c:6} ({pct:5.1f}%)")
 
-    return all_results
+    print(f"\n  Pools with decoded data: {len([p for p in pool_data.values() if p.get('pool_info')])}")
+    print(f"  Pools with labels: {len([p for p in pool_data.values() if p.get('metadata', {}).get('account_label')])}")
+
+    return all_results, pool_data
 
 
-def update_database(classifications: Dict[str, str], dry_run: bool = False):
-    """Update tx_address.address_type in MySQL"""
+def update_pool_in_database(cursor, conn, pool_address: str, pool_data: dict, metadata: dict = None):
+    """Update tx_pool with decoded pool structure data"""
+
+    # Ensure pool address exists
+    cursor.execute("SELECT id FROM tx_address WHERE address = %s", (pool_address,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute(
+            "INSERT INTO tx_address (address, address_type) VALUES (%s, 'pool')",
+            (pool_address,)
+        )
+        conn.commit()
+        cursor.execute("SELECT id FROM tx_address WHERE address = %s", (pool_address,))
+        row = cursor.fetchone()
+
+    pool_address_id = row[0]
+
+    # Helper to ensure address and get ID
+    def ensure_addr(address: str, addr_type: str = 'unknown') -> Optional[int]:
+        if not address:
+            return None
+        cursor.execute("SELECT id FROM tx_address WHERE address = %s", (address,))
+        r = cursor.fetchone()
+        if r:
+            return r[0]
+        cursor.execute(
+            "INSERT INTO tx_address (address, address_type) VALUES (%s, %s)",
+            (address, addr_type)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+    # Helper to ensure token exists
+    def ensure_token(mint_address: str) -> Optional[int]:
+        if not mint_address:
+            return None
+        mint_id = ensure_addr(mint_address, 'mint')
+        cursor.execute("SELECT id FROM tx_token WHERE mint_address_id = %s", (mint_id,))
+        r = cursor.fetchone()
+        if r:
+            return r[0]
+        cursor.execute("INSERT INTO tx_token (mint_address_id) VALUES (%s)", (mint_id,))
+        conn.commit()
+        return cursor.lastrowid
+
+    # Get IDs for pool components
+    token1_id = ensure_token(pool_data.get('base_mint'))
+    token2_id = ensure_token(pool_data.get('quote_mint'))
+    lp_token_id = ensure_token(pool_data.get('lp_mint'))
+    token_account1_id = ensure_addr(pool_data.get('pool_base_token_account'), 'vault')
+    token_account2_id = ensure_addr(pool_data.get('pool_quote_token_account'), 'vault')
+
+    # Get pool label from metadata if available
+    pool_label = None
+    if metadata:
+        pool_label = metadata.get('account_label')
+
+    # Check if pool exists
+    cursor.execute("SELECT id FROM tx_pool WHERE pool_address_id = %s", (pool_address_id,))
+    existing = cursor.fetchone()
+
+    if existing:
+        # Overwrite with fresh API data (more accurate than existing)
+        cursor.execute("""
+            UPDATE tx_pool SET
+                token1_id = COALESCE(%s, token1_id),
+                token2_id = COALESCE(%s, token2_id),
+                lp_token_id = COALESCE(%s, lp_token_id),
+                token_account1_id = COALESCE(%s, token_account1_id),
+                token_account2_id = COALESCE(%s, token_account2_id),
+                pool_label = COALESCE(%s, pool_label),
+                attempt_cnt = 0
+            WHERE id = %s
+        """, (token1_id, token2_id, lp_token_id, token_account1_id, token_account2_id,
+              pool_label, existing[0]))
+    else:
+        cursor.execute("""
+            INSERT INTO tx_pool (pool_address_id, token1_id, token2_id, lp_token_id,
+                                 token_account1_id, token_account2_id, pool_label)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (pool_address_id, token1_id, token2_id, lp_token_id,
+              token_account1_id, token_account2_id, pool_label))
+
+    conn.commit()
+
+
+def update_database(classifications: Dict[str, str], pool_enrichments: Dict[str, dict], dry_run: bool = False):
+    """Update tx_address.address_type and tx_pool in MySQL"""
 
     print(f"\n{'='*70}")
     print(f"DATABASE UPDATE")
@@ -396,9 +617,15 @@ def update_database(classifications: Dict[str, str], dry_run: bool = False):
         for addr, new_type in classifications.items():
             changes[new_type]['count'] += 1
 
-        print("\nProposed changes:")
+        print("\nProposed address type changes:")
         for new_type, stats in sorted(changes.items(), key=lambda x: -x[1]['count']):
             print(f"  -> {new_type}: {stats['count']} addresses")
+
+        pools_with_data = len([p for p in pool_enrichments.values() if p.get('pool_info')])
+        pools_with_labels = len([p for p in pool_enrichments.values() if p.get('metadata', {}).get('account_label')])
+        print(f"\nProposed pool enrichments:")
+        print(f"  -> {pools_with_data} pools would get decoded data")
+        print(f"  -> {pools_with_labels} pools would get labels")
         return
 
     conn = mysql.connector.connect(**DB_CONFIG)
@@ -430,10 +657,28 @@ def update_database(classifications: Dict[str, str], dry_run: bool = False):
             total_updated += cursor.rowcount
 
     conn.commit()
+    print(f"\nUpdated {total_updated} addresses in tx_address")
+
+    # Update pool enrichments
+    if pool_enrichments:
+        print(f"\nUpdating {len(pool_enrichments)} pools with enriched data...")
+        pools_updated = 0
+
+        for pool_addr, data in pool_enrichments.items():
+            pool_info = data.get('pool_info')
+            metadata = data.get('metadata')
+
+            if pool_info or metadata:
+                try:
+                    update_pool_in_database(cursor, conn, pool_addr, pool_info or {}, metadata)
+                    pools_updated += 1
+                except Exception as e:
+                    print(f"    Error updating pool {pool_addr[:16]}...: {e}")
+
+        print(f"  Updated {pools_updated} pools in tx_pool")
+
     cursor.close()
     conn.close()
-
-    print(f"\nUpdated {total_updated} addresses in tx_address")
 
 
 def generate_report(classifications: Dict[str, str], output_file: str):
@@ -467,10 +712,16 @@ def main():
     parser = argparse.ArgumentParser(description='Classify and update tx_address types')
     parser.add_argument('--file', default='suspect_wallets_for_rpc_check.txt',
                         help='Input file with addresses (one per line)')
+    parser.add_argument('--from-db', action='store_true',
+                        help='Load unknown addresses from tx_address table instead of file')
+    parser.add_argument('--scan-suspects', action='store_true',
+                        help='Find and fix misclassified wallets based on table signals')
     parser.add_argument('--limit', type=int, default=0,
                         help='Limit number of addresses to process (0 = all)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview classifications without updating database')
+    parser.add_argument('--no-enrich-pools', action='store_true',
+                        help='Skip pool enrichment phases (data-decoded, metadata)')
     parser.add_argument('--report', default='classification_report.json',
                         help='Output report file')
     parser.add_argument('--db-host', default=DB_CONFIG['host'])
@@ -490,22 +741,134 @@ def main():
         'database': args.db_name
     })
 
+    # Scan suspects mode - fix obvious misclassifications via SQL
+    if args.scan_suspects:
+        print(f"SCANNING FOR MISCLASSIFIED WALLETS")
+        print(f"{'='*70}")
+
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        fixes = [
+            ("wallet in tx_pool -> pool", """
+                UPDATE tx_address a
+                JOIN tx_pool p ON p.pool_address_id = a.id
+                SET a.address_type = 'pool'
+                WHERE a.address_type = 'wallet'
+            """),
+            ("wallet in tx_token -> mint", """
+                UPDATE tx_address a
+                JOIN tx_token t ON t.mint_address_id = a.id
+                SET a.address_type = 'mint'
+                WHERE a.address_type = 'wallet'
+            """),
+            ("wallet in tx_program -> program", """
+                UPDATE tx_address a
+                JOIN tx_program p ON p.program_address_id = a.id
+                SET a.address_type = 'program'
+                WHERE a.address_type = 'wallet'
+            """),
+            ("wallet as pool vault -> vault", """
+                UPDATE tx_address a
+                SET a.address_type = 'vault'
+                WHERE a.address_type = 'wallet'
+                  AND (a.id IN (SELECT token_account1_id FROM tx_pool WHERE token_account1_id IS NOT NULL)
+                    OR a.id IN (SELECT token_account2_id FROM tx_pool WHERE token_account2_id IS NOT NULL))
+            """),
+            ("wallet ending in 'pump' -> mint", """
+                UPDATE tx_address
+                SET address_type = 'mint'
+                WHERE address_type = 'wallet'
+                  AND address LIKE '%pump'
+            """),
+        ]
+
+        # Count queries for dry-run mode
+        count_queries = [
+            "SELECT COUNT(*) FROM tx_address a JOIN tx_pool p ON p.pool_address_id = a.id WHERE a.address_type = 'wallet'",
+            "SELECT COUNT(*) FROM tx_address a JOIN tx_token t ON t.mint_address_id = a.id WHERE a.address_type = 'wallet'",
+            "SELECT COUNT(*) FROM tx_address a JOIN tx_program p ON p.program_address_id = a.id WHERE a.address_type = 'wallet'",
+            """SELECT COUNT(*) FROM tx_address a WHERE a.address_type = 'wallet'
+               AND (a.id IN (SELECT token_account1_id FROM tx_pool WHERE token_account1_id IS NOT NULL)
+                 OR a.id IN (SELECT token_account2_id FROM tx_pool WHERE token_account2_id IS NOT NULL))""",
+            "SELECT COUNT(*) FROM tx_address WHERE address_type = 'wallet' AND address LIKE '%pump'",
+        ]
+
+        total_fixed = 0
+        for i, (desc, sql) in enumerate(fixes):
+            if args.dry_run:
+                cursor.execute(count_queries[i])
+                count = cursor.fetchone()[0]
+                print(f"  [DRY] Would fix {count}: {desc}")
+            else:
+                cursor.execute(sql)
+                conn.commit()
+                print(f"  Fixed {cursor.rowcount}: {desc}")
+                total_fixed += cursor.rowcount
+
+        if not args.dry_run:
+            print(f"\nTotal fixed: {total_fixed}")
+
+        # Find remaining suspects for full classification
+        cursor.execute("""
+            SELECT a.address
+            FROM tx_address a
+            WHERE a.address_type = 'wallet'
+              AND (SELECT COUNT(*) FROM tx_address fa WHERE fa.funded_by_address_id = a.id) >= 10
+        """)
+        high_funders = [row[0] for row in cursor.fetchall()]
+
+        cursor.close()
+        conn.close()
+
+        if high_funders:
+            print(f"\nFound {len(high_funders)} high-funder wallets (funded 10+ addresses)")
+            print("These may be exchanges/services - run full classification to verify")
+
+            # If not dry-run and we want to continue with classification
+            if not args.dry_run and args.limit > 0:
+                addresses = high_funders[:args.limit]
+                print(f"Continuing with classification of {len(addresses)} addresses...")
+            else:
+                return
+        else:
+            print("\nNo remaining suspects found!")
+            return
+
     # Load addresses
-    print(f"Loading addresses from: {args.file}")
-    with open(args.file, 'r') as f:
-        addresses = [line.strip() for line in f if line.strip()]
+    elif args.from_db:
+        print(f"Loading unknown addresses from tx_address table...")
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        query = "SELECT address FROM tx_address WHERE address_type = 'unknown'"
+        if args.limit > 0:
+            query += f" LIMIT {args.limit}"
+        cursor.execute(query)
+        addresses = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        print(f"Loaded {len(addresses)} unknown addresses from database")
+    else:
+        print(f"Loading addresses from: {args.file}")
+        with open(args.file, 'r') as f:
+            addresses = [line.strip() for line in f if line.strip()]
 
-    print(f"Loaded {len(addresses)} addresses")
+        print(f"Loaded {len(addresses)} addresses")
 
-    if args.limit > 0:
-        addresses = addresses[:args.limit]
-        print(f"Limited to first {args.limit} addresses")
+        if args.limit > 0:
+            addresses = addresses[:args.limit]
+            print(f"Limited to first {args.limit} addresses")
+
+    if not addresses:
+        print("No addresses to process!")
+        return
 
     # Run classification
-    classifications = run_classification(addresses, args.dry_run)
+    enrich_pools = not args.no_enrich_pools
+    classifications, pool_data = run_classification(addresses, args.dry_run, enrich_pools)
 
     # Update database
-    update_database(classifications, args.dry_run)
+    update_database(classifications, pool_data, args.dry_run)
 
     # Generate report
     generate_report(classifications, args.report)

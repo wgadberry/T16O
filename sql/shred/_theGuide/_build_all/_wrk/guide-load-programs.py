@@ -108,63 +108,39 @@ def fetch_programs_page(page: int, page_size: int = 40) -> Tuple[List[dict], int
 def ensure_address(cursor, conn, address: str, address_type: str = "program", label: str = None) -> int:
     """
     Ensure address exists in tx_address with correct type, returns address_id
+    Uses INSERT ... ON DUPLICATE KEY UPDATE for atomicity
     """
-    cursor.execute("SELECT id, address_type, label FROM tx_address WHERE address = %s", (address,))
-    row = cursor.fetchone()
-
-    if row:
-        addr_id, existing_type, existing_label = row
-        updates = []
-        params = []
-
-        # Update type if it was unknown/null
-        if existing_type in (None, 'unknown') and address_type:
-            updates.append("address_type = %s")
-            params.append(address_type)
-
-        # Update label if we have one and existing is null
-        if label and not existing_label:
-            updates.append("label = %s")
-            params.append(label)
-
-        if updates:
-            params.append(addr_id)
-            cursor.execute(f"UPDATE tx_address SET {', '.join(updates)} WHERE id = %s", params)
-            conn.commit()
-
-        return addr_id
-
-    # Insert new
     cursor.execute("""
         INSERT INTO tx_address (address, address_type, label)
         VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            address_type = CASE WHEN address_type IN ('unknown', '') OR address_type IS NULL THEN VALUES(address_type) ELSE address_type END,
+            label = COALESCE(label, VALUES(label))
     """, (address, address_type, label))
     conn.commit()
-    return cursor.lastrowid
+
+    # Get the id (either inserted or existing)
+    cursor.execute("SELECT id FROM tx_address WHERE address = %s", (address,))
+    return cursor.fetchone()[0]
 
 
 def ensure_program(cursor, conn, address_id: int, name: str = None, program_type: str = "other") -> int:
     """
     Ensure program exists in tx_program, returns program_id
+    Uses INSERT ... ON DUPLICATE KEY UPDATE for atomicity
     """
-    cursor.execute("SELECT id, name FROM tx_program WHERE program_address_id = %s", (address_id,))
-    row = cursor.fetchone()
-
-    if row:
-        prog_id, existing_name = row
-        # Update name if we have one and existing is null
-        if name and not existing_name:
-            cursor.execute("UPDATE tx_program SET name = %s WHERE id = %s", (name, prog_id))
-            conn.commit()
-        return prog_id
-
-    # Insert new
     cursor.execute("""
         INSERT INTO tx_program (program_address_id, name, program_type)
         VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            name = COALESCE(VALUES(name), name),
+            program_type = CASE WHEN program_type = 'other' THEN COALESCE(VALUES(program_type), program_type) ELSE program_type END
     """, (address_id, name, program_type))
     conn.commit()
-    return cursor.lastrowid
+
+    # Get the id (either inserted or existing)
+    cursor.execute("SELECT id FROM tx_program WHERE program_address_id = %s", (address_id,))
+    return cursor.fetchone()[0]
 
 
 def main():

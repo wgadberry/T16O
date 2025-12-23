@@ -46,7 +46,7 @@ def fetch_token_meta(session: requests.Session, mint_address: str) -> dict:
     return response.json()
 
 
-def get_tokens_missing_metadata(cursor, limit: int, max_attempts: int = 3) -> list:
+def get_tokens_missing_metadata(cursor, limit: int, max_attempts: int = 1) -> list:
     """Get tokens missing symbol, name, or decimals (excluding those with too many failed attempts)"""
     cursor.execute("""
         SELECT t.id, a.address as mint
@@ -57,7 +57,7 @@ def get_tokens_missing_metadata(cursor, limit: int, max_attempts: int = 3) -> li
            OR t.token_name IS NULL
            OR t.token_name = ''
            OR t.decimals IS NULL)
-          AND COALESCE(t.attempt_cnt, 0) <= %s
+          AND COALESCE(t.attempt_cnt, 0) < %s
         LIMIT %s
     """, (max_attempts, limit))
     return cursor.fetchall()
@@ -75,24 +75,36 @@ def increment_attempt_count(cursor, conn, token_id: int):
 
 def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
                           icon: str, decimals: int) -> bool:
-    """Update token with fetched metadata"""
+    """Update token with fetched metadata and reset attempt_cnt on success"""
     cursor.execute("""
         UPDATE tx_token
         SET token_name = COALESCE(%s, token_name),
             token_symbol = COALESCE(%s, token_symbol),
             token_icon = COALESCE(%s, token_icon),
-            decimals = COALESCE(%s, decimals)
+            decimals = COALESCE(%s, decimals),
+            attempt_cnt = 0
         WHERE id = %s
     """, (name, symbol, icon, decimals, token_id))
     conn.commit()
     return cursor.rowcount > 0
 
 
+def create_db_connection(args):
+    """Create a fresh database connection"""
+    return mysql.connector.connect(
+        host=args.db_host,
+        port=args.db_port,
+        user=args.db_user,
+        password=args.db_pass,
+        database=args.db_name
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description='Backfill missing token metadata from Solscan')
     parser.add_argument('--limit', type=int, default=1000, help='Max tokens to process')
     parser.add_argument('--delay', type=float, default=0.2, help='Delay between API calls (seconds)')
-    parser.add_argument('--max-attempts', type=int, default=3, help='Skip tokens with more than N failed attempts')
+    parser.add_argument('--max-attempts', type=int, default=1, help='Skip tokens with more than N failed attempts')
     parser.add_argument('--daemon', action='store_true', help='Run continuously as a daemon')
     parser.add_argument('--interval', type=int, default=60, help='Seconds between batches in daemon mode')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
@@ -109,26 +121,29 @@ def main():
         print(f"Interval: {args.interval}s | Limit: {args.limit} | Max attempts: {args.max_attempts}")
         print(f"{'='*60}")
 
-    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
-    conn = mysql.connector.connect(
-        host=args.db_host,
-        port=args.db_port,
-        user=args.db_user,
-        password=args.db_pass,
-        database=args.db_name
-    )
-    cursor = conn.cursor()
-
     # Create API session
     session = create_api_session()
 
     total_updated = 0
     total_failed = 0
     batch_num = 0
+    conn = None
+    cursor = None
 
     try:
         while True:
             batch_num += 1
+
+            # Reconnect to database each batch (connections go stale during sleep)
+            if conn:
+                try:
+                    cursor.close()
+                    conn.close()
+                except:
+                    pass
+            print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
+            conn = create_db_connection(args)
+            cursor = conn.cursor()
 
             # Get tokens needing metadata
             tokens = get_tokens_missing_metadata(cursor, args.limit, args.max_attempts)
@@ -136,6 +151,9 @@ def main():
             if not tokens:
                 if args.daemon:
                     print(f"[Batch {batch_num}] No tokens to process, sleeping {args.interval}s...")
+                    cursor.close()
+                    conn.close()
+                    conn = None
                     time.sleep(args.interval)
                     continue
                 else:
@@ -154,9 +172,6 @@ def main():
             for i, (token_id, mint) in enumerate(tokens, 1):
                 print(f"  [{i}/{len(tokens)}] Fetching {mint[:16]}...", end=" ")
 
-                # Increment attempt count before trying
-                increment_attempt_count(cursor, conn, token_id)
-
                 try:
                     response = fetch_token_meta(session, mint)
 
@@ -167,17 +182,27 @@ def main():
                         icon = data.get('icon')
                         decimals = data.get('decimals')
 
-                        if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals):
-                            print(f"{symbol or 'unnamed'} ({decimals} dec)")
-                            updated += 1
+                        # Only update if we got actual metadata
+                        if name or symbol or decimals is not None:
+                            if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals):
+                                print(f"{symbol or 'unnamed'} ({decimals} dec)")
+                                updated += 1
+                            else:
+                                print("no change")
+                                increment_attempt_count(cursor, conn, token_id)
+                                failed += 1
                         else:
-                            print("no change")
+                            print("empty data")
+                            increment_attempt_count(cursor, conn, token_id)
+                            failed += 1
                     else:
                         print("not found")
+                        increment_attempt_count(cursor, conn, token_id)
                         failed += 1
 
                 except requests.RequestException as e:
                     print(f"API error: {e}")
+                    increment_attempt_count(cursor, conn, token_id)
                     failed += 1
 
                 # Rate limiting
@@ -191,6 +216,9 @@ def main():
                 print(f"  [+] Batch complete: {updated} updated, {failed} failed")
                 print(f"      Totals: {total_updated} updated, {total_failed} failed")
                 print(f"      Sleeping {args.interval}s...")
+                cursor.close()
+                conn.close()
+                conn = None
                 time.sleep(args.interval)
             else:
                 break
@@ -200,7 +228,12 @@ def main():
 
     finally:
         session.close()
-        conn.close()
+        if conn:
+            try:
+                cursor.close()
+                conn.close()
+            except:
+                pass
 
     print(f"\n{'='*60}")
     print(f"Done! Updated: {total_updated}, Failed: {total_failed}")

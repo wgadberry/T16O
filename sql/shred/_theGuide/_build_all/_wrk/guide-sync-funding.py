@@ -307,6 +307,73 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int, batch_size:
     return total_rows
 
 
+def backfill_funding_edges(cursor, conn) -> int:
+    """
+    Backfill tx_funding_edge records that have missing data.
+    Updates edges where total_sol=0 or total_tokens=0 but tx_guide has data.
+    Returns count of updated rows.
+    """
+    total_updated = 0
+
+    # Backfill SOL transfers
+    query_sol = """
+        UPDATE tx_funding_edge fe
+        JOIN (
+            SELECT
+                g.from_address_id,
+                g.to_address_id,
+                SUM(g.amount / POW(10, COALESCE(g.decimals, 9))) as sol_total,
+                COUNT(*) as transfer_count,
+                MIN(g.block_time) as first_time,
+                MAX(g.block_time) as last_time
+            FROM tx_guide g
+            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            WHERE gt.type_code IN ('sol_transfer', 'wallet_funded')
+            GROUP BY g.from_address_id, g.to_address_id
+        ) agg ON agg.from_address_id = fe.from_address_id
+             AND agg.to_address_id = fe.to_address_id
+        SET
+            fe.total_sol = agg.sol_total,
+            fe.transfer_count = fe.transfer_count + agg.transfer_count,
+            fe.first_transfer_time = LEAST(COALESCE(fe.first_transfer_time, agg.first_time), agg.first_time),
+            fe.last_transfer_time = GREATEST(COALESCE(fe.last_transfer_time, agg.last_time), agg.last_time)
+        WHERE COALESCE(fe.total_sol, 0) = 0
+    """
+    cursor.execute(query_sol)
+    total_updated += cursor.rowcount
+    conn.commit()
+
+    # Backfill token transfers
+    query_tokens = """
+        UPDATE tx_funding_edge fe
+        JOIN (
+            SELECT
+                g.from_address_id,
+                g.to_address_id,
+                SUM(g.amount / POW(10, COALESCE(g.decimals, 9))) as token_total,
+                COUNT(*) as transfer_count,
+                MIN(g.block_time) as first_time,
+                MAX(g.block_time) as last_time
+            FROM tx_guide g
+            JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+            WHERE gt.type_code = 'spl_transfer'
+            GROUP BY g.from_address_id, g.to_address_id
+        ) agg ON agg.from_address_id = fe.from_address_id
+             AND agg.to_address_id = fe.to_address_id
+        SET
+            fe.total_tokens = agg.token_total,
+            fe.transfer_count = fe.transfer_count + agg.transfer_count,
+            fe.first_transfer_time = LEAST(COALESCE(fe.first_transfer_time, agg.first_time), agg.first_time),
+            fe.last_transfer_time = GREATEST(COALESCE(fe.last_transfer_time, agg.last_time), agg.last_time)
+        WHERE COALESCE(fe.total_tokens, 0) = 0
+    """
+    cursor.execute(query_tokens)
+    total_updated += cursor.rowcount
+    conn.commit()
+
+    return total_updated
+
+
 def run_sync(cursor, conn, table: str = 'both', batch_size: int = 10000, verbose: bool = True) -> dict:
     """
     Run sync for specified table(s).
@@ -389,6 +456,8 @@ Examples:
                         help='Show current sync status and exit')
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='Minimal output')
+    parser.add_argument('--backfill', action='store_true',
+                        help='Backfill edges with missing total_sol or total_tokens from tx_guide')
 
     args = parser.parse_args()
 
@@ -406,6 +475,13 @@ Examples:
             print(f"  tx_guide max id: {max_id:,}")
             print(f"  funding_edge last synced: {funding_last:,} (behind: {max_id - funding_last:,})")
             print(f"  token_participant last synced: {participant_last:,} (behind: {max_id - participant_last:,})")
+            return
+
+        if args.backfill:
+            # Backfill edges with missing data from tx_guide
+            print("Backfilling funding edges with missing data...")
+            count = backfill_funding_edges(cursor, conn)
+            print(f"  Updated {count:,} funding edge records")
             return
 
         if args.daemon:
@@ -427,14 +503,33 @@ Examples:
                         else:
                             print(f"[{timestamp}] No new records\n")
 
+                    # Close connection before sleeping (connections go stale)
+                    try:
+                        cursor.close()
+                        conn.close()
+                    except:
+                        pass
+
                     time.sleep(args.interval)
+
+                    # Reconnect after sleep
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
 
                 except KeyboardInterrupt:
                     print("\nStopping sync daemon...")
                     break
                 except Exception as e:
                     print(f"Error during sync: {e}")
+                    # Reconnect on error
+                    try:
+                        cursor.close()
+                        conn.close()
+                    except:
+                        pass
                     time.sleep(args.interval)
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
         else:
             # Single run
             if not args.quiet:

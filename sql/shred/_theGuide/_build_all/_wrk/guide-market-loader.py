@@ -107,24 +107,18 @@ def ensure_address(cursor, conn, address: str, addr_type: str = 'unknown') -> Op
     return cursor.lastrowid
 
 
-def ensure_token(cursor, conn, mint_address: str) -> Optional[int]:
-    """Ensure token exists, return id"""
+def lookup_token(cursor, mint_address: str) -> Optional[int]:
+    """Lookup existing token by mint address. Returns None if not found (does NOT create)."""
     if not mint_address:
         return None
 
-    addr_id = ensure_address(cursor, conn, mint_address, 'mint')
-
-    cursor.execute("SELECT id FROM tx_token WHERE mint_address_id = %s", (addr_id,))
-    row = cursor.fetchone()
-    if row:
-        return row[0]
-
     cursor.execute("""
-        INSERT INTO tx_token (mint_address_id)
-        VALUES (%s)
-    """, (addr_id,))
-    conn.commit()
-    return cursor.lastrowid
+        SELECT tk.id FROM tx_token tk
+        JOIN tx_address a ON a.id = tk.mint_address_id
+        WHERE a.address = %s
+    """, (mint_address,))
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 def ensure_pool(cursor, conn, pool_address: str, program_id: int = None) -> Optional[int]:
@@ -230,8 +224,9 @@ def process_market_item(cursor, conn, item: Dict) -> bool:
         # Ensure entities exist
         program_id = ensure_program(cursor, conn, program_address) if program_address else None
         pool_id = ensure_pool(cursor, conn, pool_address, program_id)
-        token1_id = ensure_token(cursor, conn, token1_mint) if token1_mint else None
-        token2_id = ensure_token(cursor, conn, token2_mint) if token2_mint else None
+        # Only lookup existing tokens - don't create new ones for market pairs
+        token1_id = lookup_token(cursor, token1_mint) if token1_mint else None
+        token2_id = lookup_token(cursor, token2_mint) if token2_mint else None
         token_account1_id = ensure_address(cursor, conn, token1_account, 'ata') if token1_account else None
         token_account2_id = ensure_address(cursor, conn, token2_account, 'ata') if token2_account else None
 
@@ -304,6 +299,17 @@ def sync_markets(cursor, conn, session, args) -> tuple:
 # Main
 # =============================================================================
 
+def create_db_connection(args):
+    """Create a fresh database connection"""
+    return mysql.connector.connect(
+        host=args.db_host,
+        port=args.db_port,
+        user=args.db_user,
+        password=args.db_pass,
+        database=args.db_name
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description='Load market data from Solscan for tokens in tx_guide')
     parser.add_argument('--limit', type=int, default=100, help='Max tokens to process per cycle')
@@ -349,27 +355,30 @@ def main():
         print(f"MODE: DRY RUN")
     print()
 
-    # Connect to MySQL
-    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
-    conn = mysql.connector.connect(
-        host=args.db_host,
-        port=args.db_port,
-        user=args.db_user,
-        password=args.db_pass,
-        database=args.db_name
-    )
-    cursor = conn.cursor()
-
     # Stats
     grand_tokens = 0
     grand_markets = 0
     grand_errors = 0
     cycles = 0
+    conn = None
+    cursor = None
 
     try:
         while True:
             cycles += 1
             from datetime import datetime
+
+            # Reconnect to database each cycle (connections go stale during sleep)
+            if conn:
+                try:
+                    cursor.close()
+                    conn.close()
+                except:
+                    pass
+            print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
+            conn = create_db_connection(args)
+            cursor = conn.cursor()
+
             print(f"\n{'='*50}")
             print(f"Cycle {cycles} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*50}")
@@ -384,6 +393,11 @@ def main():
             if not args.daemon:
                 break
 
+            # Close connection before sleeping
+            cursor.close()
+            conn.close()
+            conn = None
+
             print(f"Sleeping {args.interval}s until next cycle...")
             time.sleep(args.interval)
 
@@ -392,8 +406,12 @@ def main():
 
     finally:
         session.close()
-        cursor.close()
-        conn.close()
+        if conn:
+            try:
+                cursor.close()
+                conn.close()
+            except:
+                pass
 
     print(f"\n{'='*50}")
     print(f"Done! Total across {cycles} cycle(s):")

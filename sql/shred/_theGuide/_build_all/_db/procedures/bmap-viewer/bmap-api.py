@@ -12,6 +12,12 @@ import json
 import os
 import subprocess
 import threading
+import time
+import random
+
+# Deadlock retry config
+MAX_RETRIES = 3
+BASE_BACKOFF = 0.3  # seconds
 
 # Path to guide-producer.py
 GUIDE_PRODUCER_PATH = os.path.abspath(os.path.join(
@@ -54,38 +60,74 @@ def get_bmap():
     tx_limit = request.args.get('tx_limit')
     tx_limit = int(tx_limit) if tx_limit else None
 
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor()
 
-        cursor.callproc('sp_tx_bmap_get_token_state', [
-            token_name,
-            token_symbol,
-            mint_address,
-            signature,
-            block_time,
-            tx_limit
-        ])
+            cursor.callproc('sp_tx_bmap_get_token_state', [
+                token_name,
+                token_symbol,
+                mint_address,
+                signature,
+                block_time,
+                tx_limit
+            ])
 
-        # Get the result
-        result = None
-        for res in cursor.stored_results():
-            row = res.fetchone()
-            if row:
-                result = json.loads(row[0])
+            # Get the result
+            result = None
+            for res in cursor.stored_results():
+                row = res.fetchone()
+                if row:
+                    result = json.loads(row[0])
 
-        cursor.close()
-        conn.close()
+            cursor.close()
+            conn.close()
 
-        if result:
-            return jsonify(result)
-        else:
-            return jsonify({'result': {'error': 'No result returned'}}), 404
+            if result:
+                return jsonify(result)
+            else:
+                return jsonify({'result': {'error': 'No result returned'}}), 404
 
-    except mysql.connector.Error as e:
-        return jsonify({'result': {'error': f'Database error: {str(e)}'}}), 500
-    except Exception as e:
-        return jsonify({'result': {'error': f'Error: {str(e)}'}}), 500
+        except mysql.connector.Error as e:
+            last_error = e
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
+            # Check for deadlock (error 1213) and retry
+            if e.errno == 1213 and attempt < MAX_RETRIES - 1:
+                backoff = BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 0.2)
+                print(f"[bmap] Deadlock detected (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {backoff:.2f}s...")
+                time.sleep(backoff)
+                continue
+
+            return jsonify({'result': {'error': f'Database error: {str(e)}'}}), 500
+        except Exception as e:
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            return jsonify({'result': {'error': f'Error: {str(e)}'}}), 500
+
+    # Exhausted retries
+    return jsonify({'result': {'error': f'Database error after {MAX_RETRIES} retries: {str(last_error)}'}}), 500
 
 @app.route('/api/timerange', methods=['GET'])
 def get_timerange():
@@ -100,53 +142,87 @@ def get_timerange():
     if not token_symbol and not mint_address:
         return jsonify({'error': 'token_symbol or mint_address required'}), 400
 
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor(dictionary=True)
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor(dictionary=True)
 
-        if mint_address:
-            query = """
-                SELECT
-                    MIN(t.block_time) as min_time,
-                    MAX(t.block_time) as max_time,
-                    COUNT(DISTINCT t.id) as tx_count
-                FROM tx_guide g
-                JOIN tx t ON t.id = g.tx_id
-                JOIN tx_token tk ON tk.id = g.token_id
-                JOIN tx_address mint ON mint.id = tk.mint_address_id
-                WHERE mint.address = %s
-            """
-            cursor.execute(query, (mint_address,))
-        else:
-            query = """
-                SELECT
-                    MIN(t.block_time) as min_time,
-                    MAX(t.block_time) as max_time,
-                    COUNT(DISTINCT t.id) as tx_count
-                FROM tx_guide g
-                JOIN tx t ON t.id = g.tx_id
-                JOIN tx_token tk ON tk.id = g.token_id
-                WHERE tk.token_symbol = %s
-            """
-            cursor.execute(query, (token_symbol,))
+            if mint_address:
+                query = """
+                    SELECT
+                        MIN(t.block_time) as min_time,
+                        MAX(t.block_time) as max_time,
+                        COUNT(DISTINCT t.id) as tx_count
+                    FROM tx_guide g
+                    JOIN tx t ON t.id = g.tx_id
+                    JOIN tx_token tk ON tk.id = g.token_id
+                    JOIN tx_address mint ON mint.id = tk.mint_address_id
+                    WHERE mint.address = %s
+                """
+                cursor.execute(query, (mint_address,))
+            else:
+                query = """
+                    SELECT
+                        MIN(t.block_time) as min_time,
+                        MAX(t.block_time) as max_time,
+                        COUNT(DISTINCT t.id) as tx_count
+                    FROM tx_guide g
+                    JOIN tx t ON t.id = g.tx_id
+                    JOIN tx_token tk ON tk.id = g.token_id
+                    WHERE tk.token_symbol = %s
+                """
+                cursor.execute(query, (token_symbol,))
 
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
 
-        if row and row['min_time']:
-            return jsonify({
-                'min_time': row['min_time'],
-                'max_time': row['max_time'],
-                'tx_count': row['tx_count']
-            })
-        else:
-            return jsonify({'error': 'No transactions found'}), 404
+            if row and row['min_time']:
+                return jsonify({
+                    'min_time': row['min_time'],
+                    'max_time': row['max_time'],
+                    'tx_count': row['tx_count']
+                })
+            else:
+                return jsonify({'error': 'No transactions found'}), 404
 
-    except mysql.connector.Error as e:
-        return jsonify({'error': f'Database error: {str(e)}'}), 500
-    except Exception as e:
-        return jsonify({'error': f'Error: {str(e)}'}), 500
+        except mysql.connector.Error as e:
+            last_error = e
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
+            if e.errno == 1213 and attempt < MAX_RETRIES - 1:
+                backoff = BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 0.2)
+                print(f"[timerange] Deadlock detected (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {backoff:.2f}s...")
+                time.sleep(backoff)
+                continue
+
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+        except Exception as e:
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            return jsonify({'error': f'Error: {str(e)}'}), 500
+
+    return jsonify({'error': f'Database error after {MAX_RETRIES} retries: {str(last_error)}'}), 500
 
 @app.route('/api/fetch-wallet', methods=['POST'])
 def fetch_wallet():
