@@ -386,6 +386,21 @@ BEGIN
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
         WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id);
 
+        -- Add pool addresses as nodes (from tx_swap.amm_id for swaps in display window)
+        INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
+        SELECT DISTINCT
+            pool_addr.id,
+            pool_addr.address,
+            COALESCE(pool_addr.label, 'pool'),
+            COALESCE(pool_addr.address_type, 'pool'),
+            0,
+            NULL
+        FROM tx_swap s
+        JOIN tmp_display_window w ON w.tx_id = s.tx_id
+        JOIN tx_pool p ON p.id = s.amm_id
+        JOIN tx_address pool_addr ON pool_addr.id = p.pool_address_id
+        WHERE s.amm_id IS NOT NULL;
+
         -- Enrich pool nodes with pool_label
         UPDATE tmp_nodes n
         JOIN tx_pool p ON p.pool_address_id = n.address_id
@@ -468,12 +483,26 @@ BEGIN
 
         SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
         FROM (
-            -- Swap edges (swap_in, swap_out) - enriched with DEX name, pool, program
+            -- Swap edges - route through pool when available
+            -- swap_in: wallet → pool (sending token into swap)
+            -- swap_out: pool → wallet (receiving token from swap)
             SELECT JSON_OBJECT(
-                'source', fa.address,
-                'source_label', COALESCE(fa.label, fa.address_type),
-                'target', ta.address,
-                'target_label', COALESCE(ta.label, ta.address_type),
+                'source', CASE
+                    WHEN gt.type_code = 'swap_in' THEN fa.address  -- wallet sends
+                    ELSE COALESCE(pool_addr.address, fa.address)   -- pool sends (or fallback to original)
+                END,
+                'source_label', CASE
+                    WHEN gt.type_code = 'swap_in' THEN COALESCE(fa.label, fa.address_type)
+                    ELSE COALESCE(pool.pool_label, pool_addr.address, fa.label, fa.address_type)
+                END,
+                'target', CASE
+                    WHEN gt.type_code = 'swap_in' THEN COALESCE(pool_addr.address, ta.address)  -- to pool (or fallback)
+                    ELSE ta.address  -- wallet receives
+                END,
+                'target_label', CASE
+                    WHEN gt.type_code = 'swap_in' THEN COALESCE(pool.pool_label, pool_addr.address, ta.label, ta.address_type)
+                    ELSE COALESCE(ta.label, ta.address_type)
+                END,
                 'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 6),
                 'type', gt.type_code,
                 'category', gt.category,
