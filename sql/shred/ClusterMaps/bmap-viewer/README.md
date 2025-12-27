@@ -46,8 +46,19 @@ GET /api/bmap?token_symbol=BONK&block_time=1703000000
 
 Multiple JavaScript graph visualization libraries were evaluated for rendering token flow graphs. Each version explored different trade-offs between performance, features, and developer experience.
 
+### Quick Reference
+
+| Version | Library | API | Port | URL |
+|---------|---------|-----|------|-----|
+| V1 | D3.js | `bmap-api.py` | 5050 | http://localhost:5050 |
+| V2 | Plotly.js | `bmap-api-v2.py` | 5051 | http://localhost:5051 |
+| V3 | Cytoscape.js | `bmap-api-v3.py` | 5052 | http://localhost:5052 |
+| V4 | ECharts | `bmap-api-v4.py` | 5053 | http://localhost:5053 |
+| V5 | Sigma.js | `bmap-api-v5.py` | 5054 | http://localhost:5054 |
+| Wallet | D3.js | `bmap-wallet-api.py` | 5055 | http://localhost:5055 |
+
 ### V1: D3.js (Current Production)
-**File:** `bmap-viewer.html` (100 KB)
+**File:** `bmap-viewer.html` | **API:** `bmap-api.py` | **Port:** 5050
 **Library:** [D3.js v7](https://d3js.org/)
 
 The production version using D3's force-directed graph simulation. Provides the most control and customization but requires manual implementation of all interactions.
@@ -66,7 +77,7 @@ The production version using D3's force-directed graph simulation. Provides the 
 ---
 
 ### V2: Plotly.js
-**File:** `bmap-viewer-v2.html` (27 KB)
+**File:** `bmap-viewer-v2.html` | **API:** `bmap-api-v2.py` | **Port:** 5051
 **Library:** [Plotly.js 2.27.0](https://plotly.com/javascript/)
 
 Attempted to leverage Plotly's scatter plot with lines for network visualization.
@@ -87,7 +98,7 @@ Attempted to leverage Plotly's scatter plot with lines for network visualization
 ---
 
 ### V3: Cytoscape.js
-**File:** `bmap-viewer-v3.html` (27 KB)
+**File:** `bmap-viewer-v3.html` | **API:** `bmap-api-v3.py` | **Port:** 5052
 **Library:** [Cytoscape.js 3.28.1](https://js.cytoscape.org/)
 
 Purpose-built graph visualization library with extensive layout algorithms.
@@ -108,7 +119,7 @@ Purpose-built graph visualization library with extensive layout algorithms.
 ---
 
 ### V4: Apache ECharts
-**File:** `bmap-viewer-v4.html` (26 KB)
+**File:** `bmap-viewer-v4.html` | **API:** `bmap-api-v4.py` | **Port:** 5053
 **Library:** [ECharts 5.4.3](https://echarts.apache.org/)
 
 Chinese-developed charting library with graph support.
@@ -129,7 +140,7 @@ Chinese-developed charting library with graph support.
 ---
 
 ### V5: Sigma.js + Graphology (WebGL)
-**File:** `bmap-viewer-v5.html` (28 KB)
+**File:** `bmap-viewer-v5.html` | **API:** `bmap-api-v5.py` | **Port:** 5054
 **Libraries:** [Sigma.js 2.4.0](https://www.sigmajs.org/) + [Graphology 0.25.4](https://graphology.github.io/)
 
 WebGL-accelerated renderer for large graphs, paired with Graphology for graph data structure.
@@ -150,8 +161,7 @@ WebGL-accelerated renderer for large graphs, paired with Graphology for graph da
 ---
 
 ### Wallet Viewer: D3.js (Funding Tree)
-**File:** `bmap-wallet-viewer.html` (24 KB)
-**API:** `bmap-wallet-api.py`
+**File:** `bmap-wallet-viewer.html` | **API:** `bmap-wallet-api.py` | **Port:** 5055
 
 Specialized viewer for wallet funding relationships. Uses D3.js with a hierarchical tree layout instead of force-directed.
 
