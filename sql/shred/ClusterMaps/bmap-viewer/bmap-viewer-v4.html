@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer V4 (ECharts)</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 2800px; margin: 0 auto; }
+
+        h1 { text-align: center; margin-bottom: 20px; color: var(--accent); }
+
+        .version-badge {
+            background: #f97316;
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input, .form-group select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+
+        .edge-type {
+            background: var(--accent);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 11px;
+            display: inline-block;
+            margin: 2px;
+        }
+        .edge-type.swap_in { background: #22c55e; }
+        .edge-type.swap_out { background: #ef4444; }
+        .edge-type.spl_transfer { background: #3b82f6; }
+        .edge-type.create_ata { background: #06b6d4; }
+        .edge-type.close_ata { background: #0891b2; }
+
+        .echarts-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .echarts-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .echarts-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .controls label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .controls select, .controls button {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .controls button:hover { border-color: var(--accent); }
+
+        #echarts-graph {
+            width: 100%;
+            height: 800px;
+        }
+
+        .nav-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            padding: 15px 20px;
+        }
+
+        .nav-section h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+            color: var(--text-secondary);
+        }
+
+        .nav-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        .nav-btn {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .nav-btn:hover { border-color: var(--accent); }
+        .nav-btn .time { color: var(--text-secondary); font-size: 10px; display: block; }
+
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .data-content { padding: 15px; max-height: 400px; overflow-y: auto; }
+
+        .node-item, .edge-item {
+            background: var(--bg-input);
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 11px;
+        }
+
+        .node-item .address { font-family: monospace; color: var(--accent); word-break: break-all; }
+        .node-item .balance { color: var(--success); font-weight: bold; }
+
+        .error { background: #7f1d1d; color: #fca5a5; padding: 20px; border-radius: 10px; text-align: center; }
+        .loading { text-align: center; padding: 40px; color: var(--text-secondary); }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Token State Viewer <span class="version-badge">V4 ECharts</span></h1>
+
+        <form class="query-form" onsubmit="fetchData(); return false;">
+            <div class="form-group">
+                <label>Token Symbol</label>
+                <input type="text" id="token_symbol" placeholder="e.g., BONK">
+            </div>
+            <div class="form-group">
+                <label>Mint Address</label>
+                <input type="text" id="mint_address" placeholder="Token mint address">
+            </div>
+            <div class="form-group">
+                <label>Signature</label>
+                <input type="text" id="signature" placeholder="Transaction signature">
+            </div>
+            <div class="form-group">
+                <label>TX Window</label>
+                <select id="tx_limit">
+                    <option value="1">Single TX</option>
+                    <option value="10" selected>10 TX</option>
+                    <option value="20">20 TX</option>
+                    <option value="50">50 TX</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn">Load</button>
+            </div>
+        </form>
+
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let chart = null;
+        let currentData = null;
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading...</div>';
+
+            if (!params) {
+                params = {
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
+                };
+            } else {
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
+            }
+
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function navigateTo(signature) {
+            document.getElementById('signature').value = signature;
+            fetchData({ signature });
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+            if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toFixed(4);
+        }
+
+        function truncAddr(addr) {
+            return addr ? addr.slice(0, 6) + '...' + addr.slice(-4) : '';
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { token, txs, nodes, edges, echarts: ecData } = data.result || {};
+
+            if (!token) {
+                resultsDiv.innerHTML = '<div class="error">No data returned</div>';
+                return;
+            }
+
+            let html = '';
+
+            // Token Info
+            html += `
+                <div class="token-info">
+                    <div>
+                        <div class="symbol">${token.symbol || 'Unknown'}</div>
+                        <div class="mint">${token.mint || ''}</div>
+                    </div>
+                    ${txs ? `
+                        <div style="font-size: 12px; color: var(--text-secondary);">
+                            TX: ${truncAddr(txs.signature)}<br>
+                            ${txs.block_time_utc || ''}
+                        </div>
+                        <div>
+                            ${(txs.edge_types || []).map(t => `<span class="edge-type ${t}">${t}</span>`).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+
+            // Navigation
+            if (txs && (txs.prev?.length || txs.next?.length)) {
+                html += `
+                    <div class="nav-section">
+                        <h3>Navigation</h3>
+                        <div class="nav-buttons">
+                            ${(txs.prev || []).reverse().map(p => `
+                                <button class="nav-btn" onclick="navigateTo('${p.signature}')">
+                                    ← ${truncAddr(p.signature)}
+                                    <span class="time">${p.block_time_utc?.split(' ')[1] || ''}</span>
+                                </button>
+                            `).join('')}
+                            <button class="nav-btn" style="background: var(--accent);" disabled>Current</button>
+                            ${(txs.next || []).map(n => `
+                                <button class="nav-btn" onclick="navigateTo('${n.signature}')">
+                                    ${truncAddr(n.signature)} →
+                                    <span class="time">${n.block_time_utc?.split(' ')[1] || ''}</span>
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // ECharts Container
+            html += `
+                <div class="echarts-container">
+                    <div class="echarts-header">
+                        <h3>Network Graph (Apache ECharts)</h3>
+                        <div class="controls">
+                            <label><input type="checkbox" id="show-labels" checked onchange="toggleLabels()"> Labels</label>
+                            <label><input type="checkbox" id="roam-enabled" checked onchange="toggleRoam()"> Zoom/Pan</label>
+                            <label><input type="checkbox" id="draggable" checked onchange="toggleDrag()"> Draggable</label>
+                            <button onclick="chart.dispatchAction({type: 'restore'})">Reset</button>
+                            <button onclick="exportPNG()">Export PNG</button>
+                        </div>
+                    </div>
+                    <div id="echarts-graph"></div>
+                </div>
+            `;
+
+            // Data Grid
+            html += `
+                <div class="data-grid">
+                    <div class="data-section">
+                        <h3>Nodes (${nodes?.length || 0})</h3>
+                        <div class="data-content" id="nodes-list"></div>
+                    </div>
+                    <div class="data-section">
+                        <h3>Edges (${edges?.length || 0})</h3>
+                        <div class="data-content" id="edges-list"></div>
+                    </div>
+                </div>
+            `;
+
+            resultsDiv.innerHTML = html;
+
+            // Render ECharts graph
+            if (ecData && ecData.nodes?.length) {
+                renderECharts(ecData);
+            }
+
+            // Render lists
+            renderNodesList(nodes);
+            renderEdgesList(edges);
+        }
+
+        function renderECharts(ecData) {
+            const container = document.getElementById('echarts-graph');
+            if (chart) {
+                chart.dispose();
+            }
+
+            chart = echarts.init(container, 'dark');
+
+            // Identify funder nodes (nodes that fund other nodes)
+            const funderAddresses = new Set();
+            ecData.nodes.forEach(n => {
+                if (n.funded_by) funderAddresses.add(n.funded_by);
+            });
+
+            // Enhance funder nodes with glowing effect
+            const enhancedNodes = ecData.nodes.map(node => {
+                const isFunder = funderAddresses.has(node.address);
+                const hasFunder = !!node.funded_by;
+                return {
+                    ...node,
+                    itemStyle: isFunder ? {
+                        color: '#a855f7',
+                        borderColor: '#d946ef',
+                        borderWidth: 3,
+                        shadowBlur: 20,
+                        shadowColor: 'rgba(168, 85, 247, 0.8)'
+                    } : undefined,
+                    label: {
+                        show: true,
+                        formatter: isFunder ? '💰 {b}' : (hasFunder ? '📥 {b}' : '{b}'),
+                        fontSize: isFunder ? 12 : 10,
+                        fontWeight: isFunder ? 'bold' : 'normal',
+                        color: isFunder ? '#d946ef' : '#aaa'
+                    }
+                };
+            });
+
+            // Separate funding edges for distinct styling
+            const fundingEdges = ecData.links.filter(l => l.edgeType === 'funded_by');
+            const otherEdges = ecData.links.filter(l => l.edgeType !== 'funded_by');
+
+            const option = {
+                backgroundColor: '#0d0d1a',
+                tooltip: {
+                    trigger: 'item',
+                    formatter: function(params) {
+                        if (params.dataType === 'node') {
+                            const d = params.data;
+                            const isFunder = funderAddresses.has(d.address);
+                            return `
+                                <div style="font-weight: bold; margin-bottom: 5px;">${isFunder ? '💰 FUNDER: ' : ''}${d.name}</div>
+                                <div style="font-family: monospace; font-size: 10px; color: #e94560; margin-bottom: 8px;">${d.address}</div>
+                                <div>Balance: <span style="color: #4ade80; font-weight: bold;">${formatNumber(d.balance)}</span></div>
+                                <div>SOL: <span style="color: #4ade80;">${formatNumber(d.sol_balance)}</span></div>
+                                ${d.funded_by ? `<div style="color: #a855f7;">Funded by: ${truncAddr(d.funded_by)}</div>` : ''}
+                                ${d.pool_label ? `<div>Pool: ${d.pool_label}</div>` : ''}
+                                ${d.token_name ? `<div>Token: ${d.token_name}</div>` : ''}
+                            `;
+                        } else if (params.dataType === 'edge') {
+                            const d = params.data;
+                            if (d.edgeType === 'funded_by') {
+                                return `
+                                    <div style="font-weight: bold; color: #a855f7;">💰 FUNDING</div>
+                                    <div style="color: #d946ef;">Wallet Funding Relationship</div>
+                                `;
+                            }
+                            return `
+                                <div style="font-weight: bold; color: ${d.lineStyle?.color || '#666'};">${d.edgeType || 'unknown'}</div>
+                                <div>Amount: <span style="color: #4ade80;">${formatNumber(d.value)} ${d.token_symbol || ''}</span></div>
+                                ${d.dex ? `<div>DEX: ${d.dex}</div>` : ''}
+                                ${d.pool_label ? `<div>Pool: ${d.pool_label}</div>` : ''}
+                            `;
+                        }
+                        return '';
+                    }
+                },
+                legend: {
+                    data: [...ecData.categories.map(c => c.name), 'Funding'],
+                    textStyle: { color: '#aaa' },
+                    top: 10,
+                    left: 10,
+                    selectedMode: 'multiple'
+                },
+                animationDuration: 1500,
+                animationEasingUpdate: 'quinticInOut',
+                series: [
+                    // Main graph series
+                    {
+                        name: 'Transactions',
+                        type: 'graph',
+                        layout: 'force',
+                        data: enhancedNodes,
+                        links: otherEdges,
+                        categories: ecData.categories,
+                        roam: true,
+                        draggable: true,
+                        label: {
+                            show: true,
+                            position: 'bottom',
+                            fontSize: 10,
+                            color: '#aaa'
+                        },
+                        labelLayout: {
+                            hideOverlap: true
+                        },
+                        edgeSymbol: ['none', 'arrow'],
+                        edgeSymbolSize: [0, 8],
+                        force: {
+                            repulsion: 350,
+                            gravity: 0.08,
+                            edgeLength: [60, 220],
+                            layoutAnimation: true
+                        },
+                        emphasis: {
+                            focus: 'adjacency',
+                            lineStyle: { width: 4 }
+                        },
+                        lineStyle: {
+                            curveness: 0.2
+                        }
+                    },
+                    // Funding edges as a separate series with distinct styling
+                    {
+                        name: 'Funding',
+                        type: 'graph',
+                        layout: 'none',
+                        data: [],
+                        links: fundingEdges.map(l => ({
+                            ...l,
+                            lineStyle: {
+                                color: {
+                                    type: 'linear',
+                                    x: 0, y: 0, x2: 1, y2: 0,
+                                    colorStops: [
+                                        { offset: 0, color: '#a855f7' },
+                                        { offset: 0.5, color: '#d946ef' },
+                                        { offset: 1, color: '#f0abfc' }
+                                    ]
+                                },
+                                width: 2,
+                                type: [5, 5],
+                                opacity: 0.7,
+                                curveness: 0.3
+                            }
+                        })),
+                        edgeSymbol: ['circle', 'arrow'],
+                        edgeSymbolSize: [4, 10],
+                        emphasis: {
+                            lineStyle: { width: 4, opacity: 1 }
+                        },
+                        zlevel: 2
+                    }
+                ]
+            };
+
+            chart.setOption(option);
+
+            // Click to copy
+            chart.on('click', 'series', function(params) {
+                if (params.dataType === 'node' && params.data.address) {
+                    navigator.clipboard.writeText(params.data.address);
+                    chart.dispatchAction({
+                        type: 'highlight',
+                        seriesIndex: 0,
+                        dataIndex: params.dataIndex
+                    });
+                    setTimeout(() => {
+                        chart.dispatchAction({
+                            type: 'downplay',
+                            seriesIndex: 0,
+                            dataIndex: params.dataIndex
+                        });
+                    }, 500);
+                }
+            });
+
+            // Resize handler
+            window.addEventListener('resize', () => chart.resize());
+        }
+
+        function toggleLabels() {
+            if (!chart) return;
+            const show = document.getElementById('show-labels').checked;
+            chart.setOption({
+                series: [{ label: { show: show } }]
+            });
+        }
+
+        function toggleRoam() {
+            if (!chart) return;
+            const enabled = document.getElementById('roam-enabled').checked;
+            chart.setOption({
+                series: [{ roam: enabled }]
+            });
+        }
+
+        function toggleDrag() {
+            if (!chart) return;
+            const enabled = document.getElementById('draggable').checked;
+            chart.setOption({
+                series: [{ draggable: enabled }]
+            });
+        }
+
+        function exportPNG() {
+            if (!chart) return;
+            const url = chart.getDataURL({
+                type: 'png',
+                pixelRatio: 2,
+                backgroundColor: '#0d0d1a'
+            });
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'bmap-graph.png';
+            link.click();
+        }
+
+        function renderNodesList(nodes) {
+            const div = document.getElementById('nodes-list');
+            if (!div || !nodes) return;
+            div.innerHTML = nodes.map(n => `
+                <div class="node-item">
+                    <div class="address">${n.address}</div>
+                    <div style="color: var(--text-secondary); margin: 4px 0;">${n.label || n.address_type}</div>
+                    <div>Balance: <span class="balance">${formatNumber(n.balance)}</span> | SOL: ${formatNumber(n.sol_balance)}</div>
+                </div>
+            `).join('');
+        }
+
+        function renderEdgesList(edges) {
+            const div = document.getElementById('edges-list');
+            if (!div || !edges) return;
+            div.innerHTML = edges.map(e => `
+                <div class="edge-item">
+                    <span class="edge-type ${e.type}">${e.type}</span>
+                    <span style="color: var(--success); margin-left: 8px;">${formatNumber(e.amount)} ${e.token_symbol || ''}</span>
+                    ${e.dex ? `<span style="color: #fbbf24; margin-left: 8px;">${e.dex}</span>` : ''}
+                </div>
+            `).join('');
+        }
+    </script>
+</body>
+</html>

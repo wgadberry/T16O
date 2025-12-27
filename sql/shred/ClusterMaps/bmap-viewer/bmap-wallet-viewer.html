@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Wallet Viewer - Funding Tree</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+            --funder-up: #a855f7;
+            --funder-down: #06b6d4;
+            --target: #f59e0b;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 2800px; margin: 0 auto; }
+
+        h1 { text-align: center; margin-bottom: 20px; color: var(--accent); }
+
+        .badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        .badge.wallet { background: var(--target); color: #000; }
+
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr 1fr auto;
+            gap: 15px;
+            align-items: end;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input, .form-group select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            height: 42px;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+
+        .info-bar {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .info-bar .target {
+            font-size: 20px;
+            font-weight: bold;
+            color: var(--target);
+        }
+
+        .info-bar .address {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .stats { display: flex; gap: 20px; margin-left: auto; }
+        .stat { text-align: center; }
+        .stat-value { font-size: 20px; font-weight: bold; }
+        .stat-value.up { color: var(--funder-up); }
+        .stat-value.down { color: var(--funder-down); }
+        .stat-value.txs { color: var(--success); }
+        .stat-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; }
+
+        .graph-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .graph-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .graph-header h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+
+        .legend {
+            display: flex;
+            gap: 20px;
+            font-size: 11px;
+        }
+
+        .legend-item { display: flex; align-items: center; gap: 5px; }
+        .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
+        .legend-dot.target { background: var(--target); box-shadow: 0 0 10px var(--target); }
+        .legend-dot.up { background: var(--funder-up); }
+        .legend-dot.down { background: var(--funder-down); }
+        .legend-dot.wallet { background: #3b82f6; }
+        .legend-dot.more { background: #666; border: 2px dashed #fff; }
+
+        #graph {
+            width: 100%;
+            height: 700px;
+            background: #0d0d1a;
+        }
+
+        .node-target { fill: var(--target); stroke: #fff; stroke-width: 3px; }
+        .node-up { fill: var(--funder-up); }
+        .node-down { fill: var(--funder-down); }
+        .node-wallet { fill: #3b82f6; }
+        .node-pool { fill: #22c55e; }
+        .node-mint { fill: #e94560; }
+        .node-ata { fill: #a855f7; }
+        .node-program { fill: #fbbf24; }
+        .node-unknown { fill: #666; }
+
+        .node-has-more {
+            stroke: #fff;
+            stroke-width: 2px;
+            stroke-dasharray: 4 2;
+        }
+
+        .link { fill: none; stroke-opacity: 0.6; }
+        .link-funding { stroke: var(--funder-up); stroke-dasharray: 5 3; }
+        .link-swap { stroke: #22c55e; }
+        .link-transfer { stroke: #3b82f6; }
+
+        .node-label {
+            font-size: 10px;
+            fill: var(--text-secondary);
+            pointer-events: none;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 12px;
+            max-width: 350px;
+            pointer-events: none;
+            z-index: 1000;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            display: none;
+        }
+
+        .tooltip .addr { font-family: monospace; color: var(--accent); font-size: 10px; word-break: break-all; }
+        .tooltip .funding-info { color: var(--funder-up); margin-top: 5px; }
+        .tooltip .depth-info { color: var(--text-secondary); font-size: 10px; }
+
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 1200px) {
+            .query-form { grid-template-columns: 1fr 1fr; }
+            .data-grid { grid-template-columns: 1fr; }
+        }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .data-content { padding: 15px; max-height: 400px; overflow-y: auto; }
+
+        .tree-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            background: var(--bg-input);
+            border-radius: 6px;
+            margin-bottom: 6px;
+            font-size: 11px;
+        }
+
+        .tree-item .depth {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 10px;
+        }
+
+        .tree-item .depth.up { background: var(--funder-up); color: #000; }
+        .tree-item .depth.down { background: var(--funder-down); color: #000; }
+        .tree-item .depth.target { background: var(--target); color: #000; }
+
+        .tree-item .addr { font-family: monospace; color: var(--accent); flex: 1; }
+        .tree-item .more { color: var(--text-secondary); font-style: italic; }
+
+        .error { background: #7f1d1d; color: #fca5a5; padding: 20px; border-radius: 10px; text-align: center; }
+        .loading { text-align: center; padding: 40px; color: var(--text-secondary); }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Wallet Viewer <span class="badge wallet">Funding Tree</span></h1>
+
+        <form class="query-form" onsubmit="fetchData(); return false;">
+            <div class="form-group">
+                <label>Wallet Address</label>
+                <input type="text" id="wallet_address" placeholder="Paste wallet address...">
+            </div>
+            <div class="form-group">
+                <label>Token Filter</label>
+                <input type="text" id="token_symbol" placeholder="e.g., TRADIE">
+            </div>
+            <div class="form-group">
+                <label>Funding Depth</label>
+                <select id="depth_limit">
+                    <option value="3">3 levels</option>
+                    <option value="5" selected>5 levels</option>
+                    <option value="7">7 levels</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>TX Limit</label>
+                <select id="tx_limit">
+                    <option value="20">20 TX</option>
+                    <option value="50" selected>50 TX</option>
+                    <option value="100">100 TX</option>
+                </select>
+            </div>
+            <button type="submit" class="btn">Load</button>
+        </form>
+
+        <div id="results"></div>
+        <div class="tooltip" id="tooltip"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/wallet';
+        let simulation = null;
+        let currentData = null;
+
+        async function fetchData() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading wallet data...</div>';
+
+            const params = {
+                wallet_address: document.getElementById('wallet_address').value,
+                token_symbol: document.getElementById('token_symbol').value || undefined,
+                depth_limit: document.getElementById('depth_limit').value,
+                tx_limit: document.getElementById('tx_limit').value
+            };
+
+            if (!params.wallet_address) {
+                resultsDiv.innerHTML = '<div class="error">Please enter a wallet address</div>';
+                return;
+            }
+
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+            if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toFixed(4);
+        }
+
+        function truncAddr(addr) {
+            return addr ? addr.slice(0, 8) + '...' + addr.slice(-6) : '';
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { wallet, token, stats, nodes, edges } = data.result || {};
+
+            if (!wallet) {
+                resultsDiv.innerHTML = '<div class="error">No data returned</div>';
+                return;
+            }
+
+            // Count nodes by type
+            const fundersUp = nodes?.filter(n => n.funding_direction === 'up').length || 0;
+            const fundedDown = nodes?.filter(n => n.funding_direction === 'down').length || 0;
+            const hasMoreUp = stats?.has_more_up || 0;
+            const hasMoreDown = stats?.has_more_down || 0;
+
+            let html = `
+                <div class="info-bar">
+                    <div>
+                        <div class="target">${wallet.label || 'Wallet'}</div>
+                        <div class="address">${wallet.address}</div>
+                    </div>
+                    ${token ? `<div style="color: var(--accent);">Token: ${token.symbol}</div>` : ''}
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-value up">${fundersUp}${hasMoreUp ? '+' : ''}</div>
+                            <div class="stat-label">Funders (up)</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value down">${fundedDown}${hasMoreDown ? '+' : ''}</div>
+                            <div class="stat-label">Funded (down)</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value txs">${stats?.total_txs || 0}</div>
+                            <div class="stat-label">Transactions</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="graph-container">
+                    <div class="graph-header">
+                        <h3>Network Graph</h3>
+                        <div class="legend">
+                            <div class="legend-item"><div class="legend-dot target"></div> Target Wallet</div>
+                            <div class="legend-item"><div class="legend-dot up"></div> Funders (upstream)</div>
+                            <div class="legend-item"><div class="legend-dot down"></div> Funded (downstream)</div>
+                            <div class="legend-item"><div class="legend-dot wallet"></div> Other Wallets</div>
+                            <div class="legend-item"><div class="legend-dot more"></div> Has More</div>
+                        </div>
+                    </div>
+                    <div id="graph"></div>
+                </div>
+
+                <div class="data-grid">
+                    <div class="data-section">
+                        <h3>Funding Tree UP (${fundersUp} funders)</h3>
+                        <div class="data-content" id="tree-up"></div>
+                    </div>
+                    <div class="data-section">
+                        <h3>Funding Tree DOWN (${fundedDown} funded)</h3>
+                        <div class="data-content" id="tree-down"></div>
+                    </div>
+                </div>
+            `;
+
+            resultsDiv.innerHTML = html;
+
+            // Render graph
+            if (nodes?.length && edges?.length) {
+                renderGraph(nodes, edges, wallet.address);
+            }
+
+            // Render trees
+            renderFundingTrees(nodes, wallet.address);
+        }
+
+        function renderGraph(nodes, edges, targetAddress) {
+            const container = document.getElementById('graph');
+            container.innerHTML = '';
+
+            const width = container.clientWidth;
+            const height = container.clientHeight || 700;
+
+            const svg = d3.select('#graph')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            // Arrow marker for directed edges
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '-0 -5 10 10')
+                .attr('refX', 20)
+                .attr('refY', 0)
+                .attr('orient', 'auto')
+                .attr('markerWidth', 6)
+                .attr('markerHeight', 6)
+                .append('path')
+                .attr('d', 'M 0,-5 L 10,0 L 0,5')
+                .attr('fill', '#666');
+
+            // Build D3 data structures
+            const nodeMap = new Map();
+            nodes.forEach((n, i) => {
+                nodeMap.set(n.address, {
+                    id: n.address,
+                    ...n,
+                    index: i
+                });
+            });
+
+            const d3Nodes = Array.from(nodeMap.values());
+            const d3Links = [];
+
+            edges.forEach(e => {
+                if (nodeMap.has(e.source) && nodeMap.has(e.target)) {
+                    d3Links.push({
+                        source: e.source,
+                        target: e.target,
+                        ...e
+                    });
+                }
+            });
+
+            // Create force simulation
+            simulation = d3.forceSimulation(d3Nodes)
+                .force('link', d3.forceLink(d3Links).id(d => d.id).distance(80))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(30));
+
+            // Draw links
+            const link = svg.append('g')
+                .selectAll('line')
+                .data(d3Links)
+                .join('line')
+                .attr('class', d => {
+                    if (d.type === 'funded_by') return 'link link-funding';
+                    if (d.type?.includes('swap')) return 'link link-swap';
+                    return 'link link-transfer';
+                })
+                .attr('stroke-width', d => d.type === 'funded_by' ? 2 : 1.5)
+                .attr('marker-end', 'url(#arrowhead)');
+
+            // Draw nodes
+            const node = svg.append('g')
+                .selectAll('circle')
+                .data(d3Nodes)
+                .join('circle')
+                .attr('r', d => {
+                    if (d.is_target) return 20;
+                    if (d.funding_direction) return 12;
+                    return 8;
+                })
+                .attr('class', d => {
+                    let cls = 'node-' + (d.address_type || 'unknown');
+                    if (d.is_target) cls = 'node-target';
+                    else if (d.funding_direction === 'up') cls = 'node-up';
+                    else if (d.funding_direction === 'down') cls = 'node-down';
+                    if (d.has_more_funding) cls += ' node-has-more';
+                    return cls;
+                })
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended))
+                .on('mouseover', showTooltip)
+                .on('mouseout', hideTooltip)
+                .on('click', (event, d) => {
+                    navigator.clipboard.writeText(d.address);
+                    d3.select(event.target)
+                        .transition().duration(100)
+                        .attr('r', d.is_target ? 25 : 15)
+                        .transition().duration(100)
+                        .attr('r', d.is_target ? 20 : d.funding_direction ? 12 : 8);
+                });
+
+            // Labels for important nodes
+            const label = svg.append('g')
+                .selectAll('text')
+                .data(d3Nodes.filter(d => d.is_target || d.funding_direction))
+                .join('text')
+                .attr('class', 'node-label')
+                .attr('dy', d => d.is_target ? 35 : 25)
+                .attr('text-anchor', 'middle')
+                .text(d => {
+                    if (d.is_target) return 'TARGET';
+                    if (d.has_more_funding) return `L${d.funding_depth}+`;
+                    return d.label || truncAddr(d.address);
+                });
+
+            // Simulation tick
+            simulation.on('tick', () => {
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+
+                node
+                    .attr('cx', d => d.x)
+                    .attr('cy', d => d.y);
+
+                label
+                    .attr('x', d => d.x)
+                    .attr('y', d => d.y);
+            });
+
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+        }
+
+        function showTooltip(event, d) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.innerHTML = `
+                <div style="font-weight: bold; margin-bottom: 5px;">
+                    ${d.is_target ? 'TARGET: ' : ''}${d.label || d.address_type}
+                </div>
+                <div class="addr">${d.address}</div>
+                ${d.funding_direction ? `
+                    <div class="depth-info">
+                        ${d.funding_direction === 'up' ? 'Funder' : 'Funded'} - Level ${d.funding_depth}
+                        ${d.has_more_funding ? ' (has more)' : ''}
+                    </div>
+                ` : ''}
+                ${d.funded_by ? `<div class="funding-info">Funded by: ${truncAddr(d.funded_by)}</div>` : ''}
+                ${d.balance ? `<div>Balance: <span style="color: var(--success);">${formatNumber(d.balance)}</span></div>` : ''}
+            `;
+            tooltip.style.display = 'block';
+            tooltip.style.left = (event.pageX + 15) + 'px';
+            tooltip.style.top = (event.pageY + 15) + 'px';
+        }
+
+        function hideTooltip() {
+            document.getElementById('tooltip').style.display = 'none';
+        }
+
+        function renderFundingTrees(nodes, targetAddress) {
+            const upDiv = document.getElementById('tree-up');
+            const downDiv = document.getElementById('tree-down');
+
+            // Target node
+            const target = nodes.find(n => n.is_target);
+
+            // Funders (up)
+            const upNodes = nodes
+                .filter(n => n.funding_direction === 'up')
+                .sort((a, b) => a.funding_depth - b.funding_depth);
+
+            upDiv.innerHTML = upNodes.map(n => `
+                <div class="tree-item" style="margin-left: ${n.funding_depth * 15}px;">
+                    <div class="depth up">${n.funding_depth}</div>
+                    <div class="addr">${n.address}</div>
+                    ${n.has_more_funding ? '<div class="more">+more</div>' : ''}
+                </div>
+            `).join('') || '<div style="color: var(--text-secondary); padding: 10px;">No upstream funders found</div>';
+
+            // Funded (down)
+            const downNodes = nodes
+                .filter(n => n.funding_direction === 'down')
+                .sort((a, b) => a.funding_depth - b.funding_depth);
+
+            downDiv.innerHTML = downNodes.map(n => `
+                <div class="tree-item" style="margin-left: ${n.funding_depth * 15}px;">
+                    <div class="depth down">${n.funding_depth}</div>
+                    <div class="addr">${n.address}</div>
+                    ${n.has_more_funding ? '<div class="more">+more</div>' : ''}
+                </div>
+            `).join('') || '<div style="color: var(--text-secondary); padding: 10px;">No downstream funded wallets found</div>';
+        }
+
+        // Load from URL params
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('wallet_address')) {
+            document.getElementById('wallet_address').value = urlParams.get('wallet_address');
+            if (urlParams.get('token_symbol')) {
+                document.getElementById('token_symbol').value = urlParams.get('token_symbol');
+            }
+            fetchData();
+        }
+    </script>
+</body>
+</html>

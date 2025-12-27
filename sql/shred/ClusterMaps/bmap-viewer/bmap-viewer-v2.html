@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer V2 (Plotly)</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 2800px; margin: 0 auto; }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: var(--accent);
+        }
+
+        .version-badge {
+            background: var(--success);
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        /* Query Form */
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input, .form-group select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Token Info */
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+        .token-info .tx-info { font-size: 12px; color: var(--text-secondary); }
+
+        /* Edge Type Badges */
+        .edge-type {
+            background: var(--accent);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 11px;
+            display: inline-block;
+            margin: 2px;
+        }
+
+        .edge-type.swap_in { background: #22c55e; }
+        .edge-type.swap_out { background: #ef4444; }
+        .edge-type.spl_transfer { background: #3b82f6; }
+        .edge-type.sol_transfer { background: #60a5fa; }
+        .edge-type.create_ata { background: #06b6d4; }
+        .edge-type.close_ata { background: #0891b2; }
+        .edge-type.mint { background: #22d3ee; }
+        .edge-type.burn { background: #ff6b6b; }
+
+        /* Plotly Container */
+        .plotly-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .plotly-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .plotly-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+        }
+
+        #plotly-graph {
+            width: 100%;
+            height: 800px;
+        }
+
+        /* Navigation */
+        .nav-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            padding: 15px 20px;
+        }
+
+        .nav-section h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+            color: var(--text-secondary);
+        }
+
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .nav-btn {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .nav-btn:hover {
+            border-color: var(--accent);
+            background: var(--bg-card);
+        }
+
+        .nav-btn .time {
+            color: var(--text-secondary);
+            font-size: 10px;
+            display: block;
+        }
+
+        /* Data Grid */
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .data-content {
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        /* Nodes & Edges Lists */
+        .node-item, .edge-item {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .node-item .address, .edge-item .addr {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            word-break: break-all;
+        }
+
+        .node-item .stats {
+            display: flex;
+            gap: 15px;
+            margin-top: 8px;
+            font-size: 12px;
+        }
+
+        .node-item .stat-value { color: var(--success); font-weight: bold; }
+
+        .edge-item .flow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .edge-item .arrow { color: var(--warning); font-size: 16px; }
+        .edge-item .amount { color: var(--success); font-weight: bold; }
+
+        /* Error */
+        .error {
+            background: #7f1d1d;
+            color: #fca5a5;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+        /* Category filters */
+        .filter-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-row label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .legend-section {
+            padding: 10px 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Token State Viewer <span class="version-badge">V2 Plotly</span></h1>
+
+        <form class="query-form" onsubmit="fetchData(); return false;">
+            <div class="form-group">
+                <label>Token Symbol</label>
+                <input type="text" id="token_symbol" placeholder="e.g., BONK">
+            </div>
+            <div class="form-group">
+                <label>Mint Address</label>
+                <input type="text" id="mint_address" placeholder="Token mint address">
+            </div>
+            <div class="form-group">
+                <label>Signature</label>
+                <input type="text" id="signature" placeholder="Transaction signature">
+            </div>
+            <div class="form-group">
+                <label>TX Window</label>
+                <select id="tx_limit">
+                    <option value="1">Single TX</option>
+                    <option value="10" selected>10 TX</option>
+                    <option value="20">20 TX</option>
+                    <option value="50">50 TX</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn">Load</button>
+            </div>
+        </form>
+
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let currentData = null;
+
+        // Edge type colors matching v1
+        const edgeColors = {
+            'swap_in': '#22c55e', 'swap_out': '#ef4444',
+            'spl_transfer': '#3b82f6', 'sol_transfer': '#60a5fa',
+            'create_ata': '#06b6d4', 'close_ata': '#0891b2',
+            'lend_deposit': '#f97316', 'lend_withdraw': '#ea580c',
+            'stake': '#f59e0b', 'unstake': '#d97706',
+            'add_liquidity': '#14b8a6', 'remove_liquidity': '#0d9488',
+            'mint': '#22d3ee', 'burn': '#ff6b6b',
+            'airdrop': '#a78bfa', 'unknown': '#475569'
+        };
+
+        // Node type colors
+        const nodeColors = {
+            'wallet': '#3b82f6',
+            'pool': '#22c55e',
+            'mint': '#e94560',
+            'ata': '#a855f7',
+            'program': '#fbbf24',
+            'unknown': '#666'
+        };
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading...</div>';
+
+            if (!params) {
+                params = {
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
+                };
+            } else {
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
+            }
+
+            // Remove undefined
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function navigateTo(signature) {
+            document.getElementById('signature').value = signature;
+            fetchData({ signature });
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+            if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toFixed(4);
+        }
+
+        function truncateAddress(addr) {
+            if (!addr) return '';
+            return addr.slice(0, 6) + '...' + addr.slice(-4);
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { token, txs, nodes, edges, related_tokens } = data.result || {};
+
+            if (!token) {
+                resultsDiv.innerHTML = '<div class="error">No data returned</div>';
+                return;
+            }
+
+            let html = '';
+
+            // Token Info
+            html += `
+                <div class="token-info">
+                    <div>
+                        <div class="symbol">${token.symbol || 'Unknown'}</div>
+                        <div class="mint">${token.mint || ''}</div>
+                    </div>
+                    ${txs ? `
+                        <div class="tx-info">
+                            <div>TX: ${truncateAddress(txs.signature)}</div>
+                            <div>Time: ${txs.block_time_utc || ''}</div>
+                        </div>
+                        <div>
+                            ${(txs.edge_types || []).map(t => `<span class="edge-type ${t}">${t}</span>`).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+
+            // Navigation
+            if (txs && (txs.prev?.length || txs.next?.length)) {
+                html += `
+                    <div class="nav-section">
+                        <h3>Navigation</h3>
+                        <div class="nav-buttons">
+                            ${(txs.prev || []).reverse().map(p => `
+                                <button class="nav-btn" onclick="navigateTo('${p.signature}')">
+                                    &larr; ${truncateAddress(p.signature)}
+                                    <span class="time">${p.block_time_utc?.split(' ')[1] || ''}</span>
+                                </button>
+                            `).join('')}
+                            <button class="nav-btn" style="background: var(--accent); border-color: var(--accent);" disabled>
+                                Current
+                            </button>
+                            ${(txs.next || []).map(n => `
+                                <button class="nav-btn" onclick="navigateTo('${n.signature}')">
+                                    ${truncateAddress(n.signature)} &rarr;
+                                    <span class="time">${n.block_time_utc?.split(' ')[1] || ''}</span>
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Plotly Graph Container
+            html += `
+                <div class="plotly-container">
+                    <div class="plotly-header">
+                        <h3>Bubble Map (Plotly)</h3>
+                        <div class="filter-row">
+                            <label><input type="checkbox" id="show-labels" checked onchange="updateGraph()"> Labels</label>
+                            <label><input type="checkbox" id="show-edges" checked onchange="updateGraph()"> Edges</label>
+                            <label><input type="checkbox" id="show-funded" checked onchange="updateGraph()"> Funders</label>
+                        </div>
+                    </div>
+                    <div id="plotly-graph"></div>
+                    <div class="legend-section">
+                        <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div> Wallet</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #22c55e;"></div> Pool</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #e94560;"></div> Mint</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #a855f7;"></div> ATA</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #fbbf24;"></div> Program</div>
+                    </div>
+                </div>
+            `;
+
+            // Data Grid
+            html += `
+                <div class="data-grid">
+                    <div class="data-section">
+                        <h3>Nodes (${nodes?.length || 0})</h3>
+                        <div class="data-content" id="nodes-list"></div>
+                    </div>
+                    <div class="data-section">
+                        <h3>Edges (${edges?.length || 0})</h3>
+                        <div class="data-content" id="edges-list"></div>
+                    </div>
+                </div>
+            `;
+
+            resultsDiv.innerHTML = html;
+
+            // Render Plotly graph
+            if (nodes && nodes.length > 0) {
+                renderPlotlyGraph(nodes, edges || []);
+            }
+
+            // Render nodes list
+            const nodesListDiv = document.getElementById('nodes-list');
+            if (nodesListDiv && nodes) {
+                nodesListDiv.innerHTML = nodes.map(n => `
+                    <div class="node-item">
+                        <div class="address">${n.address}</div>
+                        <div style="color: var(--text-secondary); margin-top: 4px;">
+                            ${n.label || n.address_type}
+                            ${n.pool_label ? `<br><span style="color: #22c55e;">${n.pool_label}</span>` : ''}
+                            ${n.token_name ? `<br><span style="color: #e94560;">${n.token_name}</span>` : ''}
+                        </div>
+                        <div class="stats">
+                            <span>Balance: <span class="stat-value">${formatNumber(n.balance)}</span></span>
+                            <span>SOL: <span class="stat-value">${formatNumber(n.sol_balance)}</span></span>
+                        </div>
+                    </div>
+                `).join('');
+            }
+
+            // Render edges list
+            const edgesListDiv = document.getElementById('edges-list');
+            if (edgesListDiv && edges) {
+                edgesListDiv.innerHTML = edges.map(e => `
+                    <div class="edge-item">
+                        <div class="flow">
+                            <span class="addr">${truncateAddress(e.source)}</span>
+                            <span class="arrow">&rarr;</span>
+                            <span class="addr">${truncateAddress(e.target)}</span>
+                        </div>
+                        <div>
+                            <span class="edge-type ${e.type}">${e.type}</span>
+                            <span class="amount">${formatNumber(e.amount)} ${e.token_symbol || ''}</span>
+                            ${e.dex ? `<span style="color: #fbbf24; margin-left: 8px;">${e.dex}</span>` : ''}
+                        </div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function renderPlotlyGraph(nodes, edges) {
+            const container = document.getElementById('plotly-graph');
+            if (!container) return;
+
+            // Build node map
+            const nodeMap = new Map();
+            nodes.forEach(n => nodeMap.set(n.address, n));
+
+            // Scale positions to pixel space
+            const width = container.clientWidth || 1200;
+            const height = 800;
+
+            // Create edge traces
+            const edgeTraces = [];
+            const showEdges = document.getElementById('show-edges')?.checked ?? true;
+            const showFunded = document.getElementById('show-funded')?.checked ?? true;
+
+            if (showEdges) {
+                // Group edges by type for coloring
+                edges.forEach(edge => {
+                    const sourceNode = nodeMap.get(edge.source);
+                    const targetNode = nodeMap.get(edge.target);
+                    if (!sourceNode || !targetNode) return;
+
+                    const x0 = sourceNode.x * width;
+                    const y0 = sourceNode.y * height;
+                    const x1 = targetNode.x * width;
+                    const y1 = targetNode.y * height;
+
+                    edgeTraces.push({
+                        type: 'scatter',
+                        mode: 'lines',
+                        x: [x0, x1, null],
+                        y: [y0, y1, null],
+                        line: {
+                            color: edgeColors[edge.type] || '#666',
+                            width: 2
+                        },
+                        hoverinfo: 'text',
+                        text: `${edge.type}: ${formatNumber(edge.amount)} ${edge.token_symbol || ''}`,
+                        showlegend: false
+                    });
+                });
+            }
+
+            // Add funded_by edges
+            if (showFunded) {
+                nodes.forEach(node => {
+                    if (node.funded_by && nodeMap.has(node.funded_by)) {
+                        const funder = nodeMap.get(node.funded_by);
+                        edgeTraces.push({
+                            type: 'scatter',
+                            mode: 'lines',
+                            x: [funder.x * width, node.x * width, null],
+                            y: [funder.y * height, node.y * height, null],
+                            line: {
+                                color: '#a855f7',
+                                width: 1,
+                                dash: 'dot'
+                            },
+                            hoverinfo: 'text',
+                            text: 'funded_by',
+                            showlegend: false
+                        });
+                    }
+                });
+            }
+
+            // Create node trace
+            const x = [];
+            const y = [];
+            const sizes = [];
+            const colors = [];
+            const texts = [];
+            const hoverTexts = [];
+
+            const showLabels = document.getElementById('show-labels')?.checked ?? true;
+
+            nodes.forEach(node => {
+                x.push(node.x * width);
+                y.push(node.y * height);
+
+                // Size based on balance (log scale)
+                const balance = Math.abs(parseFloat(node.balance) || 0);
+                const size = Math.max(15, Math.min(60, 15 + Math.log10(balance + 1) * 8));
+                sizes.push(size);
+
+                // Color based on address type
+                colors.push(nodeColors[node.address_type] || '#666');
+
+                // Label
+                texts.push(showLabels ? (node.label || truncateAddress(node.address)) : '');
+
+                // Hover text
+                hoverTexts.push(
+                    `<b>${node.label || node.address_type}</b><br>` +
+                    `${node.address}<br>` +
+                    `Balance: ${formatNumber(node.balance)}<br>` +
+                    `SOL: ${formatNumber(node.sol_balance)}` +
+                    (node.pool_label ? `<br>Pool: ${node.pool_label}` : '') +
+                    (node.token_name ? `<br>Token: ${node.token_name}` : '')
+                );
+            });
+
+            const nodeTrace = {
+                type: 'scatter',
+                mode: showLabels ? 'markers+text' : 'markers',
+                x: x,
+                y: y,
+                marker: {
+                    size: sizes,
+                    color: colors,
+                    line: {
+                        color: '#fff',
+                        width: 1
+                    }
+                },
+                text: texts,
+                textposition: 'top center',
+                textfont: {
+                    size: 10,
+                    color: '#aaa'
+                },
+                hoverinfo: 'text',
+                hovertext: hoverTexts,
+                showlegend: false
+            };
+
+            // Combine traces (edges first, then nodes on top)
+            const allTraces = [...edgeTraces, nodeTrace];
+
+            const layout = {
+                paper_bgcolor: '#1a1a2e',
+                plot_bgcolor: '#0d0d1a',
+                xaxis: {
+                    showgrid: false,
+                    zeroline: false,
+                    showticklabels: false,
+                    range: [-50, width + 50]
+                },
+                yaxis: {
+                    showgrid: false,
+                    zeroline: false,
+                    showticklabels: false,
+                    range: [-50, height + 50]
+                },
+                hovermode: 'closest',
+                margin: { l: 20, r: 20, t: 20, b: 20 },
+                dragmode: 'pan'
+            };
+
+            const config = {
+                responsive: true,
+                scrollZoom: true,
+                displayModeBar: true,
+                modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+                displaylogo: false
+            };
+
+            Plotly.newPlot(container, allTraces, layout, config);
+        }
+
+        function updateGraph() {
+            if (currentData?.result?.nodes) {
+                renderPlotlyGraph(
+                    currentData.result.nodes,
+                    currentData.result.edges || []
+                );
+            }
+        }
+
+        // Handle node click to copy address
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('.node-item .address')) {
+                const addr = e.target.textContent;
+                navigator.clipboard.writeText(addr);
+                e.target.style.color = '#22c55e';
+                setTimeout(() => { e.target.style.color = ''; }, 500);
+            }
+        });
+    </script>
+</body>
+</html>

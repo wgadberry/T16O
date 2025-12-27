@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: var(--accent);
+        }
+
+        /* Query Form */
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Edge Type Badges */
+        .edge-types {
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .edge-type {
+            background: var(--accent);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 11px;
+        }
+
+        .edge-type.swap_in { background: #22c55e; }
+        .edge-type.swap_out { background: #ef4444; }
+        .edge-type.spl_transfer { background: #3b82f6; }
+        .edge-type.sol_transfer { background: #a855f7; }
+
+        /* Token Info */
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+
+        /* Data Grid */
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .data-content {
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        /* Nodes */
+        .node {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .node .address {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            word-break: break-all;
+        }
+
+        .node .label { color: var(--text-secondary); font-size: 12px; margin-top: 5px; }
+
+        .node .stats {
+            display: flex;
+            gap: 15px;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+
+        .node .stat-value { color: var(--success); font-weight: bold; }
+
+        /* Edges */
+        .edge {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .edge .flow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .edge .addr {
+            font-family: monospace;
+            font-size: 10px;
+            color: var(--accent);
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .edge .arrow { color: var(--warning); font-size: 16px; }
+        .edge .amount { color: var(--success); font-weight: bold; }
+
+        .edge .meta {
+            display: flex;
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        /* Error */
+        .error {
+            background: #7f1d1d;
+            color: #fca5a5;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .loading::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+        /* Bubble Map */
+        .bubble-map-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .bubble-map-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .bubble-map-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+        }
+
+        .bubble-map-controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        .bubble-map-controls button {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .bubble-map-controls button:hover {
+            border-color: var(--accent);
+        }
+
+        #bubble-map {
+            width: 100%;
+            height: 500px;
+            background: radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d1a 100%);
+        }
+
+        #bubble-map svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .node-circle {
+            cursor: pointer;
+            transition: stroke-width 0.2s;
+        }
+
+        .node-circle:hover {
+            stroke-width: 3px;
+        }
+
+        .node-label {
+            font-size: 10px;
+            fill: var(--text-secondary);
+            pointer-events: none;
+            text-anchor: middle;
+        }
+
+        .edge-line {
+            stroke-opacity: 0.6;
+            fill: none;
+        }
+
+        .edge-arrow {
+            fill: var(--text-secondary);
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 300px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+
+        .tooltip .address {
+            font-family: monospace;
+            color: var(--accent);
+            word-break: break-all;
+            margin-bottom: 8px;
+        }
+
+        .tooltip .stats {
+            color: var(--text-secondary);
+        }
+
+        .tooltip .stats span {
+            color: var(--success);
+        }
+
+        .legend {
+            display: flex;
+            gap: 15px;
+            padding: 10px 20px;
+            background: var(--bg-input);
+            font-size: 11px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        /* Timeline Slider */
+        .timeline-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .timeline-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+            color: var(--text-secondary);
+        }
+
+        .timeline-stats {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .timeline-stats span {
+            color: var(--accent);
+        }
+
+        .timeline-slider-wrap {
+            position: relative;
+            padding: 10px 0;
+        }
+
+        .timeline-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .timeline-slider {
+            width: 100%;
+            height: 8px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: var(--bg-input);
+            border-radius: 4px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .timeline-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            transition: transform 0.1s;
+        }
+
+        .timeline-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .timeline-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+
+        .timeline-current {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        .timeline-current .time {
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        .timeline-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .timeline-buttons button {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .timeline-buttons button:hover {
+            border-color: var(--accent);
+            background: var(--bg-card);
+        }
+
+        .timeline-buttons button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Compact Current TX Bar */
+        .current-tx-bar {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .current-tx-bar .sig-section {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .current-tx-bar .signature {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .current-tx-bar .time {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        /* Collapsible Section */
+        .collapsible-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .collapsible-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }
+
+        .collapsible-header:hover {
+            background: #1a4a7a;
+        }
+
+        .collapsible-header h3 {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .collapsible-header .toggle-icon {
+            transition: transform 0.3s;
+            font-size: 12px;
+        }
+
+        .collapsible-header.collapsed .toggle-icon {
+            transform: rotate(-90deg);
+        }
+
+        .collapsible-content {
+            padding: 15px 20px;
+            display: block;
+        }
+
+        .collapsible-content.collapsed {
+            display: none;
+        }
+
+        .nav-compact {
+            display: flex;
+            gap: 20px;
+        }
+
+        .nav-compact .nav-list {
+            flex: 1;
+        }
+
+        .nav-compact .nav-list h4 {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .nav-compact .nav-item {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            border-radius: 5px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .nav-compact .nav-item:hover {
+            border-color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Token State Viewer</h1>
+
+        <!-- Query Form -->
+        <div class="query-form">
+            <div class="form-group">
+                <label>Token Symbol</label>
+                <input type="text" id="token_symbol" placeholder="e.g. BONK, soltit">
+            </div>
+            <div class="form-group">
+                <label>Token Name</label>
+                <input type="text" id="token_name" placeholder="e.g. Bonk">
+            </div>
+            <div class="form-group">
+                <label>Mint Address</label>
+                <input type="text" id="mint_address" placeholder="e.g. DezXAZ...">
+            </div>
+            <div class="form-group">
+                <label>Signature</label>
+                <input type="text" id="signature" placeholder="e.g. 5KtP...">
+            </div>
+            <div class="form-group">
+                <label>Block Time (Unix)</label>
+                <input type="number" id="block_time" placeholder="e.g. 1703000000">
+            </div>
+            <div class="form-group">
+                <label>TX Window</label>
+                <select id="tx_limit" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); padding: 10px 15px; border-radius: 5px; font-size: 14px;">
+                    <option value="10" selected>10 (5+5)</option>
+                    <option value="20">20 (10+10)</option>
+                    <option value="50">50 (25+25)</option>
+                    <option value="100">100 (50+50)</option>
+                </select>
+            </div>
+            <div class="form-group" style="justify-content: flex-end;">
+                <button class="btn" onclick="fetchData()">Load Token State</button>
+            </div>
+        </div>
+
+        <!-- Results Container -->
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let currentData = null;
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading</div>';
+
+            // Reset timeline if loading fresh (not navigating)
+            const isNavigation = params && (params.signature || params.block_time);
+            if (!isNavigation) {
+                timelineData = { minTime: 0, maxTime: 0, currentTime: 0, txCount: 0 };
+            }
+
+            // Build query params
+            if (!params) {
+                params = {
+                    token_name: document.getElementById('token_name').value || undefined,
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    block_time: document.getElementById('block_time').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
+                };
+            } else {
+                // Add tx_limit to navigation params
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
+            }
+
+            // Remove undefined params
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function navigateTo(signature) {
+            // Update signature input and fetch
+            document.getElementById('signature').value = signature;
+            fetchData({
+                signature,
+                mint_address: currentData?.result?.token?.mint
+            });
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { txs, token, nodes, edges } = data.result;
+
+            let html = '';
+
+            // Token Info (compact bar)
+            if (token) {
+                html += `
+                    <div class="token-info">
+                        <div class="symbol">${token.symbol || 'Unknown'}</div>
+                        <div class="mint">${token.mint}</div>
+                    </div>
+                `;
+            }
+
+            // Current TX Bar (compact)
+            if (txs) {
+                html += `
+                    <div class="current-tx-bar">
+                        <div class="sig-section">
+                            <strong style="color: var(--text-secondary);">Current TX:</strong>
+                            <span class="signature" title="${txs.signature}">${txs.signature}</span>
+                        </div>
+                        <div class="time">${txs.block_time_utc}</div>
+                        <div class="edge-types">
+                            ${(txs.edge_types || []).map(t =>
+                                `<span class="edge-type ${t}">${t}</span>`
+                            ).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Timeline Slider (visible if we have timeline data)
+            const timelineVisible = timelineData.minTime > 0 ? 'block' : 'none';
+            html += `
+                <div class="timeline-container" id="timeline-section" style="display: ${timelineVisible};">
+                    <div class="timeline-header">
+                        <h3>Timeline</h3>
+                        <div class="timeline-stats">
+                            <span id="timeline-tx-count">0</span> transactions
+                        </div>
+                    </div>
+                    <div class="timeline-slider-wrap">
+                        <div class="timeline-labels">
+                            <span id="timeline-min-label">--</span>
+                            <span id="timeline-max-label">--</span>
+                        </div>
+                        <input type="range" class="timeline-slider" id="timeline-slider"
+                            min="0" max="100" value="50">
+                    </div>
+                    <div class="timeline-current">
+                        Current: <span class="time" id="timeline-current-time">--</span>
+                    </div>
+                    <div class="timeline-buttons">
+                        <button onclick="timelineJump('start')">⏮ First</button>
+                        <button onclick="timelineStep(-1)">◀ Prev</button>
+                        <button onclick="timelineStep(1)">Next ▶</button>
+                        <button onclick="timelineJump('end')">Last ⏭</button>
+                    </div>
+                </div>
+            `;
+
+            // Bubble Map
+            html += `
+                <div class="bubble-map-container">
+                    <div class="bubble-map-header">
+                        <h3>Bubble Map</h3>
+                        <div class="bubble-map-controls">
+                            <button onclick="resetZoom()">Reset Zoom</button>
+                            <button onclick="toggleLabels()">Toggle Labels</button>
+                        </div>
+                    </div>
+                    <div id="bubble-map"></div>
+                    <div class="legend">
+                        <div class="legend-item"><div class="legend-dot" style="background: #e94560;"></div> High Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div> Medium Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #22c55e;"></div> Low Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #666;"></div> Zero/Sold (Pools, ATAs)</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #a855f7;"></div> Funded By Link</div>
+                    </div>
+                </div>
+            `;
+
+            // Collapsible Prev/Next Navigation
+            if (txs) {
+                const prevCount = (txs.prev || []).length;
+                const nextCount = (txs.next || []).length;
+                html += `
+                    <div class="collapsible-section">
+                        <div class="collapsible-header collapsed" onclick="toggleCollapsible(this)">
+                            <h3>
+                                <span class="toggle-icon">▼</span>
+                                Transaction Navigation
+                                <span style="font-weight: normal; color: var(--text-secondary);">(${prevCount} prev / ${nextCount} next)</span>
+                            </h3>
+                        </div>
+                        <div class="collapsible-content collapsed">
+                            <div class="nav-compact">
+                                <div class="nav-list">
+                                    <h4>← Previous (${prevCount})</h4>
+                                    ${(txs.prev || []).map(p => `
+                                        <div class="nav-item" onclick="navigateTo('${p.signature}')">
+                                            <div class="sig" style="font-family: monospace; color: var(--accent);">${p.signature.slice(0, 20)}...</div>
+                                            <div class="time" style="color: var(--text-secondary); font-size: 10px;">${p.block_time_utc}</div>
+                                            <div class="edge-types" style="justify-content: flex-start; margin-top: 4px;">
+                                                ${(p.edge_types || []).map(t =>
+                                                    `<span class="edge-type ${t}">${t}</span>`
+                                                ).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                    ${prevCount === 0 ? '<div style="color: var(--text-secondary); font-size: 12px;">No previous transactions</div>' : ''}
+                                </div>
+                                <div class="nav-list">
+                                    <h4>Next → (${nextCount})</h4>
+                                    ${(txs.next || []).map(n => `
+                                        <div class="nav-item" onclick="navigateTo('${n.signature}')">
+                                            <div class="sig" style="font-family: monospace; color: var(--accent);">${n.signature.slice(0, 20)}...</div>
+                                            <div class="time" style="color: var(--text-secondary); font-size: 10px;">${n.block_time_utc}</div>
+                                            <div class="edge-types" style="justify-content: flex-start; margin-top: 4px;">
+                                                ${(n.edge_types || []).map(t =>
+                                                    `<span class="edge-type ${t}">${t}</span>`
+                                                ).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                    ${nextCount === 0 ? '<div style="color: var(--text-secondary); font-size: 12px;">No next transactions</div>' : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Data Grid
+            html += '<div class="data-grid">';
+
+            // Nodes
+            html += `
+                <div class="data-section">
+                    <h3>Nodes (${(nodes || []).length} holders)</h3>
+                    <div class="data-content">
+                        ${(nodes || []).map(n => `
+                            <div class="node">
+                                <div class="address">${n.address}</div>
+                                <div class="label">${n.label || 'Unknown'}</div>
+                                <div class="stats">
+                                    <span>Balance: <span class="stat-value">${formatNumber(n.balance)}</span></span>
+                                    <span>SOL: <span class="stat-value">${n.sol_balance?.toFixed(4) || '0'}</span></span>
+                                </div>
+                                ${n.funded_by ? `<div class="label" style="margin-top: 5px;">Funded by: ${n.funded_by.slice(0, 20)}...</div>` : ''}
+                            </div>
+                        `).join('')}
+                        ${(nodes || []).length === 0 ? '<div style="color: var(--text-secondary);">No nodes</div>' : ''}
+                    </div>
+                </div>
+            `;
+
+            // Edges
+            html += `
+                <div class="data-section">
+                    <h3>Edges (${(edges || []).length} transfers)</h3>
+                    <div class="data-content">
+                        ${(edges || []).map(e => `
+                            <div class="edge">
+                                <div class="flow">
+                                    <span class="addr" title="${e.source}">${e.source.slice(0, 12)}...</span>
+                                    <span class="arrow">→</span>
+                                    <span class="addr" title="${e.target}">${e.target.slice(0, 12)}...</span>
+                                    <span class="amount">${formatNumber(e.amount)}</span>
+                                    <span class="edge-type ${e.type}">${e.type}</span>
+                                </div>
+                                <div class="meta">
+                                    <span>${e.block_time_utc}</span>
+                                    <span title="${e.signature}">${e.signature.slice(0, 16)}...</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                        ${(edges || []).length === 0 ? '<div style="color: var(--text-secondary);">No edges</div>' : ''}
+                    </div>
+                </div>
+            `;
+
+            html += '</div>';
+
+            resultsDiv.innerHTML = html;
+
+            // Render bubble map after DOM is ready
+            setTimeout(() => renderBubbleMap(nodes, edges), 100);
+
+            // Initialize/update timeline
+            if (token) {
+                if (timelineData.minTime === 0) {
+                    // First load - fetch time range
+                    initTimeline(token);
+                } else {
+                    // Restore timeline UI and update position
+                    restoreTimelineUI();
+                    updateTimelinePosition(txs?.block_time);
+                }
+            }
+        }
+
+        // Bubble Map Variables
+        let simulation = null;
+        let svg = null;
+        let g = null;
+        let zoom = null;
+        let showLabels = true;
+        let currentTransform = d3.zoomIdentity; // Preserve zoom state
+
+        function renderBubbleMap(nodes, edges) {
+            const container = document.getElementById('bubble-map');
+            if (!container) return;
+
+            // Clear previous
+            container.innerHTML = '';
+            d3.selectAll('.tooltip').remove(); // Remove old tooltips
+
+            if (!nodes || nodes.length === 0) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #aaa;">No nodes to display</div>';
+                return;
+            }
+
+            const width = container.clientWidth;
+            const height = 500;
+
+            // Create node map for lookups
+            const nodeMap = new Map(nodes.map(n => [n.address, n]));
+
+            // Calculate balance range for sizing (use absolute value, treat 0/negative as minimum)
+            const balances = nodes.map(n => Math.max(0, n.balance || 0));
+            const maxBalance = Math.max(...balances, 1); // Ensure at least 1 to avoid domain issues
+            const minBalance = 0;
+
+            // Size scale (radius 8-50 based on balance)
+            const sizeScale = d3.scaleSqrt()
+                .domain([minBalance, maxBalance])
+                .range([8, 50]);
+
+            // Color based on balance percentile
+            const colorScale = d3.scaleQuantile()
+                .domain(balances)
+                .range(['#22c55e', '#3b82f6', '#e94560']);
+
+            // Prepare nodes for D3
+            const d3Nodes = nodes.map(n => {
+                const displayBalance = Math.max(0, n.balance || 0);
+                const isZeroBalance = (n.balance || 0) <= 0;
+                return {
+                    id: n.address,
+                    label: n.label || 'wallet',
+                    balance: n.balance || 0,
+                    displayBalance: displayBalance,
+                    isZeroBalance: isZeroBalance,
+                    sol_balance: n.sol_balance || 0,
+                    funded_by: n.funded_by,
+                    radius: sizeScale(displayBalance),
+                    color: isZeroBalance ? '#666' : colorScale(displayBalance) // Gray for zero balance
+                };
+            });
+
+            // Prepare edges for D3 - only include edges where both nodes exist
+            const d3Edges = (edges || [])
+                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
+                .map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    amount: e.amount,
+                    type: e.type,
+                    signature: e.signature,
+                    block_time_utc: e.block_time_utc
+                }));
+
+            // Add funded_by edges
+            nodes.forEach(n => {
+                if (n.funded_by && nodeMap.has(n.funded_by)) {
+                    d3Edges.push({
+                        source: n.funded_by,
+                        target: n.address,
+                        amount: 0,
+                        type: 'funded_by'
+                    });
+                }
+            });
+
+            // Create SVG
+            svg = d3.select(container)
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            // Add zoom
+            zoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => {
+                    currentTransform = event.transform; // Save transform
+                    g.attr('transform', event.transform);
+                });
+
+            svg.call(zoom);
+
+            // Main group for zoom/pan
+            g = svg.append('g');
+
+            // Restore previous zoom level
+            if (currentTransform !== d3.zoomIdentity) {
+                svg.call(zoom.transform, currentTransform);
+            }
+
+            // Create tooltip
+            const tooltip = d3.select('body').append('div')
+                .attr('class', 'tooltip')
+                .style('opacity', 0);
+
+            // Edge type colors
+            const edgeColors = {
+                'spl_transfer': '#3b82f6',
+                'swap_in': '#22c55e',
+                'swap_out': '#ef4444',
+                'sol_transfer': '#a855f7',
+                'funded_by': '#a855f7'
+            };
+
+            // Create edges
+            const link = g.append('g')
+                .selectAll('line')
+                .data(d3Edges)
+                .join('line')
+                .attr('class', 'edge-line')
+                .attr('stroke', d => edgeColors[d.type] || '#666')
+                .attr('stroke-width', d => d.type === 'funded_by' ? 1 : 3)
+                .attr('stroke-dasharray', d => d.type === 'funded_by' ? '4,4' : null)
+                .style('cursor', d => d.signature ? 'pointer' : 'default')
+                .on('mouseover', (event, d) => {
+                    if (!d.signature) return;
+                    d3.select(event.target).attr('stroke-width', 5);
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    tooltip.html(`
+                        <div style="margin-bottom: 8px;">
+                            <span class="edge-type ${d.type}" style="display: inline-block; margin-bottom: 5px;">${d.type}</span>
+                        </div>
+                        <div class="stats">
+                            Amount: <span>${formatNumber(d.amount)}</span><br>
+                            Time: ${d.block_time_utc || 'N/A'}
+                        </div>
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
+                            <div style="color: #aaa; font-size: 10px; margin-bottom: 3px;">Click to navigate:</div>
+                            <div class="address" style="font-size: 10px;">${d.signature}</div>
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', (event, d) => {
+                    d3.select(event.target).attr('stroke-width', d.type === 'funded_by' ? 1 : 3);
+                    tooltip.transition().duration(500).style('opacity', 0);
+                })
+                .on('click', (event, d) => {
+                    if (d.signature) {
+                        tooltip.style('opacity', 0);
+                        navigateTo(d.signature);
+                    }
+                });
+
+            // Create nodes
+            const node = g.append('g')
+                .selectAll('circle')
+                .data(d3Nodes)
+                .join('circle')
+                .attr('class', 'node-circle')
+                .attr('r', d => d.radius)
+                .attr('fill', d => d.color)
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1.5)
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended))
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    tooltip.html(`
+                        <div class="address">${d.id}</div>
+                        <div class="stats">
+                            Label: ${d.label}<br>
+                            Balance: <span>${formatNumber(d.balance)}</span><br>
+                            SOL: <span>${d.sol_balance.toFixed(4)}</span>
+                            ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                });
+
+            // Create labels
+            const label = g.append('g')
+                .selectAll('text')
+                .data(d3Nodes)
+                .join('text')
+                .attr('class', 'node-label')
+                .text(d => d.id.slice(0, 6) + '...')
+                .attr('dy', d => d.radius + 12)
+                .style('display', showLabels ? 'block' : 'none');
+
+            // Force simulation
+            simulation = d3.forceSimulation(d3Nodes)
+                .force('link', d3.forceLink(d3Edges).id(d => d.id).distance(100))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => d.radius + 5))
+                .on('tick', () => {
+                    link
+                        .attr('x1', d => d.source.x)
+                        .attr('y1', d => d.source.y)
+                        .attr('x2', d => d.target.x)
+                        .attr('y2', d => d.target.y);
+
+                    node
+                        .attr('cx', d => d.x)
+                        .attr('cy', d => d.y);
+
+                    label
+                        .attr('x', d => d.x)
+                        .attr('y', d => d.y);
+                });
+
+            // Drag functions
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+        }
+
+        function resetZoom() {
+            if (svg && zoom) {
+                svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+            }
+        }
+
+        function toggleLabels() {
+            showLabels = !showLabels;
+            d3.selectAll('.node-label').style('display', showLabels ? 'block' : 'none');
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
+            return num.toFixed(2);
+        }
+
+        // Timeline Variables
+        let timelineData = {
+            minTime: 0,
+            maxTime: 0,
+            currentTime: 0,
+            txCount: 0
+        };
+        let sliderDebounce = null;
+
+        async function initTimeline(token) {
+            if (!token?.mint && !token?.symbol) return;
+
+            try {
+                const params = token.mint
+                    ? `mint_address=${token.mint}`
+                    : `token_symbol=${token.symbol}`;
+
+                const response = await fetch(`/api/timerange?${params}`);
+                const data = await response.json();
+
+                if (data.min_time && data.max_time) {
+                    timelineData.minTime = data.min_time;
+                    timelineData.maxTime = data.max_time;
+                    timelineData.txCount = data.tx_count;
+
+                    // Show timeline section
+                    const section = document.getElementById('timeline-section');
+                    if (section) section.style.display = 'block';
+
+                    // Update labels
+                    document.getElementById('timeline-min-label').textContent =
+                        formatTimestamp(data.min_time);
+                    document.getElementById('timeline-max-label').textContent =
+                        formatTimestamp(data.max_time);
+                    document.getElementById('timeline-tx-count').textContent =
+                        data.tx_count.toLocaleString();
+
+                    // Setup slider
+                    const slider = document.getElementById('timeline-slider');
+                    slider.min = data.min_time;
+                    slider.max = data.max_time;
+
+                    // Set current position
+                    updateTimelinePosition(currentData?.result?.txs?.block_time || data.max_time);
+
+                    // Add event listener
+                    slider.removeEventListener('input', onSliderInput);
+                    slider.addEventListener('input', onSliderInput);
+                }
+            } catch (e) {
+                console.error('Failed to load timeline:', e);
+            }
+        }
+
+        function onSliderInput(e) {
+            const blockTime = parseInt(e.target.value);
+            timelineData.currentTime = blockTime;
+            document.getElementById('timeline-current-time').textContent =
+                formatTimestamp(blockTime);
+
+            // Debounce the API call
+            clearTimeout(sliderDebounce);
+            sliderDebounce = setTimeout(() => {
+                navigateToTime(blockTime);
+            }, 300);
+        }
+
+        function restoreTimelineUI() {
+            // Restore timeline labels and slider range from stored data
+            const minLabel = document.getElementById('timeline-min-label');
+            const maxLabel = document.getElementById('timeline-max-label');
+            const txCount = document.getElementById('timeline-tx-count');
+            const slider = document.getElementById('timeline-slider');
+
+            if (minLabel) minLabel.textContent = formatTimestamp(timelineData.minTime);
+            if (maxLabel) maxLabel.textContent = formatTimestamp(timelineData.maxTime);
+            if (txCount) txCount.textContent = timelineData.txCount.toLocaleString();
+
+            if (slider) {
+                slider.min = timelineData.minTime;
+                slider.max = timelineData.maxTime;
+                slider.removeEventListener('input', onSliderInput);
+                slider.addEventListener('input', onSliderInput);
+            }
+        }
+
+        function updateTimelinePosition(blockTime) {
+            if (!blockTime) return;
+            timelineData.currentTime = blockTime;
+            const slider = document.getElementById('timeline-slider');
+            if (slider) {
+                slider.value = blockTime;
+            }
+            const timeLabel = document.getElementById('timeline-current-time');
+            if (timeLabel) {
+                timeLabel.textContent = formatTimestamp(blockTime);
+            }
+        }
+
+        function navigateToTime(blockTime) {
+            const mint = currentData?.result?.token?.mint;
+            if (mint) {
+                fetchData({
+                    mint_address: mint,
+                    block_time: blockTime
+                });
+            }
+        }
+
+        function timelineJump(position) {
+            if (position === 'start') {
+                navigateToTime(timelineData.minTime);
+            } else if (position === 'end') {
+                navigateToTime(timelineData.maxTime);
+            }
+        }
+
+        function timelineStep(direction) {
+            const txs = currentData?.result?.txs;
+            if (!txs) return;
+
+            if (direction === -1 && txs.prev && txs.prev.length > 0) {
+                // Go to first previous tx
+                navigateTo(txs.prev[0].signature);
+            } else if (direction === 1 && txs.next && txs.next.length > 0) {
+                // Go to first next tx
+                navigateTo(txs.next[0].signature);
+            }
+        }
+
+        function formatTimestamp(unixTime) {
+            if (!unixTime) return '--';
+            const date = new Date(unixTime * 1000);
+            return date.toLocaleString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function toggleCollapsible(header) {
+            header.classList.toggle('collapsed');
+            const content = header.nextElementSibling;
+            content.classList.toggle('collapsed');
+        }
+
+        // Load with default on page load if URL has params
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('token_symbol')) {
+            document.getElementById('token_symbol').value = urlParams.get('token_symbol');
+            fetchData();
+        }
+    </script>
+</body>
+</html>

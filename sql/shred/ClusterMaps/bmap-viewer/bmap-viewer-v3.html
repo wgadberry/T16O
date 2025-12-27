@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer V3 (Cytoscape)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 2800px; margin: 0 auto; }
+
+        h1 { text-align: center; margin-bottom: 20px; color: var(--accent); }
+
+        .version-badge {
+            background: #06b6d4;
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        /* Query Form */
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input, .form-group select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+
+        /* Token Info */
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+
+        /* Edge Type Badges */
+        .edge-type {
+            background: var(--accent);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 11px;
+            display: inline-block;
+            margin: 2px;
+        }
+        .edge-type.swap_in { background: #22c55e; }
+        .edge-type.swap_out { background: #ef4444; }
+        .edge-type.spl_transfer { background: #3b82f6; }
+        .edge-type.create_ata { background: #06b6d4; }
+        .edge-type.close_ata { background: #0891b2; }
+
+        /* Cytoscape Container */
+        .cytoscape-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .cytoscape-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .cytoscape-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .controls label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .controls select, .controls button {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .controls button:hover { border-color: var(--accent); }
+
+        #cy {
+            width: 100%;
+            height: 800px;
+            background: radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d1a 100%);
+        }
+
+        /* Legend */
+        .legend {
+            padding: 10px 20px;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            border-top: 1px solid var(--border);
+        }
+
+        .legend-item { display: flex; align-items: center; gap: 6px; }
+        .legend-dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.3); }
+
+        /* Navigation */
+        .nav-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            padding: 15px 20px;
+        }
+
+        .nav-section h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+            color: var(--text-secondary);
+        }
+
+        .nav-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        .nav-btn {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .nav-btn:hover { border-color: var(--accent); }
+        .nav-btn .time { color: var(--text-secondary); font-size: 10px; display: block; }
+
+        /* Tooltip */
+        .cy-tooltip {
+            position: absolute;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 12px;
+            max-width: 350px;
+            z-index: 1000;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+
+        .cy-tooltip .addr {
+            font-family: monospace;
+            color: var(--accent);
+            word-break: break-all;
+            margin-bottom: 8px;
+        }
+
+        .cy-tooltip .label { color: var(--success); font-weight: bold; margin-bottom: 4px; }
+        .cy-tooltip .stats { color: var(--text-secondary); }
+        .cy-tooltip .stats span { color: var(--success); }
+
+        /* Data Grid */
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .data-content { padding: 15px; max-height: 400px; overflow-y: auto; }
+
+        .node-item, .edge-item {
+            background: var(--bg-input);
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 11px;
+        }
+
+        .node-item .address { font-family: monospace; color: var(--accent); word-break: break-all; }
+        .node-item .balance { color: var(--success); font-weight: bold; }
+
+        /* Error & Loading */
+        .error { background: #7f1d1d; color: #fca5a5; padding: 20px; border-radius: 10px; text-align: center; }
+        .loading { text-align: center; padding: 40px; color: var(--text-secondary); }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Token State Viewer <span class="version-badge">V3 Cytoscape</span></h1>
+
+        <form class="query-form" onsubmit="fetchData(); return false;">
+            <div class="form-group">
+                <label>Token Symbol</label>
+                <input type="text" id="token_symbol" placeholder="e.g., BONK">
+            </div>
+            <div class="form-group">
+                <label>Mint Address</label>
+                <input type="text" id="mint_address" placeholder="Token mint address">
+            </div>
+            <div class="form-group">
+                <label>Signature</label>
+                <input type="text" id="signature" placeholder="Transaction signature">
+            </div>
+            <div class="form-group">
+                <label>TX Window</label>
+                <select id="tx_limit">
+                    <option value="1">Single TX</option>
+                    <option value="10" selected>10 TX</option>
+                    <option value="20">20 TX</option>
+                    <option value="50">50 TX</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn">Load</button>
+            </div>
+        </form>
+
+        <div id="results"></div>
+    </div>
+
+    <!-- Tooltip element -->
+    <div class="cy-tooltip" id="tooltip" style="display: none;"></div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let cy = null;
+        let currentData = null;
+
+        // Node colors by type
+        const nodeColors = {
+            wallet: '#3b82f6',
+            pool: '#22c55e',
+            mint: '#e94560',
+            ata: '#a855f7',
+            program: '#fbbf24',
+            unknown: '#666'
+        };
+
+        // Edge colors by type
+        const edgeColors = {
+            swap_in: '#22c55e',
+            swap_out: '#ef4444',
+            spl_transfer: '#3b82f6',
+            sol_transfer: '#60a5fa',
+            create_ata: '#06b6d4',
+            close_ata: '#0891b2',
+            funded_by: '#a855f7',
+            mint: '#22d3ee',
+            burn: '#ff6b6b'
+        };
+
+        // Cytoscape stylesheet
+        const cyStyle = [
+            {
+                selector: 'node',
+                style: {
+                    'label': 'data(label)',
+                    'text-valign': 'bottom',
+                    'text-margin-y': 5,
+                    'font-size': 10,
+                    'color': '#aaa',
+                    'text-outline-color': '#1a1a2e',
+                    'text-outline-width': 2,
+                    'background-color': (ele) => nodeColors[ele.data('address_type')] || '#666',
+                    'width': (ele) => Math.max(20, Math.min(80, 20 + Math.log10(Math.abs(ele.data('balance')) + 1) * 12)),
+                    'height': (ele) => Math.max(20, Math.min(80, 20 + Math.log10(Math.abs(ele.data('balance')) + 1) * 12)),
+                    'border-width': 2,
+                    'border-color': 'rgba(255,255,255,0.3)'
+                }
+            },
+            {
+                selector: 'node:selected',
+                style: {
+                    'border-width': 4,
+                    'border-color': '#e94560'
+                }
+            },
+            {
+                selector: 'edge',
+                style: {
+                    'width': 2,
+                    'line-color': (ele) => edgeColors[ele.data('type')] || '#666',
+                    'target-arrow-color': (ele) => edgeColors[ele.data('type')] || '#666',
+                    'target-arrow-shape': 'triangle',
+                    'curve-style': 'bezier',
+                    'opacity': 0.7
+                }
+            },
+            {
+                selector: 'edge[type = "funded_by"]',
+                style: {
+                    'line-style': 'dashed',
+                    'width': 1,
+                    'opacity': 0.5
+                }
+            },
+            {
+                selector: 'edge:selected',
+                style: {
+                    'width': 4,
+                    'opacity': 1
+                }
+            }
+        ];
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading...</div>';
+
+            if (!params) {
+                params = {
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
+                };
+            } else {
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
+            }
+
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function navigateTo(signature) {
+            document.getElementById('signature').value = signature;
+            fetchData({ signature });
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+            if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toFixed(4);
+        }
+
+        function truncAddr(addr) {
+            return addr ? addr.slice(0, 6) + '...' + addr.slice(-4) : '';
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { token, txs, nodes, edges, cytoscape: cyData } = data.result || {};
+
+            if (!token) {
+                resultsDiv.innerHTML = '<div class="error">No data returned</div>';
+                return;
+            }
+
+            let html = '';
+
+            // Token Info
+            html += `
+                <div class="token-info">
+                    <div>
+                        <div class="symbol">${token.symbol || 'Unknown'}</div>
+                        <div class="mint">${token.mint || ''}</div>
+                    </div>
+                    ${txs ? `
+                        <div style="font-size: 12px; color: var(--text-secondary);">
+                            TX: ${truncAddr(txs.signature)}<br>
+                            ${txs.block_time_utc || ''}
+                        </div>
+                        <div>
+                            ${(txs.edge_types || []).map(t => `<span class="edge-type ${t}">${t}</span>`).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+
+            // Navigation
+            if (txs && (txs.prev?.length || txs.next?.length)) {
+                html += `
+                    <div class="nav-section">
+                        <h3>Navigation</h3>
+                        <div class="nav-buttons">
+                            ${(txs.prev || []).reverse().map(p => `
+                                <button class="nav-btn" onclick="navigateTo('${p.signature}')">
+                                    ← ${truncAddr(p.signature)}
+                                    <span class="time">${p.block_time_utc?.split(' ')[1] || ''}</span>
+                                </button>
+                            `).join('')}
+                            <button class="nav-btn" style="background: var(--accent);" disabled>Current</button>
+                            ${(txs.next || []).map(n => `
+                                <button class="nav-btn" onclick="navigateTo('${n.signature}')">
+                                    ${truncAddr(n.signature)} →
+                                    <span class="time">${n.block_time_utc?.split(' ')[1] || ''}</span>
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Cytoscape Container
+            html += `
+                <div class="cytoscape-container">
+                    <div class="cytoscape-header">
+                        <h3>Network Graph (Cytoscape.js)</h3>
+                        <div class="controls">
+                            <label>Layout:
+                                <select id="layout-select" onchange="changeLayout(this.value)">
+                                    <option value="cose" selected>Force (CoSE)</option>
+                                    <option value="circle">Circle</option>
+                                    <option value="concentric">Concentric</option>
+                                    <option value="breadthfirst">Hierarchy</option>
+                                    <option value="grid">Grid</option>
+                                </select>
+                            </label>
+                            <label><input type="checkbox" id="show-labels" checked onchange="toggleLabels()"> Labels</label>
+                            <label><input type="checkbox" id="show-funded" checked onchange="toggleFunded()"> Funders</label>
+                            <button onclick="cy.fit()">Fit</button>
+                            <button onclick="cy.reset()">Reset</button>
+                            <button onclick="exportPNG()">Export PNG</button>
+                        </div>
+                    </div>
+                    <div id="cy"></div>
+                    <div class="legend">
+                        <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div> Wallet</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #22c55e;"></div> Pool</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #e94560;"></div> Mint</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #a855f7;"></div> ATA</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #fbbf24;"></div> Program</div>
+                        <div style="margin-left: 20px; border-left: 1px solid var(--border); padding-left: 20px;">
+                            <span style="color: #22c55e;">━</span> swap_in
+                            <span style="color: #ef4444; margin-left: 10px;">━</span> swap_out
+                            <span style="color: #3b82f6; margin-left: 10px;">━</span> transfer
+                            <span style="color: #a855f7; margin-left: 10px;">┅</span> funded_by
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Data Grid
+            html += `
+                <div class="data-grid">
+                    <div class="data-section">
+                        <h3>Nodes (${nodes?.length || 0})</h3>
+                        <div class="data-content" id="nodes-list"></div>
+                    </div>
+                    <div class="data-section">
+                        <h3>Edges (${edges?.length || 0})</h3>
+                        <div class="data-content" id="edges-list"></div>
+                    </div>
+                </div>
+            `;
+
+            resultsDiv.innerHTML = html;
+
+            // Render Cytoscape graph
+            if (cyData && (cyData.nodes?.length || cyData.edges?.length)) {
+                renderCytoscape(cyData);
+            }
+
+            // Render lists
+            renderNodesList(nodes);
+            renderEdgesList(edges);
+        }
+
+        function renderCytoscape(cyData) {
+            const container = document.getElementById('cy');
+
+            cy = cytoscape({
+                container: container,
+                elements: [...cyData.nodes, ...cyData.edges],
+                style: cyStyle,
+                layout: { name: 'cose', animate: false, randomize: true, nodeRepulsion: 8000, idealEdgeLength: 100 },
+                minZoom: 0.1,
+                maxZoom: 4,
+                wheelSensitivity: 0.3
+            });
+
+            // Tooltip on hover
+            const tooltip = document.getElementById('tooltip');
+
+            cy.on('mouseover', 'node', (e) => {
+                const node = e.target;
+                const d = node.data();
+                tooltip.innerHTML = `
+                    <div class="label">${d.label || d.address_type}</div>
+                    <div class="addr">${d.address}</div>
+                    <div class="stats">
+                        Balance: <span>${formatNumber(d.balance)}</span><br>
+                        SOL: <span>${formatNumber(d.sol_balance)}</span>
+                        ${d.pool_label ? `<br>Pool: <span>${d.pool_label}</span>` : ''}
+                        ${d.token_name ? `<br>Token: <span>${d.token_name}</span>` : ''}
+                        ${d.funded_by ? `<br>Funded by: <span>${truncAddr(d.funded_by)}</span>` : ''}
+                    </div>
+                `;
+                tooltip.style.display = 'block';
+            });
+
+            cy.on('mousemove', (e) => {
+                tooltip.style.left = e.originalEvent.pageX + 15 + 'px';
+                tooltip.style.top = e.originalEvent.pageY + 15 + 'px';
+            });
+
+            cy.on('mouseout', 'node', () => {
+                tooltip.style.display = 'none';
+            });
+
+            cy.on('mouseover', 'edge', (e) => {
+                const edge = e.target;
+                const d = edge.data();
+                tooltip.innerHTML = `
+                    <div class="label" style="color: ${edgeColors[d.type] || '#666'}">${d.type}</div>
+                    <div class="stats">
+                        Amount: <span>${formatNumber(d.amount)} ${d.token_symbol || ''}</span>
+                        ${d.dex ? `<br>DEX: <span>${d.dex}</span>` : ''}
+                        ${d.pool_label ? `<br>Pool: <span>${d.pool_label}</span>` : ''}
+                        ${d.signature ? `<br>TX: <span>${truncAddr(d.signature)}</span>` : ''}
+                    </div>
+                `;
+                tooltip.style.display = 'block';
+            });
+
+            cy.on('mouseout', 'edge', () => {
+                tooltip.style.display = 'none';
+            });
+
+            // Click to copy address
+            cy.on('tap', 'node', (e) => {
+                const addr = e.target.data('address');
+                navigator.clipboard.writeText(addr);
+                e.target.style('border-color', '#22c55e');
+                setTimeout(() => e.target.style('border-color', 'rgba(255,255,255,0.3)'), 500);
+            });
+        }
+
+        function changeLayout(layoutName) {
+            if (!cy) return;
+
+            const layouts = {
+                cose: { name: 'cose', animate: true, animationDuration: 500, nodeRepulsion: 8000, idealEdgeLength: 100 },
+                circle: { name: 'circle', animate: true, animationDuration: 500 },
+                concentric: { name: 'concentric', animate: true, animationDuration: 500, concentric: (n) => n.data('balance') },
+                breadthfirst: { name: 'breadthfirst', animate: true, animationDuration: 500, directed: true },
+                grid: { name: 'grid', animate: true, animationDuration: 500 }
+            };
+
+            cy.layout(layouts[layoutName] || layouts.cose).run();
+        }
+
+        function toggleLabels() {
+            if (!cy) return;
+            const show = document.getElementById('show-labels').checked;
+            cy.style().selector('node').style('label', show ? 'data(label)' : '').update();
+        }
+
+        function toggleFunded() {
+            if (!cy) return;
+            const show = document.getElementById('show-funded').checked;
+            cy.edges('[type = "funded_by"]').style('display', show ? 'element' : 'none');
+        }
+
+        function exportPNG() {
+            if (!cy) return;
+            const png = cy.png({ scale: 2, bg: '#1a1a2e' });
+            const link = document.createElement('a');
+            link.href = png;
+            link.download = 'bmap-graph.png';
+            link.click();
+        }
+
+        function renderNodesList(nodes) {
+            const div = document.getElementById('nodes-list');
+            if (!div || !nodes) return;
+            div.innerHTML = nodes.map(n => `
+                <div class="node-item">
+                    <div class="address">${n.address}</div>
+                    <div style="color: var(--text-secondary); margin: 4px 0;">${n.label || n.address_type}</div>
+                    <div>Balance: <span class="balance">${formatNumber(n.balance)}</span> | SOL: ${formatNumber(n.sol_balance)}</div>
+                </div>
+            `).join('');
+        }
+
+        function renderEdgesList(edges) {
+            const div = document.getElementById('edges-list');
+            if (!div || !edges) return;
+            div.innerHTML = edges.map(e => `
+                <div class="edge-item">
+                    <span class="edge-type ${e.type}">${e.type}</span>
+                    <span style="color: var(--success); margin-left: 8px;">${formatNumber(e.amount)} ${e.token_symbol || ''}</span>
+                    ${e.dex ? `<span style="color: #fbbf24; margin-left: 8px;">${e.dex}</span>` : ''}
+                </div>
+            `).join('');
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer V5 (Sigma.js WebGL)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 2800px; margin: 0 auto; }
+
+        h1 { text-align: center; margin-bottom: 20px; color: var(--accent); }
+
+        .version-badge {
+            background: #10b981;
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        .perf-badge {
+            background: #fbbf24;
+            color: #000;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            margin-left: 5px;
+        }
+
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input, .form-group select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+
+        .stats { display: flex; gap: 20px; margin-left: auto; }
+        .stat { text-align: center; }
+        .stat-value { font-size: 24px; font-weight: bold; color: var(--success); }
+        .stat-label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; }
+
+        .sigma-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .sigma-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .sigma-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .controls label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .controls select, .controls button {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .controls button:hover { border-color: var(--accent); }
+
+        #sigma-graph {
+            width: 100%;
+            height: 800px;
+            background: #0d0d1a;
+        }
+
+        .legend {
+            display: flex;
+            gap: 15px;
+            padding: 10px 20px;
+            background: rgba(0,0,0,0.3);
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            cursor: pointer;
+            opacity: 1;
+            transition: opacity 0.2s;
+        }
+
+        .legend-item.hidden { opacity: 0.3; }
+
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 12px;
+            max-width: 300px;
+            pointer-events: none;
+            z-index: 1000;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            display: none;
+        }
+
+        .tooltip .address {
+            font-family: monospace;
+            color: var(--accent);
+            font-size: 10px;
+            word-break: break-all;
+            margin-bottom: 8px;
+        }
+
+        .tooltip .label { font-weight: bold; margin-bottom: 5px; }
+        .tooltip .balance { color: var(--success); }
+        .tooltip .funder { color: #d946ef; }
+
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .data-content { padding: 15px; max-height: 400px; overflow-y: auto; }
+
+        .node-item, .edge-item {
+            background: var(--bg-input);
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 11px;
+        }
+
+        .node-item.funder { border-left: 3px solid #d946ef; }
+        .node-item .address { font-family: monospace; color: var(--accent); word-break: break-all; }
+        .node-item .balance { color: var(--success); font-weight: bold; }
+
+        .edge-type {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            color: white;
+        }
+
+        .error { background: #7f1d1d; color: #fca5a5; padding: 20px; border-radius: 10px; text-align: center; }
+        .loading { text-align: center; padding: 40px; color: var(--text-secondary); }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BMap Token State Viewer <span class="version-badge">V5 Sigma.js</span><span class="perf-badge">WebGL</span></h1>
+
+        <form class="query-form" onsubmit="fetchData(); return false;">
+            <div class="form-group">
+                <label>Token Symbol</label>
+                <input type="text" id="token_symbol" placeholder="e.g., BONK">
+            </div>
+            <div class="form-group">
+                <label>Mint Address</label>
+                <input type="text" id="mint_address" placeholder="Token mint address">
+            </div>
+            <div class="form-group">
+                <label>Signature</label>
+                <input type="text" id="signature" placeholder="Transaction signature">
+            </div>
+            <div class="form-group">
+                <label>TX Window</label>
+                <select id="tx_limit">
+                    <option value="10">10 TX</option>
+                    <option value="20">20 TX</option>
+                    <option value="50" selected>50 TX</option>
+                    <option value="100">100 TX</option>
+                    <option value="200">200 TX</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn">Load</button>
+            </div>
+        </form>
+
+        <div id="results"></div>
+        <div class="tooltip" id="tooltip"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let renderer = null;
+        let graph = null;
+        let currentData = null;
+        let hoveredNode = null;
+        let hiddenTypes = new Set();
+
+        const NODE_COLORS = {
+            'wallet': '#3b82f6',
+            'pool': '#22c55e',
+            'mint': '#e94560',
+            'ata': '#a855f7',
+            'program': '#fbbf24',
+            'unknown': '#666666'
+        };
+
+        const EDGE_COLORS = {
+            'swap_in': '#22c55e',
+            'swap_out': '#ef4444',
+            'spl_transfer': '#3b82f6',
+            'sol_transfer': '#60a5fa',
+            'funded_by': '#a855f7'
+        };
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading...</div>';
+
+            if (!params) {
+                params = {
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
+                };
+            } else {
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
+            }
+
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+            if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toFixed(4);
+        }
+
+        function truncAddr(addr) {
+            return addr ? addr.slice(0, 6) + '...' + addr.slice(-4) : '';
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { token, nodes, edges, sigma: sigmaData } = data.result || {};
+
+            if (!token) {
+                resultsDiv.innerHTML = '<div class="error">No data returned</div>';
+                return;
+            }
+
+            const funderCount = sigmaData?.nodes?.filter(n => n.attributes?.is_funder).length || 0;
+
+            let html = `
+                <div class="token-info">
+                    <div>
+                        <div class="symbol">${token.symbol || 'Unknown'}</div>
+                        <div class="mint">${token.mint || ''}</div>
+                    </div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-value">${sigmaData?.nodes?.length || 0}</div>
+                            <div class="stat-label">Nodes</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value">${sigmaData?.edges?.length || 0}</div>
+                            <div class="stat-label">Edges</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" style="color: #d946ef;">${funderCount}</div>
+                            <div class="stat-label">Funders</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sigma-container">
+                    <div class="sigma-header">
+                        <h3>Network Graph (Sigma.js WebGL)</h3>
+                        <div class="controls">
+                            <label><input type="checkbox" id="show-labels" checked onchange="toggleLabels()"> Labels</label>
+                            <label><input type="checkbox" id="show-edges" checked onchange="toggleEdges()"> Edges</label>
+                            <button onclick="resetZoom()">Reset View</button>
+                            <button onclick="runLayout()">Re-Layout</button>
+                            <button onclick="exportPNG()">Export PNG</button>
+                        </div>
+                    </div>
+                    <div class="legend" id="legend"></div>
+                    <div id="sigma-graph"></div>
+                </div>
+
+                <div class="data-grid">
+                    <div class="data-section">
+                        <h3>Nodes (${nodes?.length || 0})</h3>
+                        <div class="data-content" id="nodes-list"></div>
+                    </div>
+                    <div class="data-section">
+                        <h3>Edges (${edges?.length || 0})</h3>
+                        <div class="data-content" id="edges-list"></div>
+                    </div>
+                </div>
+            `;
+
+            resultsDiv.innerHTML = html;
+
+            if (sigmaData && sigmaData.nodes?.length) {
+                renderSigma(sigmaData);
+                renderLegend();
+            }
+
+            renderNodesList(nodes, sigmaData);
+            renderEdgesList(edges);
+        }
+
+        function renderSigma(sigmaData) {
+            const container = document.getElementById('sigma-graph');
+
+            // Cleanup previous instance
+            if (renderer) {
+                renderer.kill();
+                renderer = null;
+            }
+
+            // Create graphology graph
+            graph = new graphology.Graph({ multi: true, type: 'directed', allowSelfLoops: true });
+
+            // Add nodes with random initial positions
+            sigmaData.nodes.forEach((node, i) => {
+                const angle = (2 * Math.PI * i) / sigmaData.nodes.length;
+                const radius = 100 + Math.random() * 50;
+                graph.addNode(node.key, {
+                    ...node.attributes,
+                    x: Math.cos(angle) * radius,
+                    y: Math.sin(angle) * radius,
+                    size: node.attributes.size || 10
+                });
+            });
+
+            // Add edges
+            sigmaData.edges.forEach(edge => {
+                try {
+                    graph.addEdge(edge.source, edge.target, {
+                        ...edge.attributes,
+                        size: edge.attributes.size || 1
+                    });
+                } catch (e) {
+                    // Skip duplicate edges or missing nodes
+                }
+            });
+
+            // Run force-directed layout
+            runForceLayout();
+
+            // Create Sigma renderer
+            renderer = new Sigma(graph, container, {
+                renderEdgeLabels: false,
+                defaultNodeColor: '#666',
+                defaultEdgeColor: '#444',
+                labelFont: 'Segoe UI, sans-serif',
+                labelSize: 11,
+                labelWeight: 'normal',
+                labelColor: { color: '#aaa' },
+                edgeLabelFont: 'Segoe UI, sans-serif',
+                edgeLabelSize: 9,
+                minCameraRatio: 0.1,
+                maxCameraRatio: 10,
+                nodeReducer: (node, data) => {
+                    const res = { ...data };
+                    if (hiddenTypes.has(data.nodeType)) {
+                        res.hidden = true;
+                    }
+                    if (hoveredNode && hoveredNode !== node) {
+                        // Dim non-neighbors when hovering
+                        if (!graph.hasEdge(hoveredNode, node) && !graph.hasEdge(node, hoveredNode)) {
+                            res.color = '#333';
+                            res.label = '';
+                        }
+                    }
+                    // Funder styling
+                    if (data.is_funder) {
+                        res.color = '#d946ef';
+                    }
+                    return res;
+                },
+                edgeReducer: (edge, data) => {
+                    const res = { ...data };
+                    if (hoveredNode) {
+                        const source = graph.source(edge);
+                        const target = graph.target(edge);
+                        if (source !== hoveredNode && target !== hoveredNode) {
+                            res.hidden = true;
+                        }
+                    }
+                    return res;
+                }
+            });
+
+            // Event handlers
+            renderer.on('enterNode', ({ node }) => {
+                hoveredNode = node;
+                renderer.refresh();
+                showTooltip(node);
+            });
+
+            renderer.on('leaveNode', () => {
+                hoveredNode = null;
+                renderer.refresh();
+                hideTooltip();
+            });
+
+            renderer.on('clickNode', ({ node }) => {
+                const address = node;
+                navigator.clipboard.writeText(address);
+                // Flash effect
+                const originalColor = graph.getNodeAttribute(node, 'color');
+                graph.setNodeAttribute(node, 'color', '#fff');
+                setTimeout(() => {
+                    graph.setNodeAttribute(node, 'color', originalColor);
+                }, 200);
+            });
+        }
+
+        function runForceLayout() {
+            if (!graph) return;
+
+            // Simple force-directed layout
+            const nodes = graph.nodes();
+            const positions = {};
+
+            // Initialize positions
+            nodes.forEach(node => {
+                positions[node] = {
+                    x: graph.getNodeAttribute(node, 'x'),
+                    y: graph.getNodeAttribute(node, 'y')
+                };
+            });
+
+            // Run iterations
+            const iterations = 100;
+            const repulsion = 500;
+            const attraction = 0.01;
+            const gravity = 0.1;
+
+            for (let i = 0; i < iterations; i++) {
+                const forces = {};
+                nodes.forEach(n => forces[n] = { x: 0, y: 0 });
+
+                // Repulsion between all nodes
+                for (let j = 0; j < nodes.length; j++) {
+                    for (let k = j + 1; k < nodes.length; k++) {
+                        const n1 = nodes[j], n2 = nodes[k];
+                        const dx = positions[n2].x - positions[n1].x;
+                        const dy = positions[n2].y - positions[n1].y;
+                        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                        const force = repulsion / (dist * dist);
+                        const fx = (dx / dist) * force;
+                        const fy = (dy / dist) * force;
+                        forces[n1].x -= fx;
+                        forces[n1].y -= fy;
+                        forces[n2].x += fx;
+                        forces[n2].y += fy;
+                    }
+                }
+
+                // Attraction along edges
+                graph.forEachEdge((edge, attr, source, target) => {
+                    const dx = positions[target].x - positions[source].x;
+                    const dy = positions[target].y - positions[source].y;
+                    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                    const force = dist * attraction;
+                    const fx = (dx / dist) * force;
+                    const fy = (dy / dist) * force;
+                    forces[source].x += fx;
+                    forces[source].y += fy;
+                    forces[target].x -= fx;
+                    forces[target].y -= fy;
+                });
+
+                // Gravity toward center
+                nodes.forEach(node => {
+                    forces[node].x -= positions[node].x * gravity;
+                    forces[node].y -= positions[node].y * gravity;
+                });
+
+                // Apply forces
+                const maxMove = 10;
+                nodes.forEach(node => {
+                    const fx = Math.max(-maxMove, Math.min(maxMove, forces[node].x));
+                    const fy = Math.max(-maxMove, Math.min(maxMove, forces[node].y));
+                    positions[node].x += fx;
+                    positions[node].y += fy;
+                });
+            }
+
+            // Apply final positions
+            nodes.forEach(node => {
+                graph.setNodeAttribute(node, 'x', positions[node].x);
+                graph.setNodeAttribute(node, 'y', positions[node].y);
+            });
+        }
+
+        function runLayout() {
+            if (!graph) return;
+            runForceLayout();
+            if (renderer) renderer.refresh();
+        }
+
+        function showTooltip(nodeKey) {
+            const tooltip = document.getElementById('tooltip');
+            const attrs = graph.getNodeAttribute(nodeKey, 'label') ? graph.getNodeAttributes(nodeKey) : null;
+            if (!attrs) return;
+
+            tooltip.innerHTML = `
+                <div class="label">${attrs.is_funder ? '💰 FUNDER: ' : ''}${attrs.label || 'Unknown'}</div>
+                <div class="address">${nodeKey}</div>
+                <div>Balance: <span class="balance">${formatNumber(attrs.balance)}</span></div>
+                <div>SOL: <span class="balance">${formatNumber(attrs.sol_balance)}</span></div>
+                ${attrs.funded_by ? `<div class="funder">Funded by: ${truncAddr(attrs.funded_by)}</div>` : ''}
+                ${attrs.pool_label ? `<div>Pool: ${attrs.pool_label}</div>` : ''}
+            `;
+            tooltip.style.display = 'block';
+
+            document.addEventListener('mousemove', moveTooltip);
+        }
+
+        function moveTooltip(e) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.style.left = (e.pageX + 15) + 'px';
+            tooltip.style.top = (e.pageY + 15) + 'px';
+        }
+
+        function hideTooltip() {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.style.display = 'none';
+            document.removeEventListener('mousemove', moveTooltip);
+        }
+
+        function renderLegend() {
+            const legend = document.getElementById('legend');
+            const types = ['wallet', 'pool', 'mint', 'ata', 'program', 'unknown'];
+
+            legend.innerHTML = types.map(type => `
+                <div class="legend-item ${hiddenTypes.has(type) ? 'hidden' : ''}"
+                     onclick="toggleType('${type}')" data-type="${type}">
+                    <div class="legend-dot" style="background: ${NODE_COLORS[type]}"></div>
+                    <span>${type}</span>
+                </div>
+            `).join('') + `
+                <div class="legend-item" style="margin-left: auto;">
+                    <div class="legend-dot" style="background: #d946ef; box-shadow: 0 0 10px #d946ef;"></div>
+                    <span>Funder</span>
+                </div>
+            `;
+        }
+
+        function toggleType(type) {
+            if (hiddenTypes.has(type)) {
+                hiddenTypes.delete(type);
+            } else {
+                hiddenTypes.add(type);
+            }
+            renderLegend();
+            if (renderer) renderer.refresh();
+        }
+
+        function toggleLabels() {
+            if (!renderer) return;
+            const show = document.getElementById('show-labels').checked;
+            renderer.setSetting('renderLabels', show);
+        }
+
+        function toggleEdges() {
+            if (!renderer) return;
+            const show = document.getElementById('show-edges').checked;
+            renderer.setSetting('renderEdges', show);
+        }
+
+        function resetZoom() {
+            if (!renderer) return;
+            renderer.getCamera().animate({ ratio: 1, x: 0.5, y: 0.5 }, { duration: 300 });
+        }
+
+        function exportPNG() {
+            if (!renderer) return;
+            // Sigma doesn't have built-in PNG export, use canvas
+            const container = document.getElementById('sigma-graph');
+            const canvas = container.querySelector('canvas');
+            if (canvas) {
+                const link = document.createElement('a');
+                link.href = canvas.toDataURL('image/png');
+                link.download = 'bmap-graph-v5.png';
+                link.click();
+            }
+        }
+
+        function renderNodesList(nodes, sigmaData) {
+            const div = document.getElementById('nodes-list');
+            if (!div || !nodes) return;
+
+            const funderSet = new Set(sigmaData?.nodes?.filter(n => n.attributes?.is_funder).map(n => n.key) || []);
+
+            div.innerHTML = nodes.map(n => `
+                <div class="node-item ${funderSet.has(n.address) ? 'funder' : ''}">
+                    <div class="address">${funderSet.has(n.address) ? '💰 ' : ''}${n.address}</div>
+                    <div style="color: var(--text-secondary); margin: 4px 0;">${n.label || n.address_type}</div>
+                    <div>Balance: <span class="balance">${formatNumber(n.balance)}</span> | SOL: ${formatNumber(n.sol_balance)}</div>
+                    ${n.funded_by ? `<div style="color: #d946ef; font-size: 10px;">Funded by: ${truncAddr(n.funded_by)}</div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        function renderEdgesList(edges) {
+            const div = document.getElementById('edges-list');
+            if (!div || !edges) return;
+            div.innerHTML = edges.map(e => `
+                <div class="edge-item">
+                    <span class="edge-type" style="background: ${EDGE_COLORS[e.type] || '#666'}">${e.type}</span>
+                    <span style="color: var(--success); margin-left: 8px;">${formatNumber(e.amount)} ${e.token_symbol || ''}</span>
+                    ${e.dex ? `<span style="color: #fbbf24; margin-left: 8px;">${e.dex}</span>` : ''}
+                </div>
+            `).join('');
+        }
+    </script>
+</body>
+</html>
