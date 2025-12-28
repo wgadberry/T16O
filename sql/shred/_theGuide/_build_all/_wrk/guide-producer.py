@@ -419,28 +419,34 @@ def get_last_known_signature(cursor, address: str) -> Optional[str]:
 
 def get_signatures_needing_detail(cursor, batch_size: int = 20, max_batches: int = 0) -> Generator[List[str], None, None]:
     """Generator that yields batches of signatures that need detail enrichment.
-    
-    Queries tx table for tx_state = 'shredded' (processed by shredder but not detailed).
-    
+
+    Queries tx table for transactions that have SHREDDER_COMPLETE (63) but missing DETAILED (64).
+    tx_state is a bitmask: bit 6 (64) = DETAILED
+
     Args:
         cursor: MySQL cursor
         batch_size: Number of signatures per batch
         max_batches: Maximum batches to yield (0 = unlimited)
-        
+
     Yields:
         Lists of signature strings
     """
+    # tx_state bitmask: SHREDDER_COMPLETE = 63, DETAILED = 64
+    SHREDDER_COMPLETE = 63
+    DETAILED_BIT = 64
+
     offset = 0
     batch_num = 0
-    
+
     while True:
+        # Find tx with shredder complete but missing DETAILED bit
         cursor.execute("""
-            SELECT signature 
-            FROM tx 
-            WHERE tx_state = 'shredded'
+            SELECT signature
+            FROM tx
+            WHERE (tx_state & %s) = %s AND (tx_state & %s) = 0
             ORDER BY block_time DESC
             LIMIT %s OFFSET %s
-        """, (batch_size, offset))
+        """, (SHREDDER_COMPLETE, SHREDDER_COMPLETE, DETAILED_BIT, batch_size, offset))
         
         rows = cursor.fetchall()
         if not rows:
@@ -600,8 +606,8 @@ def main():
         print("--- Direct-to-Detail Mode ---")
         print(f"Querying for shredded transactions needing detail...")
         
-        # Count total needing detail
-        db_cursor.execute("SELECT COUNT(*) FROM tx WHERE tx_state = 'shredded'")
+        # Count total needing detail (shredder complete but missing DETAILED bit)
+        db_cursor.execute("SELECT COUNT(*) FROM tx WHERE (tx_state & 63) = 63 AND (tx_state & 64) = 0")
         total_needing = db_cursor.fetchone()[0]
         print(f"  Found {total_needing} transactions needing detail")
         

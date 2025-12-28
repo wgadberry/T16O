@@ -103,10 +103,13 @@ def filter_existing_signatures(cursor, signatures: list) -> tuple:
     Filter signatures based on existence and detail status.
     Returns tuple: (new_signatures, need_detail_signatures)
       - new_signatures: don't exist in tx table, need full shredding
-      - need_detail_signatures: exist but tx_state != 'detailed', need detail enrichment
+      - need_detail_signatures: exist but tx_state missing DETAILED bit (64)
     """
     if not signatures:
         return [], []
+
+    # tx_state is now a bitmask: bit 6 (64) = DETAILED
+    DETAILED_BIT = 64
 
     placeholders = ','.join(['%s'] * len(signatures))
     cursor.execute(f"""
@@ -115,13 +118,14 @@ def filter_existing_signatures(cursor, signatures: list) -> tuple:
 
     existing = {}
     for row in cursor.fetchall():
-        existing[row[0]] = row[1]  # signature -> tx_state
+        existing[row[0]] = row[1] or 0  # signature -> tx_state (bitmask)
 
     if not existing:
         return signatures, []
 
     new_sigs = [sig for sig in signatures if sig not in existing]
-    need_detail = [sig for sig, state in existing.items() if state != 'detailed']
+    # Need detail if DETAILED bit (64) is not set
+    need_detail = [sig for sig, state in existing.items() if (state & DETAILED_BIT) == 0]
 
     return new_sigs, need_detail
 

@@ -389,11 +389,12 @@ class AddressHistoryWorker:
         target_id = target_row['id'] if target_row else None
 
         # Ensure transaction exists and get ID
+        # tx_state = 1 (SHREDDED bit only, minimal state for funding tx)
         tx_id = None
         if signature:
             self.cursor.execute("""
                 INSERT IGNORE INTO tx (signature, block_time, tx_state)
-                VALUES (%s, %s, 'shredded')
+                VALUES (%s, %s, 1)
             """, (signature, block_time))
             self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
             tx_row = self.cursor.fetchone()
@@ -886,10 +887,11 @@ def main():
                 target_row = self.cursor.fetchone()
                 target_id = target_row['id'] if target_row else None
 
+                # tx_state = 1 (SHREDDED bit only, minimal state for funding tx)
                 tx_id = None
                 if signature:
                     self.cursor.execute("""
-                        INSERT IGNORE INTO tx (signature, block_time, tx_state) VALUES (%s, %s, 'shredded')
+                        INSERT IGNORE INTO tx (signature, block_time, tx_state) VALUES (%s, %s, 1)
                     """, (signature, block_time))
                     self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
                     tx_row = self.cursor.fetchone()
