@@ -14,6 +14,7 @@ import json
 import os
 import time
 import random
+import pika
 
 MAX_RETRIES = 3
 BASE_BACKOFF = 0.3
@@ -27,6 +28,14 @@ DB_CONFIG = {
     'user': 'root',
     'password': 'rootpassword',
     'database': 't16o_db'
+}
+
+RABBITMQ_CONFIG = {
+    'host': 'localhost',
+    'port': 5672,
+    'user': 'guest',
+    'password': 'guest',
+    'queue': 'tx.funding.addresses'
 }
 
 
@@ -252,6 +261,70 @@ def get_funding_tree():
             'funding_down': down_tree
         })
 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/wallet/request-funding', methods=['POST'])
+def request_funding_info():
+    """
+    Request funding information for an address by sending to RabbitMQ queue.
+    This triggers the funding worker to fetch the initial transaction.
+    """
+    data = request.get_json() or {}
+    address = data.get('address')
+
+    if not address:
+        return jsonify({'error': 'address is required'}), 400
+
+    try:
+        # Connect to RabbitMQ
+        credentials = pika.PlainCredentials(
+            RABBITMQ_CONFIG['user'],
+            RABBITMQ_CONFIG['password']
+        )
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=RABBITMQ_CONFIG['host'],
+                port=RABBITMQ_CONFIG['port'],
+                credentials=credentials
+            )
+        )
+        channel = connection.channel()
+
+        # Declare queue (idempotent)
+        channel.queue_declare(queue=RABBITMQ_CONFIG['queue'], durable=True)
+
+        # Publish message
+        message = json.dumps({
+            'address': address,
+            'source': 'bmap-wallet-viewer',
+            'timestamp': time.time()
+        })
+
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_CONFIG['queue'],
+            body=message,
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # persistent
+                content_type='application/json'
+            )
+        )
+
+        connection.close()
+
+        return jsonify({
+            'success': True,
+            'message': f'Funding request queued for {address[:8]}...{address[-6:]}',
+            'queue': RABBITMQ_CONFIG['queue']
+        })
+
+    except pika.exceptions.AMQPConnectionError as e:
+        return jsonify({
+            'error': f'RabbitMQ connection failed: {str(e)}',
+            'hint': 'Is RabbitMQ running?'
+        }), 503
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
