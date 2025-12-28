@@ -27,15 +27,17 @@ BEGIN
     INSERT INTO tmp_tx_stage (tx_hash)
     SELECT jt.tx_hash FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (tx_hash VARCHAR(90) PATH '$.tx_hash')) AS jt;
 
-    INSERT INTO tx (signature, block_id, block_time, block_time_utc, fee, priority_fee, tx_state)
-    SELECT jt.tx_hash, jt.block_id, jt.block_time, FROM_UNIXTIME(jt.block_time), jt.fee, jt.p_fee, 'shredded'
+    -- type_state bits: 1=SHREDDED, 2=DECODED, 4=GUIDE_EDGES, 8=ADDRESSES_QUEUED, 16=SWAPS_PARSED, 32=TRANSFERS_PARSED
+    -- SHREDDER_COMPLETE = 63 (all 6 bits for shredder phases)
+    INSERT INTO tx (signature, block_id, block_time, block_time_utc, fee, priority_fee, tx_state, type_state)
+    SELECT jt.tx_hash, jt.block_id, jt.block_time, FROM_UNIXTIME(jt.block_time), jt.fee, jt.p_fee, 'shredded', 63
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
         block_id BIGINT UNSIGNED PATH '$.block_id',
         block_time BIGINT UNSIGNED PATH '$.block_time',
         fee BIGINT UNSIGNED PATH '$.fee',
         p_fee BIGINT UNSIGNED PATH '$.priority_fee'
-    )) AS jt ON DUPLICATE KEY UPDATE tx_state = 'shredded';
+    )) AS jt ON DUPLICATE KEY UPDATE tx_state = 'shredded', type_state = type_state | 63;
 
     UPDATE tmp_tx_stage ts JOIN tx t ON t.signature = ts.tx_hash SET ts.tx_id = t.id;
     SELECT COUNT(*) INTO p_tx_count FROM tmp_tx_stage;

@@ -236,10 +236,12 @@ BEGIN
 
     -- =========================================================================
     -- PHASE 6: Update tx state to 'detailed'
+    -- type_state bit 6 = 64 = DETAILED
     -- =========================================================================
     UPDATE tx t
     JOIN tmp_detail_tx tt ON tt.tx_id = t.id
-    SET t.tx_state = 'detailed'
+    SET t.tx_state = 'detailed',
+        t.type_state = t.type_state | 64
     WHERE tt.tx_id IS NOT NULL;
 
     -- =========================================================================
