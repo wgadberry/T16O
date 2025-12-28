@@ -32,10 +32,10 @@ DB_CONFIG = {
 
 RABBITMQ_CONFIG = {
     'host': 'localhost',
-    'port': 5672,
-    'user': 'guest',
-    'password': 'guest',
-    'queue': 'tx.funding.addresses'
+    'port': 5692,
+    'user': 'admin',
+    'password': 'admin123',
+    'queue': 'tx.guide.addresses'
 }
 
 
@@ -292,8 +292,12 @@ def request_funding_info():
         )
         channel = connection.channel()
 
-        # Declare queue (idempotent)
-        channel.queue_declare(queue=RABBITMQ_CONFIG['queue'], durable=True)
+        # Declare queue (must match existing queue params)
+        channel.queue_declare(
+            queue=RABBITMQ_CONFIG['queue'],
+            durable=True,
+            arguments={'x-max-priority': 10}
+        )
 
         # Publish message
         message = json.dumps({
