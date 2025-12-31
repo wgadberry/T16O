@@ -103,13 +103,13 @@ WORKER_REGISTRY = {
         "script": "guide-aggregator.py",
         "category": "core",
         "needs_mint": False,
-        "args": "--daemon --interval 30",
+        "args": "--sync guide,funding,tokens --daemon --interval 60",
         "color": "Magenta",
         "tx_state_bits": [],
         "tx_state_names": [],
         "queues_out": [],
         "queues_in": [],
-        "description": "Consolidated: guide edges, funding, token participants, bmap state",
+        "description": "Consolidated: guide edges, funding, token participants (bmap on-demand)",
     },
 
     # === ENRICHMENT (optional, improves data quality) ===
