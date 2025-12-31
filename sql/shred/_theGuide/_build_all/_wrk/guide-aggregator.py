@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""
+Guide Aggregator - Consolidated daemon for guide table synchronization
+
+Merges functionality from:
+- guide-loader.py: Processes tx_activity into tx_guide via sp_tx_guide_batch
+- guide-sync-funding.py: Syncs tx_funding_edge and tx_token_participant
+
+Pipeline position:
+    guide-shredder.py → tx_activity, tx_swap, tx_transfer
+                             ↓
+                    guide-aggregator.py (this script)
+                             ↓
+              tx_guide, tx_funding_edge, tx_token_participant
+
+Usage:
+    python guide-aggregator.py                          # All operations, single run
+    python guide-aggregator.py --daemon --interval 30   # Continuous mode
+    python guide-aggregator.py --sync guide             # Only sp_tx_guide_batch
+    python guide-aggregator.py --sync funding           # Only tx_funding_edge
+    python guide-aggregator.py --sync tokens            # Only tx_token_participant
+    python guide-aggregator.py --sync funding,tokens    # Multiple operations
+    python guide-aggregator.py --status                 # Show sync status
+"""
+
+import argparse
+import sys
+import time
+import random
+import os
+import json
+import functools
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, Callable, List, Tuple
+
+try:
+    import mysql.connector
+    from mysql.connector import Error
+    HAS_MYSQL = True
+except ImportError:
+    HAS_MYSQL = False
+
+
+# =============================================================================
+# Config Loading
+# =============================================================================
+
+def load_config() -> dict:
+    """Load configuration from JSON file with environment variable fallback."""
+    config = {}
+    config_paths = [
+        Path('./guide-config.json'),
+        Path(__file__).parent / 'guide-config.json',
+    ]
+
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                break
+            except Exception:
+                pass
+
+    # Environment variable fallback/override
+    env_mappings = {
+        'DB_HOST': 'MYSQL_HOST',
+        'DB_PORT': 'MYSQL_PORT',
+        'DB_USER': 'MYSQL_USER',
+        'DB_PASSWORD': 'MYSQL_PASSWORD',
+        'DB_NAME': 'MYSQL_DATABASE',
+    }
+
+    for config_key, env_var in env_mappings.items():
+        if os.environ.get(env_var):
+            config[config_key] = os.environ[env_var]
+            if config_key == 'DB_PORT':
+                config[config_key] = int(config[config_key])
+
+    return config
+
+
+_CONFIG = load_config()
+
+# Database configuration
+DB_CONFIG = {
+    'host': _CONFIG.get('DB_HOST', '127.0.0.1'),
+    'port': _CONFIG.get('DB_PORT', 3396),
+    'user': _CONFIG.get('DB_USER', 'root'),
+    'password': _CONFIG.get('DB_PASSWORD', 'rootpassword'),
+    'database': _CONFIG.get('DB_NAME', 't16o_db')
+}
+
+# Deadlock retry settings
+MAX_DEADLOCK_RETRIES = 5
+DEADLOCK_BASE_DELAY = 0.1
+
+# Config table keys for last processed ID tracking
+CONFIG_TYPE = 'sync'
+FUNDING_EDGE_KEY = 'funding_edge_last_guide_id'
+TOKEN_PARTICIPANT_KEY = 'token_participant_last_guide_id'
+
+
+# =============================================================================
+# Database Utilities
+# =============================================================================
+
+def get_db_connection():
+    """Create database connection."""
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        return conn
+    except Error as e:
+        print(f"Error connecting to database: {e}")
+        sys.exit(1)
+
+
+def execute_with_deadlock_retry(cursor, conn, query: str, params: tuple = None,
+                                 max_retries: int = MAX_DEADLOCK_RETRIES) -> int:
+    """Execute a query with deadlock retry logic. Returns rowcount."""
+    for attempt in range(max_retries):
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            conn.commit()
+            return cursor.rowcount
+        except mysql.connector.Error as e:
+            if e.errno in (1213, 1205) and attempt < max_retries - 1:
+                conn.rollback()
+                delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                print(f"    [!] Deadlock (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s...")
+                time.sleep(delay)
+            else:
+                raise
+    return 0
+
+
+# =============================================================================
+# Config Table Helpers
+# =============================================================================
+
+def get_last_processed_id(cursor, config_key: str) -> int:
+    """Get last processed tx_guide.id from config table."""
+    cursor.execute("""
+        SELECT config_value FROM config
+        WHERE config_type = %s AND config_key = %s
+    """, (CONFIG_TYPE, config_key))
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def set_last_processed_id(cursor, conn, config_key: str, last_id: int):
+    """Update last processed tx_guide.id in config table."""
+    cursor.execute("""
+        INSERT INTO config (config_type, config_key, config_value, value_type, description)
+        VALUES (%s, %s, %s, 'int', %s)
+        ON DUPLICATE KEY UPDATE
+            config_value = VALUES(config_value),
+            updated_at = CURRENT_TIMESTAMP
+    """, (CONFIG_TYPE, config_key, str(last_id), f'Last processed tx_guide.id for {config_key}'))
+    conn.commit()
+
+
+def get_max_guide_id(cursor) -> int:
+    """Get current max tx_guide.id."""
+    cursor.execute("SELECT MAX(id) FROM tx_guide")
+    row = cursor.fetchone()
+    return row[0] if row[0] else 0
+
+
+# =============================================================================
+# Guide Loading (from guide-loader.py)
+# =============================================================================
+
+def get_pending_activity_count(cursor) -> int:
+    """Get count of unprocessed activities."""
+    cursor.execute("SELECT COUNT(*) FROM tx_activity WHERE guide_loaded = 0")
+    return cursor.fetchone()[0]
+
+
+def run_guide_batch(cursor, conn, batch_size: int = 1000) -> Tuple[int, int, int]:
+    """
+    Execute single batch of sp_tx_guide_batch with deadlock retry.
+    Returns (guide_count, funding_count, participant_count)
+    """
+    for attempt in range(MAX_DEADLOCK_RETRIES):
+        try:
+            cursor.execute("SET @g = 0, @f = 0, @p = 0")
+            cursor.execute("CALL sp_tx_guide_batch(%s, @g, @f, @p)", (batch_size,))
+            cursor.execute("SELECT @g, @f, @p")
+            result = cursor.fetchone()
+            conn.commit()
+            return (result[0] or 0, result[1] or 0, result[2] or 0)
+        except mysql.connector.Error as err:
+            if err.errno == 1213 and attempt < MAX_DEADLOCK_RETRIES - 1:
+                backoff = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                print(f"    [!] Deadlock (attempt {attempt + 1}), retrying in {backoff:.1f}s...")
+                conn.rollback()
+                time.sleep(backoff)
+            else:
+                raise
+    return (0, 0, 0)
+
+
+def sync_guide_edges(cursor, conn, batch_size: int = 1000,
+                     max_batches: int = 0, verbose: bool = True) -> Dict[str, int]:
+    """
+    Process pending activities via sp_tx_guide_batch.
+    Returns stats dict.
+    """
+    stats = {'batches': 0, 'guide': 0, 'funding': 0, 'participants': 0, 'deadlocks': 0}
+    batch_num = 0
+
+    while True:
+        guide, funding, participants = run_guide_batch(cursor, conn, batch_size)
+
+        if guide == 0 and funding == 0 and participants == 0:
+            break
+
+        batch_num += 1
+        stats['batches'] += 1
+        stats['guide'] += guide
+        stats['funding'] += funding
+        stats['participants'] += participants
+
+        if verbose:
+            print(f"    Batch {batch_num}: guide={guide}, funding={funding}, participants={participants}")
+
+        if max_batches > 0 and batch_num >= max_batches:
+            if verbose:
+                print(f"    Reached max batches ({max_batches})")
+            break
+
+    return stats
+
+
+# =============================================================================
+# Funding Edge Sync (from guide-sync-funding.py)
+# =============================================================================
+
+def sync_funding_edges(cursor, conn, last_id: int, max_id: int,
+                       batch_size: int = 10000) -> int:
+    """Sync new records to tx_funding_edge in batches. Returns rows affected."""
+    if last_id >= max_id:
+        return 0
+
+    total_rows = 0
+    current_id = last_id
+
+    query = """
+        INSERT INTO tx_funding_edge (
+            from_address_id, to_address_id,
+            total_sol, total_tokens, transfer_count,
+            first_transfer_time, last_transfer_time
+        )
+        SELECT
+            g.from_address_id, g.to_address_id,
+            SUM(CASE WHEN gt.type_code IN ('sol_transfer', 'wallet_funded')
+                THEN g.amount / POW(10, COALESCE(g.decimals, 9)) ELSE 0 END),
+            SUM(CASE WHEN gt.type_code = 'spl_transfer'
+                THEN g.amount / POW(10, COALESCE(g.decimals, 9)) ELSE 0 END),
+            COUNT(*),
+            MIN(g.block_time),
+            MAX(g.block_time)
+        FROM tx_guide g
+        JOIN tx_address fa ON fa.id = g.from_address_id
+        JOIN tx_address ta ON ta.id = g.to_address_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.id > %s AND g.id <= %s
+          AND gt.type_code IN ('sol_transfer', 'spl_transfer', 'wallet_funded')
+          AND fa.address_type IN ('wallet', 'unknown')
+          AND ta.address_type IN ('wallet', 'unknown')
+          AND fa.id != ta.id
+        GROUP BY g.from_address_id, g.to_address_id
+        ON DUPLICATE KEY UPDATE
+            total_sol = total_sol + VALUES(total_sol),
+            total_tokens = total_tokens + VALUES(total_tokens),
+            transfer_count = transfer_count + VALUES(transfer_count),
+            first_transfer_time = LEAST(first_transfer_time, VALUES(first_transfer_time)),
+            last_transfer_time = GREATEST(last_transfer_time, VALUES(last_transfer_time))
+    """
+
+    while current_id < max_id:
+        batch_end = min(current_id + batch_size, max_id)
+        rows = execute_with_deadlock_retry(cursor, conn, query, (current_id, batch_end))
+        total_rows += rows
+        current_id = batch_end
+
+    return total_rows
+
+
+# =============================================================================
+# Token Participant Sync (from guide-sync-funding.py)
+# =============================================================================
+
+def sync_token_participants(cursor, conn, last_id: int, max_id: int,
+                            batch_size: int = 10000) -> int:
+    """Sync new records to tx_token_participant. Returns rows affected."""
+    if last_id >= max_id:
+        return 0
+
+    total_rows = 0
+    current_id = last_id
+
+    # Buys (swap_in - wallet receives tokens)
+    query_buys = """
+        INSERT INTO tx_token_participant (
+            token_id, address_id, first_seen, last_seen,
+            buy_count, buy_volume, net_position
+        )
+        SELECT g.token_id, g.to_address_id,
+               MIN(g.block_time), MAX(g.block_time),
+               COUNT(*),
+               SUM(g.amount / POW(10, COALESCE(g.decimals, 9))),
+               SUM(g.amount / POW(10, COALESCE(g.decimals, 9)))
+        FROM tx_guide g
+        JOIN tx_address a ON a.id = g.to_address_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.id > %s AND g.id <= %s
+          AND gt.type_code = 'swap_in'
+          AND g.token_id IS NOT NULL
+          AND a.address_type IN ('wallet', 'unknown')
+        GROUP BY g.token_id, g.to_address_id
+        ON DUPLICATE KEY UPDATE
+            first_seen = LEAST(first_seen, VALUES(first_seen)),
+            last_seen = GREATEST(last_seen, VALUES(last_seen)),
+            buy_count = buy_count + VALUES(buy_count),
+            buy_volume = buy_volume + VALUES(buy_volume),
+            net_position = net_position + VALUES(buy_volume)
+    """
+
+    # Sells (swap_out - wallet sends tokens)
+    query_sells = """
+        INSERT INTO tx_token_participant (
+            token_id, address_id, first_seen, last_seen,
+            sell_count, sell_volume, net_position
+        )
+        SELECT g.token_id, g.from_address_id,
+               MIN(g.block_time), MAX(g.block_time),
+               COUNT(*),
+               SUM(g.amount / POW(10, COALESCE(g.decimals, 9))),
+               -SUM(g.amount / POW(10, COALESCE(g.decimals, 9)))
+        FROM tx_guide g
+        JOIN tx_address a ON a.id = g.from_address_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.id > %s AND g.id <= %s
+          AND gt.type_code = 'swap_out'
+          AND g.token_id IS NOT NULL
+          AND a.address_type IN ('wallet', 'unknown')
+        GROUP BY g.token_id, g.from_address_id
+        ON DUPLICATE KEY UPDATE
+            first_seen = LEAST(first_seen, VALUES(first_seen)),
+            last_seen = GREATEST(last_seen, VALUES(last_seen)),
+            sell_count = sell_count + VALUES(sell_count),
+            sell_volume = sell_volume + VALUES(sell_volume),
+            net_position = net_position - VALUES(sell_volume)
+    """
+
+    # Transfers in
+    query_xfer_in = """
+        INSERT INTO tx_token_participant (
+            token_id, address_id, first_seen, last_seen, transfer_in_count
+        )
+        SELECT g.token_id, g.to_address_id,
+               MIN(g.block_time), MAX(g.block_time), COUNT(*)
+        FROM tx_guide g
+        JOIN tx_address a ON a.id = g.to_address_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.id > %s AND g.id <= %s
+          AND gt.type_code = 'spl_transfer'
+          AND g.token_id IS NOT NULL
+          AND a.address_type IN ('wallet', 'unknown')
+        GROUP BY g.token_id, g.to_address_id
+        ON DUPLICATE KEY UPDATE
+            first_seen = LEAST(first_seen, VALUES(first_seen)),
+            last_seen = GREATEST(last_seen, VALUES(last_seen)),
+            transfer_in_count = transfer_in_count + VALUES(transfer_in_count)
+    """
+
+    # Transfers out
+    query_xfer_out = """
+        INSERT INTO tx_token_participant (
+            token_id, address_id, first_seen, last_seen, transfer_out_count
+        )
+        SELECT g.token_id, g.from_address_id,
+               MIN(g.block_time), MAX(g.block_time), COUNT(*)
+        FROM tx_guide g
+        JOIN tx_address a ON a.id = g.from_address_id
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.id > %s AND g.id <= %s
+          AND gt.type_code = 'spl_transfer'
+          AND g.token_id IS NOT NULL
+          AND a.address_type IN ('wallet', 'unknown')
+        GROUP BY g.token_id, g.from_address_id
+        ON DUPLICATE KEY UPDATE
+            first_seen = LEAST(first_seen, VALUES(first_seen)),
+            last_seen = GREATEST(last_seen, VALUES(last_seen)),
+            transfer_out_count = transfer_out_count + VALUES(transfer_out_count)
+    """
+
+    while current_id < max_id:
+        batch_end = min(current_id + batch_size, max_id)
+        params = (current_id, batch_end)
+
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_buys, params)
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_sells, params)
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_xfer_in, params)
+        total_rows += execute_with_deadlock_retry(cursor, conn, query_xfer_out, params)
+
+        current_id = batch_end
+
+    return total_rows
+
+
+# =============================================================================
+# Main Aggregation Logic
+# =============================================================================
+
+def run_sync(cursor, conn, operations: List[str], batch_size: int = 10000,
+             guide_batch_size: int = 1000, max_batches: int = 0,
+             verbose: bool = True) -> Dict[str, Any]:
+    """
+    Run sync for specified operations.
+    operations: list containing 'guide', 'funding', 'tokens'
+    Returns stats dict.
+    """
+    stats = {
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'guide': {'pending': 0, 'batches': 0, 'edges': 0},
+        'funding': {'last_id': 0, 'new_id': 0, 'rows': 0},
+        'tokens': {'last_id': 0, 'new_id': 0, 'rows': 0},
+    }
+
+    # Guide edges (sp_tx_guide_batch)
+    if 'guide' in operations:
+        pending = get_pending_activity_count(cursor)
+        stats['guide']['pending'] = pending
+
+        if pending > 0:
+            if verbose:
+                print(f"  [guide] Processing {pending:,} pending activities...")
+            result = sync_guide_edges(cursor, conn, guide_batch_size, max_batches, verbose)
+            stats['guide']['batches'] = result['batches']
+            stats['guide']['edges'] = result['guide']
+        else:
+            if verbose:
+                print(f"  [guide] No pending activities")
+
+    max_id = get_max_guide_id(cursor)
+
+    # Funding edges
+    if 'funding' in operations:
+        last_id = get_last_processed_id(cursor, FUNDING_EDGE_KEY)
+        stats['funding']['last_id'] = last_id
+
+        if last_id < max_id:
+            if verbose:
+                print(f"  [funding] Syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} records)")
+            rows = sync_funding_edges(cursor, conn, last_id, max_id, batch_size)
+            set_last_processed_id(cursor, conn, FUNDING_EDGE_KEY, max_id)
+            stats['funding']['new_id'] = max_id
+            stats['funding']['rows'] = rows
+            if verbose:
+                print(f"  [funding] {rows:,} rows affected")
+        else:
+            if verbose:
+                print(f"  [funding] Up to date (id={last_id:,})")
+
+    # Token participants
+    if 'tokens' in operations:
+        last_id = get_last_processed_id(cursor, TOKEN_PARTICIPANT_KEY)
+        stats['tokens']['last_id'] = last_id
+
+        if last_id < max_id:
+            if verbose:
+                print(f"  [tokens] Syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} records)")
+            rows = sync_token_participants(cursor, conn, last_id, max_id, batch_size)
+            set_last_processed_id(cursor, conn, TOKEN_PARTICIPANT_KEY, max_id)
+            stats['tokens']['new_id'] = max_id
+            stats['tokens']['rows'] = rows
+            if verbose:
+                print(f"  [tokens] {rows:,} rows affected")
+        else:
+            if verbose:
+                print(f"  [tokens] Up to date (id={last_id:,})")
+
+    return stats
+
+
+def get_sync_status(cursor) -> Dict[str, Any]:
+    """Get current sync status for all operations."""
+    max_id = get_max_guide_id(cursor)
+    pending = get_pending_activity_count(cursor)
+    funding_last = get_last_processed_id(cursor, FUNDING_EDGE_KEY)
+    tokens_last = get_last_processed_id(cursor, TOKEN_PARTICIPANT_KEY)
+
+    return {
+        'max_guide_id': max_id,
+        'pending_activities': pending,
+        'funding': {
+            'last_synced': funding_last,
+            'behind': max_id - funding_last,
+        },
+        'tokens': {
+            'last_synced': tokens_last,
+            'behind': max_id - tokens_last,
+        },
+    }
+
+
+def print_status(status: Dict):
+    """Print sync status in human-readable format."""
+    print(f"\n{'='*60}")
+    print(f"Guide Aggregator Status")
+    print(f"{'='*60}")
+    print(f"  tx_guide max id:        {status['max_guide_id']:,}")
+    print(f"  Pending activities:     {status['pending_activities']:,}")
+    print(f"  Funding edge synced:    {status['funding']['last_synced']:,} (behind: {status['funding']['behind']:,})")
+    print(f"  Token participant synced: {status['tokens']['last_synced']:,} (behind: {status['tokens']['behind']:,})")
+    print(f"{'='*60}\n")
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Guide Aggregator - Consolidated daemon for guide table synchronization',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Operations (--sync):
+  guide   - Process tx_activity into tx_guide via sp_tx_guide_batch
+  funding - Sync tx_funding_edge from tx_guide
+  tokens  - Sync tx_token_participant from tx_guide
+  all     - All operations (default)
+
+Examples:
+  python guide-aggregator.py                          # All operations, single run
+  python guide-aggregator.py --daemon --interval 30   # Continuous mode
+  python guide-aggregator.py --sync guide             # Only sp_tx_guide_batch
+  python guide-aggregator.py --sync funding,tokens    # Multiple operations
+  python guide-aggregator.py --status                 # Show sync status
+        """
+    )
+
+    parser.add_argument('--sync', '-s', type=str, default='all',
+                        help='Operations to run: guide,funding,tokens,all (default: all)')
+    parser.add_argument('--daemon', '-d', action='store_true',
+                        help='Run continuously in daemon mode')
+    parser.add_argument('--interval', '-i', type=int, default=30,
+                        help='Sync interval in seconds for daemon mode (default: 30)')
+    parser.add_argument('--batch-size', '-b', type=int, default=10000,
+                        help='Batch size for funding/tokens sync (default: 10000)')
+    parser.add_argument('--guide-batch-size', type=int, default=1000,
+                        help='Batch size for guide edge processing (default: 1000)')
+    parser.add_argument('--max-batches', type=int, default=0,
+                        help='Max batches for guide processing (0 = unlimited)')
+    parser.add_argument('--status', action='store_true',
+                        help='Show current sync status and exit')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='Minimal output')
+    parser.add_argument('--json', action='store_true',
+                        help='Output in JSON format')
+
+    args = parser.parse_args()
+
+    if not HAS_MYSQL:
+        print("Error: mysql-connector-python not installed")
+        return 1
+
+    # Parse operations
+    if args.sync.lower() == 'all':
+        operations = ['guide', 'funding', 'tokens']
+    else:
+        operations = [op.strip().lower() for op in args.sync.split(',')]
+        valid_ops = {'guide', 'funding', 'tokens'}
+        invalid = set(operations) - valid_ops
+        if invalid:
+            print(f"Error: Invalid operations: {invalid}. Valid: guide, funding, tokens, all")
+            return 1
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        if args.status:
+            status = get_sync_status(cursor)
+            if args.json:
+                print(json.dumps(status, indent=2))
+            else:
+                print_status(status)
+            return 0
+
+        if not args.quiet and not args.json:
+            print(f"\n{'='*60}")
+            print(f"Guide Aggregator")
+            print(f"{'='*60}")
+            print(f"  Database:   {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
+            print(f"  Operations: {', '.join(operations)}")
+            print(f"  Mode:       {'DAEMON' if args.daemon else 'SINGLE RUN'}")
+            if args.daemon:
+                print(f"  Interval:   {args.interval}s")
+            print(f"{'='*60}\n")
+
+        if args.daemon:
+            print("Press Ctrl+C to stop\n")
+
+            while True:
+                try:
+                    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                    if not args.quiet:
+                        print(f"[{timestamp}] Running sync...")
+
+                    stats = run_sync(cursor, conn, operations,
+                                    args.batch_size, args.guide_batch_size,
+                                    args.max_batches, verbose=not args.quiet)
+
+                    if args.json:
+                        print(json.dumps(stats))
+                    elif not args.quiet:
+                        total = (stats['guide']['edges'] +
+                                stats['funding']['rows'] +
+                                stats['tokens']['rows'])
+                        if total > 0:
+                            print(f"[{timestamp}] Complete: {total:,} rows affected\n")
+                        else:
+                            print(f"[{timestamp}] No changes\n")
+
+                    # Close connection before sleeping
+                    try:
+                        cursor.close()
+                        conn.close()
+                    except:
+                        pass
+
+                    time.sleep(args.interval)
+
+                    # Reconnect after sleep
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+
+                except KeyboardInterrupt:
+                    print("\nStopping daemon...")
+                    break
+                except Exception as e:
+                    print(f"Error: {e}")
+                    try:
+                        cursor.close()
+                        conn.close()
+                    except:
+                        pass
+                    time.sleep(args.interval)
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+
+        else:
+            # Single run
+            stats = run_sync(cursor, conn, operations,
+                            args.batch_size, args.guide_batch_size,
+                            args.max_batches, verbose=not args.quiet)
+
+            if args.json:
+                print(json.dumps(stats, indent=2))
+            elif not args.quiet:
+                total = (stats['guide']['edges'] +
+                        stats['funding']['rows'] +
+                        stats['tokens']['rows'])
+                print(f"\n{'='*60}")
+                print(f"Sync Complete")
+                print(f"{'='*60}")
+                print(f"  Guide edges:        {stats['guide']['edges']:,}")
+                print(f"  Funding rows:       {stats['funding']['rows']:,}")
+                print(f"  Token participant:  {stats['tokens']['rows']:,}")
+                print(f"  Total:              {total:,}")
+                print(f"{'='*60}\n")
+
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except:
+            pass
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
