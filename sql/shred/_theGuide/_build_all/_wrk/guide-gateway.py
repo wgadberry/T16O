@@ -1,0 +1,878 @@
+#!/usr/bin/env python3
+"""
+Guide Gateway - Central orchestration service for theGuide Pipeline
+Provides REST API and queue-based routing for all pipeline workers.
+
+Features:
+- REST API endpoints for external clients
+- Queue-based inbound routing for internal cascades
+- API key authentication and validation
+- Request logging to tx_request_log
+- Worker request routing with priority support
+
+Architecture:
+    [External Clients] --REST API--> [Gateway] --> [Worker Queues]
+    [Workers] --Cascade Queue--> [Gateway] --> [Downstream Workers]
+
+Usage:
+    # Start gateway server
+    python guide-gateway.py
+
+    # Start with custom port
+    python guide-gateway.py --port 5100
+
+    # Start with queue consumer for cascades
+    python guide-gateway.py --with-queue-consumer
+
+    # Start with response consumer for auto-cascade routing
+    python guide-gateway.py --with-response-consumer
+
+    # Full production mode (REST + queue + response consumers)
+    python guide-gateway.py --with-queue-consumer --with-response-consumer
+
+    # Debug mode
+    python guide-gateway.py --debug
+
+API Endpoints:
+    POST /api/trigger/<worker>   - Trigger a worker with request payload
+    GET  /api/status/<request_id> - Get status of a request
+    GET  /api/workers             - List available workers
+    GET  /api/health              - Health check
+"""
+
+import argparse
+import json
+import uuid
+import hashlib
+import threading
+import time
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+
+# Flask for REST API
+try:
+    from flask import Flask, request, jsonify
+    HAS_FLASK = True
+except ImportError:
+    HAS_FLASK = False
+
+# RabbitMQ client
+try:
+    import pika
+    HAS_PIKA = True
+except ImportError:
+    HAS_PIKA = False
+
+# MySQL connector
+try:
+    import mysql.connector
+    from mysql.connector import Error as MySQLError
+    HAS_MYSQL = True
+except ImportError:
+    HAS_MYSQL = False
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+# Database
+DB_CONFIG = {
+    'host': '127.0.0.1',
+    'port': 3396,
+    'user': 'root',
+    'password': 'rootpassword',
+    'database': 't16o_db'
+}
+
+# RabbitMQ
+RABBITMQ_CONFIG = {
+    'host': 'localhost',
+    'port': 5692,
+    'user': 'admin',
+    'password': 'admin123',
+    'vhost': 't16o_mq'
+}
+
+# Gateway
+GATEWAY_PORT = 5100
+GATEWAY_HOST = '0.0.0.0'
+
+# Queue names
+GATEWAY_REQUEST_QUEUE = 'mq.guide.gateway.request'
+GATEWAY_RESPONSE_QUEUE = 'mq.guide.gateway.response'
+
+# Worker registry with queue mappings
+WORKER_REGISTRY = {
+    'producer': {
+        'request_queue': 'mq.guide.producer.request',
+        'response_queue': 'mq.guide.producer.response',
+        'dlq': 'mq.guide.producer.dlq',
+        'description': 'Fetches transaction signatures from RPC',
+        'cascade_to': ['shredder']
+    },
+    'shredder': {
+        'request_queue': 'mq.guide.shredder.request',
+        'response_queue': 'mq.guide.shredder.response',
+        'dlq': 'mq.guide.shredder.dlq',
+        'description': 'Decodes transactions and creates guide edges',
+        'cascade_to': ['detailer', 'funder', 'aggregator']
+    },
+    'detailer': {
+        'request_queue': 'mq.guide.detailer.request',
+        'response_queue': 'mq.guide.detailer.response',
+        'dlq': 'mq.guide.detailer.dlq',
+        'description': 'Enriches transactions with balance change details',
+        'cascade_to': []
+    },
+    'funder': {
+        'request_queue': 'mq.guide.funder.request',
+        'response_queue': 'mq.guide.funder.response',
+        'dlq': 'mq.guide.funder.dlq',
+        'description': 'Discovers funding relationships for addresses',
+        'cascade_to': []
+    },
+    'aggregator': {
+        'request_queue': 'mq.guide.aggregator.request',
+        'response_queue': 'mq.guide.aggregator.response',
+        'dlq': 'mq.guide.aggregator.dlq',
+        'description': 'Syncs funding edges and guide data',
+        'cascade_to': ['enricher']
+    },
+    'enricher': {
+        'request_queue': 'mq.guide.enricher.request',
+        'response_queue': 'mq.guide.enricher.response',
+        'dlq': 'mq.guide.enricher.dlq',
+        'description': 'Enriches token and pool metadata',
+        'cascade_to': []
+    }
+}
+
+# =============================================================================
+# Database Functions
+# =============================================================================
+
+def get_db_connection():
+    """Create a database connection"""
+    return mysql.connector.connect(**DB_CONFIG)
+
+
+def validate_api_key(api_key: str) -> Optional[Dict]:
+    """Validate API key and return key details if valid"""
+    if not HAS_MYSQL:
+        return {'id': 0, 'name': 'No-Auth', 'permissions': {'workers': ['*'], 'actions': ['*']}}
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT id, name, permissions, rate_limit, active
+            FROM tx_api_key
+            WHERE api_key = %s AND active = 1
+        """, (api_key,))
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if result and result['permissions']:
+            result['permissions'] = json.loads(result['permissions']) if isinstance(result['permissions'], str) else result['permissions']
+        return result
+    except Exception as e:
+        print(f"[ERROR] API key validation failed: {e}")
+        return None
+
+
+def check_permission(key_info: Dict, worker: str, action: str) -> bool:
+    """Check if API key has permission for worker and action"""
+    if not key_info or not key_info.get('permissions'):
+        return False
+
+    perms = key_info['permissions']
+    workers = perms.get('workers', [])
+    actions = perms.get('actions', [])
+
+    worker_ok = '*' in workers or worker in workers
+    action_ok = '*' in actions or action in actions
+
+    return worker_ok and action_ok
+
+
+def log_request(
+    request_id: str,
+    api_key_id: Optional[int],
+    source: str,
+    target_worker: str,
+    action: str,
+    priority: int = 5,
+    payload: Optional[Dict] = None
+) -> bool:
+    """Log a request to tx_request_log"""
+    if not HAS_MYSQL:
+        return True
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        payload_hash = None
+        payload_summary = None
+        if payload:
+            payload_str = json.dumps(payload, sort_keys=True)
+            payload_hash = hashlib.sha256(payload_str.encode()).hexdigest()
+            # Extract summary fields
+            payload_summary = {
+                'batch_size': payload.get('batch', {}).get('size'),
+                'filters': payload.get('batch', {}).get('filters'),
+                'action': action
+            }
+
+        cursor.execute("""
+            INSERT INTO tx_request_log
+            (request_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued')
+        """, (
+            request_id,
+            api_key_id,
+            source,
+            target_worker,
+            action,
+            priority,
+            payload_hash,
+            json.dumps(payload_summary) if payload_summary else None
+        ))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to log request: {e}")
+        return False
+
+
+def update_request_status(
+    request_id: str,
+    status: str,
+    error_message: Optional[str] = None,
+    result: Optional[Dict] = None
+):
+    """Update request status in tx_request_log"""
+    if not HAS_MYSQL:
+        return
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        if status == 'processing':
+            cursor.execute("""
+                UPDATE tx_request_log
+                SET status = %s, started_at = CURRENT_TIMESTAMP(3)
+                WHERE request_id = %s
+            """, (status, request_id))
+        elif status in ('completed', 'failed', 'timeout'):
+            cursor.execute("""
+                UPDATE tx_request_log
+                SET status = %s, completed_at = CURRENT_TIMESTAMP(3),
+                    error_message = %s, result = %s
+                WHERE request_id = %s
+            """, (status, error_message, json.dumps(result) if result else None, request_id))
+        else:
+            cursor.execute("""
+                UPDATE tx_request_log SET status = %s WHERE request_id = %s
+            """, (status, request_id))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERROR] Failed to update request status: {e}")
+
+
+def get_request_status(request_id: str) -> Optional[Dict]:
+    """Get request status from tx_request_log"""
+    if not HAS_MYSQL:
+        return None
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT request_id, source, target_worker, action, priority,
+                   status, error_message, created_at, started_at, completed_at,
+                   duration_ms, result
+            FROM tx_request_log
+            WHERE request_id = %s
+        """, (request_id,))
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if result:
+            # Convert datetime objects to strings
+            for key in ['created_at', 'started_at', 'completed_at']:
+                if result.get(key):
+                    result[key] = result[key].isoformat()
+            if result.get('result'):
+                result['result'] = json.loads(result['result']) if isinstance(result['result'], str) else result['result']
+
+        return result
+    except Exception as e:
+        print(f"[ERROR] Failed to get request status: {e}")
+        return None
+
+
+# =============================================================================
+# RabbitMQ Functions
+# =============================================================================
+
+def get_rabbitmq_connection():
+    """Create a RabbitMQ connection"""
+    credentials = pika.PlainCredentials(RABBITMQ_CONFIG['user'], RABBITMQ_CONFIG['password'])
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_CONFIG['host'],
+        port=RABBITMQ_CONFIG['port'],
+        virtual_host=RABBITMQ_CONFIG['vhost'],
+        credentials=credentials,
+        heartbeat=600,
+        blocked_connection_timeout=300
+    )
+    return pika.BlockingConnection(parameters)
+
+
+def ensure_queues_exist(channel):
+    """Ensure all gateway and worker queues exist"""
+    # Gateway queues
+    for queue in [GATEWAY_REQUEST_QUEUE, GATEWAY_RESPONSE_QUEUE]:
+        channel.queue_declare(
+            queue=queue,
+            durable=True,
+            arguments={'x-max-priority': 10}
+        )
+
+    # Worker queues
+    for worker, config in WORKER_REGISTRY.items():
+        for queue_type in ['request_queue', 'response_queue', 'dlq']:
+            queue_name = config[queue_type]
+            args = {'x-max-priority': 10}
+            if queue_type == 'dlq':
+                args['x-message-ttl'] = 86400000  # 24 hours for DLQ
+            channel.queue_declare(
+                queue=queue_name,
+                durable=True,
+                arguments=args
+            )
+
+
+def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
+    """Publish a message to a worker's request queue"""
+    if worker not in WORKER_REGISTRY:
+        return False
+
+    try:
+        conn = get_rabbitmq_connection()
+        channel = conn.channel()
+        ensure_queues_exist(channel)
+
+        queue_name = WORKER_REGISTRY[worker]['request_queue']
+        channel.basic_publish(
+            exchange='',
+            routing_key=queue_name,
+            body=json.dumps(message).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # persistent
+                content_type='application/json',
+                priority=priority
+            )
+        )
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to publish to {worker}: {e}")
+        return False
+
+
+def publish_to_gateway(message: Dict, priority: int = 5) -> bool:
+    """Publish a cascade message to gateway request queue"""
+    try:
+        conn = get_rabbitmq_connection()
+        channel = conn.channel()
+        ensure_queues_exist(channel)
+
+        channel.basic_publish(
+            exchange='',
+            routing_key=GATEWAY_REQUEST_QUEUE,
+            body=json.dumps(message).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json',
+                priority=priority
+            )
+        )
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to publish to gateway: {e}")
+        return False
+
+
+# =============================================================================
+# Request Processing
+# =============================================================================
+
+def process_request(
+    worker: str,
+    action: str,
+    payload: Dict,
+    api_key: str,
+    source: str = 'rest'
+) -> Dict:
+    """Process a request: validate, log, and route to worker"""
+    request_id = str(uuid.uuid4())
+    timestamp = datetime.now().isoformat() + 'Z'
+
+    # Validate API key
+    key_info = validate_api_key(api_key)
+    if not key_info:
+        return {
+            'success': False,
+            'error': 'Invalid or inactive API key',
+            'request_id': request_id
+        }
+
+    # Check permissions
+    if not check_permission(key_info, worker, action):
+        return {
+            'success': False,
+            'error': f'Permission denied for worker={worker}, action={action}',
+            'request_id': request_id
+        }
+
+    # Build request message
+    priority = payload.get('priority', 5)
+    message = {
+        'request_id': request_id,
+        'api_key': api_key,
+        'priority': priority,
+        'timestamp': timestamp,
+        'action': action,
+        'batch': payload.get('batch', {})
+    }
+
+    # Log request
+    log_request(
+        request_id=request_id,
+        api_key_id=key_info.get('id'),
+        source=source,
+        target_worker=worker,
+        action=action,
+        priority=priority,
+        payload=message
+    )
+
+    # Route to worker
+    if publish_to_worker(worker, message, priority):
+        return {
+            'success': True,
+            'request_id': request_id,
+            'worker': worker,
+            'action': action,
+            'queued_at': timestamp
+        }
+    else:
+        update_request_status(request_id, 'failed', 'Failed to queue message')
+        return {
+            'success': False,
+            'error': 'Failed to queue request',
+            'request_id': request_id
+        }
+
+
+def process_cascade(message: Dict) -> List[Dict]:
+    """Process a cascade message from a worker, route to downstream workers"""
+    results = []
+    source_worker = message.get('source_worker')
+    source_request_id = message.get('source_request_id')
+    targets = message.get('targets', [])
+    batch = message.get('batch', {})
+    api_key = message.get('api_key', 'internal_cascade_key')
+    priority = message.get('priority', 5)
+
+    for target in targets:
+        if target not in WORKER_REGISTRY:
+            results.append({
+                'worker': target,
+                'success': False,
+                'error': 'Unknown worker'
+            })
+            continue
+
+        result = process_request(
+            worker=target,
+            action='cascade',
+            payload={
+                'priority': priority,
+                'batch': batch,
+                'source_worker': source_worker,
+                'source_request_id': source_request_id
+            },
+            api_key=api_key,
+            source='cascade'
+        )
+        results.append({
+            'worker': target,
+            **result
+        })
+
+    return results
+
+
+# =============================================================================
+# Flask Application
+# =============================================================================
+
+def create_app():
+    """Create Flask application"""
+    app = Flask(__name__)
+
+    @app.route('/api/health', methods=['GET'])
+    def health():
+        """Health check endpoint"""
+        checks = {
+            'flask': True,
+            'mysql': HAS_MYSQL,
+            'pika': HAS_PIKA
+        }
+
+        # Test DB connection
+        if HAS_MYSQL:
+            try:
+                conn = get_db_connection()
+                conn.close()
+                checks['db_connection'] = True
+            except:
+                checks['db_connection'] = False
+
+        # Test RabbitMQ connection
+        if HAS_PIKA:
+            try:
+                conn = get_rabbitmq_connection()
+                conn.close()
+                checks['rabbitmq_connection'] = True
+            except:
+                checks['rabbitmq_connection'] = False
+
+        healthy = all(checks.values())
+        return jsonify({
+            'status': 'healthy' if healthy else 'degraded',
+            'checks': checks,
+            'timestamp': datetime.now().isoformat() + 'Z'
+        }), 200 if healthy else 503
+
+    @app.route('/api/workers', methods=['GET'])
+    def list_workers():
+        """List available workers"""
+        workers = {}
+        for name, config in WORKER_REGISTRY.items():
+            workers[name] = {
+                'description': config['description'],
+                'cascade_to': config['cascade_to'],
+                'queues': {
+                    'request': config['request_queue'],
+                    'response': config['response_queue'],
+                    'dlq': config['dlq']
+                }
+            }
+        return jsonify({'workers': workers})
+
+    @app.route('/api/trigger/<worker>', methods=['POST'])
+    def trigger_worker(worker):
+        """Trigger a worker with request payload"""
+        if worker not in WORKER_REGISTRY:
+            return jsonify({
+                'success': False,
+                'error': f'Unknown worker: {worker}',
+                'available_workers': list(WORKER_REGISTRY.keys())
+            }), 404
+
+        # Get API key from header
+        api_key = request.headers.get('X-API-Key', 'admin_master_key')
+
+        # Get request payload
+        payload = request.get_json() or {}
+        action = payload.get('action', 'process')
+
+        result = process_request(
+            worker=worker,
+            action=action,
+            payload=payload,
+            api_key=api_key,
+            source='rest'
+        )
+
+        status_code = 200 if result['success'] else 400
+        return jsonify(result), status_code
+
+    @app.route('/api/status/<request_id>', methods=['GET'])
+    def get_status(request_id):
+        """Get status of a request"""
+        status = get_request_status(request_id)
+        if status:
+            return jsonify(status)
+        else:
+            return jsonify({'error': 'Request not found'}), 404
+
+    @app.route('/api/cascade', methods=['POST'])
+    def cascade():
+        """Handle cascade from worker (internal use)"""
+        api_key = request.headers.get('X-API-Key', 'internal_cascade_key')
+
+        # Validate internal key
+        key_info = validate_api_key(api_key)
+        if not key_info or not check_permission(key_info, '*', 'cascade'):
+            return jsonify({'error': 'Cascade permission denied'}), 403
+
+        payload = request.get_json()
+        if not payload:
+            return jsonify({'error': 'No payload provided'}), 400
+
+        results = process_cascade(payload)
+        return jsonify({'results': results})
+
+    return app
+
+
+# =============================================================================
+# Queue Consumer (for cascade messages)
+# =============================================================================
+
+def run_queue_consumer():
+    """Run a consumer for gateway request queue (cascade messages)"""
+    print(f"[INFO] Starting queue consumer for {GATEWAY_REQUEST_QUEUE}")
+
+    while True:
+        try:
+            conn = get_rabbitmq_connection()
+            channel = conn.channel()
+            ensure_queues_exist(channel)
+            channel.basic_qos(prefetch_count=10)
+
+            def callback(ch, method, properties, body):
+                try:
+                    message = json.loads(body.decode('utf-8'))
+                    action = message.get('action')
+
+                    if action == 'cascade':
+                        results = process_cascade(message)
+                        print(f"[CASCADE] Processed cascade from {message.get('source_worker')}: {len(results)} downstream")
+                    else:
+                        print(f"[WARN] Unknown action: {action}")
+
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+            channel.basic_consume(queue=GATEWAY_REQUEST_QUEUE, on_message_callback=callback)
+            print(f"[INFO] Consuming from {GATEWAY_REQUEST_QUEUE}")
+            channel.start_consuming()
+
+        except Exception as e:
+            print(f"[ERROR] Queue consumer error: {e}")
+            time.sleep(5)
+
+
+# =============================================================================
+# Response Queue Consumer (for worker responses and auto-cascade)
+# =============================================================================
+
+def run_response_consumer():
+    """
+    Run a consumer for all worker response queues.
+    When a worker completes, this triggers cascades to downstream workers.
+    """
+    print(f"[INFO] Starting response queue consumer")
+
+    # Collect all response queues
+    response_queues = [config['response_queue'] for config in WORKER_REGISTRY.values()]
+    print(f"[INFO] Monitoring response queues: {', '.join(response_queues)}")
+
+    while True:
+        try:
+            conn = get_rabbitmq_connection()
+            channel = conn.channel()
+            ensure_queues_exist(channel)
+            channel.basic_qos(prefetch_count=10)
+
+            def callback(ch, method, properties, body):
+                try:
+                    response = json.loads(body.decode('utf-8'))
+                    worker = response.get('worker')
+                    request_id = response.get('request_id')
+                    status = response.get('status')
+                    result = response.get('result', {})
+
+                    print(f"[RESPONSE] {worker} -> {status} (request: {request_id[:8]}...)")
+
+                    # Update request log
+                    if status == 'completed':
+                        update_request_status(request_id, 'completed', result=result)
+                    elif status == 'failed':
+                        update_request_status(request_id, 'failed',
+                                            error_message=result.get('error', 'Unknown error'),
+                                            result=result)
+
+                    # Check for auto-cascade (only on success)
+                    if status == 'completed' and worker in WORKER_REGISTRY:
+                        cascade_to = WORKER_REGISTRY[worker].get('cascade_to', [])
+
+                        if cascade_to and result.get('cascade_to'):
+                            # Worker specified which targets to cascade to
+                            targets = [t for t in result['cascade_to'] if t in cascade_to]
+                        elif cascade_to:
+                            # Use default cascade targets
+                            targets = cascade_to
+                        else:
+                            targets = []
+
+                        if targets:
+                            # Build cascade batch from worker result
+                            cascade_batch = {}
+
+                            # Transfer tx_ids if present
+                            if result.get('tx_ids'):
+                                cascade_batch['tx_ids'] = result['tx_ids']
+
+                            # Transfer address_ids if present
+                            if result.get('address_ids'):
+                                cascade_batch['address_ids'] = result['address_ids']
+
+                            # Transfer token_ids if present
+                            if result.get('token_ids'):
+                                cascade_batch['token_ids'] = result['token_ids']
+
+                            # Transfer signatures if present
+                            if result.get('signatures'):
+                                cascade_batch['signatures'] = result['signatures']
+
+                            # Include processed counts
+                            cascade_batch['source_processed'] = result.get('processed', 0)
+
+                            if cascade_batch:
+                                cascade_msg = {
+                                    'action': 'cascade',
+                                    'source_worker': worker,
+                                    'source_request_id': request_id,
+                                    'targets': targets,
+                                    'batch': cascade_batch,
+                                    'api_key': 'internal_cascade_key',
+                                    'priority': response.get('priority', 5)
+                                }
+
+                                # Route directly to downstream workers
+                                cascade_results = process_cascade(cascade_msg)
+                                print(f"[AUTO-CASCADE] {worker} -> {targets}: "
+                                      f"{len([r for r in cascade_results if r.get('success')])} queued")
+
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process response: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+            # Subscribe to all response queues
+            for queue in response_queues:
+                channel.basic_consume(queue=queue, on_message_callback=callback)
+
+            print(f"[INFO] Consuming responses from {len(response_queues)} queues")
+            channel.start_consuming()
+
+        except Exception as e:
+            print(f"[ERROR] Response consumer error: {e}")
+            time.sleep(5)
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description='Guide Gateway - Pipeline orchestration service')
+    parser.add_argument('--port', type=int, default=GATEWAY_PORT, help='Server port')
+    parser.add_argument('--host', default=GATEWAY_HOST, help='Server host')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--with-queue-consumer', action='store_true',
+                        help='Also start queue consumer for cascade messages')
+    parser.add_argument('--queue-consumer-only', action='store_true',
+                        help='Only run queue consumer, no REST API')
+    parser.add_argument('--with-response-consumer', action='store_true',
+                        help='Also start response consumer for auto-cascade routing')
+    parser.add_argument('--response-consumer-only', action='store_true',
+                        help='Only run response consumer for auto-cascade')
+    parser.add_argument('--init-queues', action='store_true',
+                        help='Initialize all queues and exit')
+
+    args = parser.parse_args()
+
+    # Check dependencies
+    if not HAS_FLASK and not args.queue_consumer_only:
+        print("[ERROR] Flask not installed. Run: pip install flask")
+        return 1
+
+    if not HAS_PIKA:
+        print("[ERROR] pika not installed. Run: pip install pika")
+        return 1
+
+    # Initialize queues
+    if args.init_queues:
+        print("[INFO] Initializing queues...")
+        try:
+            conn = get_rabbitmq_connection()
+            channel = conn.channel()
+            ensure_queues_exist(channel)
+            conn.close()
+            print("[OK] All queues created successfully")
+            return 0
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize queues: {e}")
+            return 1
+
+    # Queue consumer only mode
+    if args.queue_consumer_only:
+        run_queue_consumer()
+        return 0
+
+    # Response consumer only mode
+    if args.response_consumer_only:
+        run_response_consumer()
+        return 0
+
+    # Start queue consumer in background thread
+    if args.with_queue_consumer:
+        consumer_thread = threading.Thread(target=run_queue_consumer, daemon=True)
+        consumer_thread.start()
+        print("[INFO] Queue consumer started in background")
+
+    # Start response consumer in background thread
+    if args.with_response_consumer:
+        response_thread = threading.Thread(target=run_response_consumer, daemon=True)
+        response_thread.start()
+        print("[INFO] Response consumer started in background (auto-cascade enabled)")
+
+    # Start Flask server
+    print(f"""
++-----------------------------------------------------------+
+|               theGuide Gateway                            |
+|                                                           |
+|  REST API:  http://{args.host}:{args.port}                         |
+|  vhost:     {RABBITMQ_CONFIG['vhost']}                                     |
+|  Workers:   {len(WORKER_REGISTRY)}                                            |
++-----------------------------------------------------------+
+""")
+
+    app = create_app()
+    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+
+
+if __name__ == '__main__':
+    exit(main() or 0)

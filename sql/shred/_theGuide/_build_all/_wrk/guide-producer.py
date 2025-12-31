@@ -82,13 +82,27 @@ except ImportError:
 # Chainstack Solana RPC
 CHAINSTACK_RPC_URL = "https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb"
 
-# RabbitMQ
+# RabbitMQ (legacy - default vhost)
 RABBITMQ_HOST = 'localhost'
 RABBITMQ_PORT = 5692
 RABBITMQ_USER = 'admin'
 RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE = 'tx.guide.signatures'
 RABBITMQ_QUEUE_DETAIL = 'tx.detail.transactions'
+
+# RabbitMQ (new - t16o_mq vhost for gateway integration)
+RABBITMQ_VHOST = 't16o_mq'
+RABBITMQ_REQUEST_QUEUE = 'mq.guide.producer.request'
+RABBITMQ_RESPONSE_QUEUE = 'mq.guide.producer.response'
+
+# Database
+DB_CONFIG = {
+    'host': '127.0.0.1',
+    'port': 3396,
+    'user': 'root',
+    'password': 'rootpassword',
+    'database': 't16o_db'
+}
 
 
 # =============================================================================
@@ -289,6 +303,242 @@ def publish_batch_to_detail(channel, signatures: List[str], priority: int = 5) -
     except Exception as e:
         print(f"  [!] Publish error: {e}")
         return False
+
+
+# =============================================================================
+# Gateway Integration (t16o_mq vhost)
+# =============================================================================
+
+def setup_gateway_rabbitmq():
+    """Setup RabbitMQ connection to t16o_mq vhost for gateway integration"""
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        virtual_host=RABBITMQ_VHOST,
+        credentials=credentials,
+        heartbeat=600,
+        blocked_connection_timeout=300
+    )
+    connection = pika.BlockingConnection(parameters)
+    channel = connection.channel()
+
+    # Declare queues
+    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE]:
+        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+
+    return connection, channel
+
+
+def publish_response(channel, request_id: str, status: str, result: dict, error: str = None):
+    """Publish response to gateway response queue"""
+    response = {
+        'request_id': request_id,
+        'worker': 'producer',
+        'status': status,
+        'timestamp': datetime.now().isoformat() + 'Z',
+        'result': result
+    }
+    if error:
+        response['error'] = error
+
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_RESPONSE_QUEUE,
+            body=json.dumps(response).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json'
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to publish response: {e}")
+        return False
+
+
+def process_gateway_request(message: dict, rpc_session, legacy_channel, db_cursor=None) -> dict:
+    """Process a request from the gateway
+
+    Args:
+        message: Gateway request message with batch descriptor
+        rpc_session: Requests session for RPC calls
+        legacy_channel: Channel for publishing to legacy queue (tx.guide.signatures)
+        db_cursor: Optional DB cursor for smart sync
+
+    Returns:
+        Result dict with processed/errors counts
+    """
+    request_id = message.get('request_id', 'unknown')
+    batch = message.get('batch', {})
+    priority = message.get('priority', 5)
+
+    # Extract batch parameters
+    filters = batch.get('filters', {})
+    address = filters.get('mint_address') or filters.get('address')
+    max_signatures = batch.get('size', 100)
+
+    if not address:
+        return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
+
+    print(f"[{request_id[:8]}] Processing request for {address[:20]}...")
+
+    # Fetch signatures
+    total_fetched = 0
+    total_batched = 0
+    batch_size = 20
+
+    try:
+        # Use smart sync if we have DB - find last known signature for this address
+        last_sig = None
+        if db_cursor:
+            # First get address_id
+            db_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (address,))
+            addr_row = db_cursor.fetchone()
+            if addr_row:
+                addr_id = addr_row[0]
+                # Look for most recent tx involving this address (as signer or in guide edges)
+                db_cursor.execute("""
+                    SELECT t.signature FROM tx t
+                    LEFT JOIN tx_guide g ON g.tx_id = t.id
+                    WHERE t.signer_address_id = %s
+                       OR g.from_address_id = %s
+                       OR g.to_address_id = %s
+                    ORDER BY t.block_time DESC LIMIT 1
+                """, (addr_id, addr_id, addr_id))
+                row = db_cursor.fetchone()
+                if row:
+                    last_sig = row[0]
+                    print(f"  Smart sync: starting after {last_sig[:20]}...")
+
+        signatures = []
+        all_signatures = []  # Track all signatures for cascade
+        for sig_obj in fetch_all_signatures(
+            rpc_session, address, CHAINSTACK_RPC_URL,
+            max_signatures=max_signatures, until=last_sig
+        ):
+            # Extract signature string from the RPC response object
+            sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
+            if sig_str:
+                signatures.append(sig_str)
+                all_signatures.append(sig_str)
+            total_fetched += 1
+
+            # Publish in batches of 20 (to legacy queue for backward compat)
+            # Skip if legacy_channel is None (gateway mode passes via cascade instead)
+            if legacy_channel:
+                while len(signatures) >= batch_size:
+                    batch_to_send = signatures[:batch_size]
+                    signatures = signatures[batch_size:]
+
+                    if publish_batch(legacy_channel, batch_to_send, priority):
+                        total_batched += 1
+
+        # Publish remaining (to legacy queue)
+        if legacy_channel and signatures:
+            if publish_batch(legacy_channel, signatures, priority):
+                total_batched += 1
+
+        print(f"  Fetched {total_fetched} signatures, published {total_batched} batches")
+
+        return {
+            'processed': total_fetched,
+            'batches': total_batched,
+            'errors': 0,
+            'signatures': all_signatures,  # Include for gateway cascade
+            'cascade_to': ['shredder']
+        }
+
+    except Exception as e:
+        print(f"  [ERROR] {e}")
+        return {'processed': total_fetched, 'batches': total_batched, 'errors': 1, 'error': str(e)}
+
+
+def run_queue_consumer(rpc_url: str = CHAINSTACK_RPC_URL, prefetch: int = 1):
+    """Run as a queue consumer, listening for gateway requests"""
+    print(f"""
++-----------------------------------------------------------+
+|         Guide Producer - Queue Consumer Mode              |
+|                                                           |
+|  vhost:     {RABBITMQ_VHOST}                                     |
+|  queue:     {RABBITMQ_REQUEST_QUEUE}              |
+|  prefetch:  {prefetch}                                            |
++-----------------------------------------------------------+
+""")
+
+    rpc_session = create_rpc_session()
+
+    # In gateway mode, we don't need legacy queue - signatures pass via cascade
+    # Set legacy_channel to None to skip legacy publishing
+    legacy_channel = None
+    print("[INFO] Gateway mode: legacy queue publishing disabled (using cascade)")
+
+    # Setup DB connection
+    db_conn = None
+    db_cursor = None
+    if HAS_MYSQL:
+        try:
+            db_conn = mysql.connector.connect(**DB_CONFIG)
+            db_cursor = db_conn.cursor()
+            print("[OK] Database connected")
+        except Exception as e:
+            print(f"[WARN] Database not available: {e}")
+
+    while True:
+        try:
+            # Setup gateway connection
+            gateway_conn, gateway_channel = setup_gateway_rabbitmq()
+            gateway_channel.basic_qos(prefetch_count=prefetch)
+
+            print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
+            print("[INFO] Waiting for requests...")
+
+            def callback(ch, method, properties, body):
+                try:
+                    message = json.loads(body.decode('utf-8'))
+                    request_id = message.get('request_id', 'unknown')
+
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    # Process the request
+                    result = process_gateway_request(message, rpc_session, legacy_channel, db_cursor)
+
+                    # Determine status
+                    status = 'completed' if result.get('errors', 0) == 0 else 'partial'
+
+                    # Publish response
+                    publish_response(gateway_channel, request_id, status, result)
+
+                    # Ack the message
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+            gateway_channel.basic_consume(
+                queue=RABBITMQ_REQUEST_QUEUE,
+                on_message_callback=callback
+            )
+            gateway_channel.start_consuming()
+
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"[ERROR] Connection lost: {e}")
+            print("[INFO] Reconnecting in 5 seconds...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n[INFO] Shutting down...")
+            break
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            time.sleep(5)
+
+    # Cleanup
+    if legacy_conn:
+        legacy_conn.close()
+    if db_conn:
+        db_conn.close()
 
 
 # =============================================================================
@@ -553,8 +803,16 @@ def main():
                         help='File with signatures to reprocess (delete existing + re-queue)')
     parser.add_argument('--reprocess-priority', type=int, default=8,
                         help='Priority for reprocessed signatures (default: 8)')
+    parser.add_argument('--queue-consumer', action='store_true',
+                        help='Run as queue consumer, listening for gateway requests')
+    parser.add_argument('--prefetch', type=int, default=1,
+                        help='Queue prefetch count for queue-consumer mode (default: 1)')
 
     args = parser.parse_args()
+
+    # Queue consumer mode - ignore other args and run consumer
+    if args.queue_consumer:
+        return run_queue_consumer(rpc_url=args.rpc_url, prefetch=args.prefetch)
 
     # Parse max_signatures ('all' or integer)
     if args.max_signatures == 'all':

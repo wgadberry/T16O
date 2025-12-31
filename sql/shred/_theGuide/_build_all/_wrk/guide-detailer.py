@@ -60,12 +60,26 @@ except ImportError:
 SOLSCAN_API_BASE = "https://pro-api.solscan.io/v2.0"
 SOLSCAN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
 
-# RabbitMQ
+# RabbitMQ (legacy - default vhost)
 RABBITMQ_HOST = 'localhost'
 RABBITMQ_PORT = 5692
 RABBITMQ_USER = 'admin'
 RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE_IN = 'tx.detail.transactions'
+
+# RabbitMQ (new - t16o_mq vhost for gateway integration)
+RABBITMQ_VHOST = 't16o_mq'
+RABBITMQ_REQUEST_QUEUE = 'mq.guide.detailer.request'
+RABBITMQ_RESPONSE_QUEUE = 'mq.guide.detailer.response'
+
+# Database
+DB_CONFIG = {
+    'host': '127.0.0.1',
+    'port': 3396,
+    'user': 'root',
+    'password': 'rootpassword',
+    'database': 't16o_db'
+}
 
 
 # =============================================================================
@@ -325,6 +339,163 @@ class GuideDetailerConsumer:
 
 
 # =============================================================================
+# Gateway Integration (t16o_mq vhost)
+# =============================================================================
+
+from datetime import datetime
+
+def setup_gateway_rabbitmq():
+    """Setup RabbitMQ connection to t16o_mq vhost for gateway integration"""
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        virtual_host=RABBITMQ_VHOST,
+        credentials=credentials,
+        heartbeat=600,
+        blocked_connection_timeout=300
+    )
+    connection = pika.BlockingConnection(parameters)
+    channel = connection.channel()
+
+    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE]:
+        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+
+    return connection, channel
+
+
+def publish_response(channel, request_id: str, status: str, result: dict):
+    """Publish response to gateway response queue"""
+    response = {
+        'request_id': request_id,
+        'worker': 'detailer',
+        'status': status,
+        'timestamp': datetime.now().isoformat() + 'Z',
+        'result': result
+    }
+
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_RESPONSE_QUEUE,
+            body=json.dumps(response).encode('utf-8'),
+            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json')
+        )
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to publish response: {e}")
+        return False
+
+
+def run_queue_consumer(prefetch: int = 1):
+    """Run as a queue consumer, listening for gateway requests"""
+    print(f"""
++-----------------------------------------------------------+
+|         Guide Detailer - Queue Consumer Mode              |
+|                                                           |
+|  vhost:     {RABBITMQ_VHOST}                                     |
+|  queue:     {RABBITMQ_REQUEST_QUEUE}             |
+|  prefetch:  {prefetch}                                            |
++-----------------------------------------------------------+
+""")
+
+    # Setup DB connection
+    db_conn = mysql.connector.connect(**DB_CONFIG)
+    cursor = db_conn.cursor()
+    print("[OK] Database connected")
+
+    # Setup event loop for async API calls
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    while True:
+        try:
+            gateway_conn, gateway_channel = setup_gateway_rabbitmq()
+            gateway_channel.basic_qos(prefetch_count=prefetch)
+
+            print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
+            print("[INFO] Waiting for requests...")
+
+            def callback(ch, method, properties, body):
+                try:
+                    message = json.loads(body.decode('utf-8'))
+                    request_id = message.get('request_id', 'unknown')
+                    batch = message.get('batch', {})
+
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    signatures = batch.get('signatures', [])
+                    if not signatures:
+                        publish_response(gateway_channel, request_id, 'completed',
+                                       {'processed': 0, 'message': 'No signatures provided'})
+                        ch.basic_ack(delivery_tag=method.delivery_tag)
+                        return
+
+                    print(f"  Processing {len(signatures)} signatures...")
+
+                    # Filter to only existing tx
+                    existing_sigs = filter_existing_signatures(cursor, signatures)
+
+                    if not existing_sigs:
+                        result = {'processed': 0, 'skipped': len(signatures), 'message': 'No matching tx found'}
+                        status = 'completed'
+                    else:
+                        try:
+                            # Fetch detail data
+                            async def fetch_details():
+                                async with aiohttp.ClientSession(
+                                    headers={"token": SOLSCAN_API_TOKEN},
+                                    timeout=aiohttp.ClientTimeout(total=60)
+                                ) as session:
+                                    return await fetch_endpoint(session, 'transaction/detail/multi', existing_sigs)
+
+                            detail_data = loop.run_until_complete(fetch_details())
+
+                            if detail_data.get('success') and detail_data.get('data'):
+                                tx_data = detail_data['data']
+
+                                # Call stored procedure
+                                cursor.callproc('sp_tx_detail_batch', [json.dumps(tx_data)])
+                                for _ in cursor.stored_results():
+                                    pass
+                                db_conn.commit()
+
+                                result = {'processed': len(existing_sigs), 'transactions': len(tx_data)}
+                                status = 'completed'
+                            else:
+                                result = {'processed': 0, 'error': 'Solscan API returned no data'}
+                                status = 'failed'
+                        except Exception as e:
+                            result = {'processed': 0, 'error': str(e)}
+                            status = 'failed'
+
+                    publish_response(gateway_channel, request_id, status, result)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+            gateway_channel.basic_consume(queue=RABBITMQ_REQUEST_QUEUE, on_message_callback=callback)
+            gateway_channel.start_consuming()
+
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"[ERROR] Connection lost: {e}")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n[INFO] Shutting down...")
+            break
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            time.sleep(5)
+
+    loop.close()
+    db_conn.close()
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -345,8 +516,13 @@ def main():
     parser.add_argument('--rabbitmq-pass', default=RABBITMQ_PASS, help='RabbitMQ password')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be processed without making changes')
+    parser.add_argument('--queue-consumer', action='store_true',
+                        help='Run as queue consumer, listening for gateway requests')
 
     args = parser.parse_args()
+
+    if args.queue_consumer:
+        return run_queue_consumer(prefetch=args.prefetch)
 
     if not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")

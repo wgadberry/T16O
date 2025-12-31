@@ -59,7 +59,7 @@ except ImportError:
 SOLSCAN_API_BASE = "https://pro-api.solscan.io/v2.0"
 SOLSCAN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
 
-# RabbitMQ
+# RabbitMQ (legacy - default vhost)
 RABBITMQ_HOST = 'localhost'
 RABBITMQ_PORT = 5692
 RABBITMQ_USER = 'admin'
@@ -67,6 +67,21 @@ RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE_IN = 'tx.guide.signatures'
 RABBITMQ_QUEUE_OUT = 'tx.guide.addresses'
 RABBITMQ_QUEUE_DETAIL = 'tx.detail.transactions'
+
+# RabbitMQ (new - t16o_mq vhost for gateway integration)
+RABBITMQ_VHOST = 't16o_mq'
+RABBITMQ_REQUEST_QUEUE = 'mq.guide.shredder.request'
+RABBITMQ_RESPONSE_QUEUE = 'mq.guide.shredder.response'
+RABBITMQ_GATEWAY_QUEUE = 'mq.guide.gateway.request'
+
+# Database
+DB_CONFIG = {
+    'host': '127.0.0.1',
+    'port': 3396,
+    'user': 'root',
+    'password': 'rootpassword',
+    'database': 't16o_db'
+}
 
 
 # =============================================================================
@@ -524,6 +539,279 @@ class GuideConsumerV2:
 
 
 # =============================================================================
+# Gateway Integration (t16o_mq vhost)
+# =============================================================================
+
+from datetime import datetime
+
+def setup_gateway_rabbitmq():
+    """Setup RabbitMQ connection to t16o_mq vhost for gateway integration"""
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        virtual_host=RABBITMQ_VHOST,
+        credentials=credentials,
+        heartbeat=600,
+        blocked_connection_timeout=300
+    )
+    connection = pika.BlockingConnection(parameters)
+    channel = connection.channel()
+
+    # Declare queues
+    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE, RABBITMQ_GATEWAY_QUEUE]:
+        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+
+    return connection, channel
+
+
+def publish_response(channel, request_id: str, status: str, result: dict, error: str = None):
+    """Publish response to gateway response queue"""
+    response = {
+        'request_id': request_id,
+        'worker': 'shredder',
+        'status': status,
+        'timestamp': datetime.now().isoformat() + 'Z',
+        'result': result
+    }
+    if error:
+        response['error'] = error
+
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_RESPONSE_QUEUE,
+            body=json.dumps(response).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json'
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to publish response: {e}")
+        return False
+
+
+def publish_cascade(channel, request_id: str, targets: list, batch: dict, api_key: str = 'internal_cascade_key'):
+    """Publish cascade message to gateway for downstream workers"""
+    message = {
+        'request_id': f"cascade-{request_id[:8]}-{datetime.now().strftime('%H%M%S')}",
+        'source_worker': 'shredder',
+        'source_request_id': request_id,
+        'api_key': api_key,
+        'action': 'cascade',
+        'targets': targets,
+        'batch': batch
+    }
+
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_GATEWAY_QUEUE,
+            body=json.dumps(message).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json',
+                priority=5
+            )
+        )
+        print(f"  [CASCADE] Sent to gateway for {targets}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to publish cascade: {e}")
+        return False
+
+
+def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: bool = False):
+    """Run as a queue consumer, listening for gateway requests"""
+    print(f"""
++-----------------------------------------------------------+
+|         Guide Shredder - Queue Consumer Mode              |
+|                                                           |
+|  vhost:     {RABBITMQ_VHOST}                                     |
+|  queue:     {RABBITMQ_REQUEST_QUEUE}             |
+|  prefetch:  {prefetch}                                            |
++-----------------------------------------------------------+
+""")
+
+    # Legacy queues disabled - cascade routing handles downstream workers
+    # Set to None to skip legacy publishing
+    legacy_channel = None
+
+    # Setup DB connection
+    db_conn = mysql.connector.connect(**DB_CONFIG)
+    cursor = db_conn.cursor()
+    print("[OK] Database connected")
+
+    # Setup Solscan session
+    solscan_session = create_solscan_session()
+
+    while True:
+        try:
+            # Setup gateway connection
+            gateway_conn, gateway_channel = setup_gateway_rabbitmq()
+            gateway_channel.basic_qos(prefetch_count=prefetch)
+
+            print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
+            print("[INFO] Waiting for requests...")
+
+            def callback(ch, method, properties, body):
+                nonlocal cursor
+                try:
+                    message = json.loads(body.decode('utf-8'))
+                    request_id = message.get('request_id', 'unknown')
+                    batch = message.get('batch', {})
+                    api_key = message.get('api_key', 'internal_cascade_key')
+
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    # Extract signatures from batch
+                    signatures = batch.get('signatures', [])
+                    if not signatures:
+                        print(f"  No signatures in batch, skipping")
+                        publish_response(gateway_channel, request_id, 'completed',
+                                       {'processed': 0, 'message': 'No signatures provided'})
+                        ch.basic_ack(delivery_tag=method.delivery_tag)
+                        return
+
+                    print(f"  Processing {len(signatures)} signatures...")
+
+                    # Pre-filter existing (returns tuple: new_sigs, need_detail_sigs)
+                    new_sigs, need_detail_sigs = filter_existing_signatures(cursor, signatures)
+                    print(f"  After filter: {len(new_sigs)} new, {len(need_detail_sigs)} need detail")
+
+                    if not new_sigs:
+                        print(f"  All {len(signatures)} signatures already exist")
+                        result = {
+                            'processed': 0,
+                            'skipped': len(signatures),
+                            'already_exist': True
+                        }
+                        status = 'completed'
+                    else:
+                        # Batch signatures (Solscan API has URL length limits)
+                        # Process in batches of 20
+                        BATCH_SIZE = 20
+                        all_tx_data = []
+                        all_addresses = set()
+
+                        for i in range(0, len(new_sigs), BATCH_SIZE):
+                            batch = new_sigs[i:i + BATCH_SIZE]
+                            print(f"  Fetching batch {i//BATCH_SIZE + 1}/{(len(new_sigs) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(batch)} sigs)...")
+
+                            try:
+                                decoded = fetch_decoded_batch(solscan_session, batch)
+                                if decoded.get('success') and decoded.get('data'):
+                                    all_tx_data.extend(decoded['data'])
+                                    # Collect addresses
+                                    for tx in decoded['data']:
+                                        for activity in tx.get('activities', []):
+                                            if activity.get('from'):
+                                                all_addresses.add(activity['from'])
+                                            if activity.get('to'):
+                                                all_addresses.add(activity['to'])
+                                else:
+                                    print(f"    Batch {i//BATCH_SIZE + 1} returned no data")
+                            except Exception as batch_err:
+                                print(f"    Batch {i//BATCH_SIZE + 1} error: {batch_err}")
+
+                            # Small delay between batches
+                            if i + BATCH_SIZE < len(new_sigs):
+                                time.sleep(0.3)
+
+                        # Process batched data
+                        try:
+                            if all_tx_data:
+                                print(f"  Calling sp_tx_shred_batch with {len(all_tx_data)} transactions...")
+
+                                # Call stored procedure (1 IN + 6 OUT parameters)
+                                # OUT params: p_tx_count, p_edge_count, p_address_count, p_transfer_count, p_swap_count, p_activity_count
+                                # SP expects {"data": [...]} format
+                                args = [json.dumps({'data': all_tx_data}), 0, 0, 0, 0, 0, 0]
+                                result = cursor.callproc('sp_tx_shred_batch', args)
+
+                                # Get OUT parameter values (result contains the modified args)
+                                sp_tx_count = result[1]
+                                sp_edge_count = result[2]
+                                sp_address_count = result[3]
+                                sp_transfer_count = result[4]
+                                sp_swap_count = result[5]
+                                sp_activity_count = result[6]
+
+                                db_conn.commit()
+                                print(f"  SP complete: tx={sp_tx_count} edges={sp_edge_count} addrs={sp_address_count} "
+                                      f"xfers={sp_transfer_count} swaps={sp_swap_count} acts={sp_activity_count}")
+
+                                # Legacy queue publishing disabled - cascade routing handles downstream
+                                # (legacy_channel is None in queue-consumer mode)
+
+                                result = {
+                                    'processed': len(new_sigs),
+                                    'transactions': len(all_tx_data),
+                                    'addresses': len(all_addresses),
+                                    'cascade_to': ['detailer', 'funder', 'aggregator']
+                                }
+                                status = 'completed'
+                            else:
+                                result = {'processed': 0, 'error': 'Solscan API returned no data for any batch'}
+                                status = 'failed'
+                        except Exception as e:
+                            print(f"  [ERROR] {e}")
+                            import traceback
+                            traceback.print_exc()
+                            result = {'processed': 0, 'error': str(e)}
+                            status = 'failed'
+
+                    # Publish response
+                    publish_response(gateway_channel, request_id, status, result)
+
+                    # Send cascade if we processed transactions
+                    if result.get('cascade_to') and result.get('processed', 0) > 0:
+                        cascade_batch = {
+                            'source_signatures': signatures[:5],  # Sample for reference
+                            'processed_count': result['processed'],
+                            'address_count': result.get('addresses', 0)
+                        }
+                        publish_cascade(gateway_channel, request_id, result['cascade_to'], cascade_batch, api_key)
+
+                    # Ack the message
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+            gateway_channel.basic_consume(
+                queue=RABBITMQ_REQUEST_QUEUE,
+                on_message_callback=callback
+            )
+            gateway_channel.start_consuming()
+
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"[ERROR] Connection lost: {e}")
+            print("[INFO] Reconnecting in 5 seconds...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n[INFO] Shutting down...")
+            break
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(5)
+
+    # Cleanup
+    if legacy_conn:
+        legacy_conn.close()
+    if db_conn:
+        db_conn.close()
+    solscan_session.close()
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -548,8 +836,18 @@ def main():
                         help='Skip sending signatures to detail enrichment queue')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be processed without making changes')
+    parser.add_argument('--queue-consumer', action='store_true',
+                        help='Run as queue consumer, listening for gateway requests')
 
     args = parser.parse_args()
+
+    # Queue consumer mode - listen to gateway requests
+    if args.queue_consumer:
+        return run_queue_consumer(
+            prefetch=args.prefetch,
+            no_funding=args.no_funding,
+            no_detail=args.no_detail
+        )
 
     if not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")

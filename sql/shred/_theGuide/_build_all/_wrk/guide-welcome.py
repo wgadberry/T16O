@@ -6,13 +6,23 @@ Interactive launcher that prompts for a mint address and starts all core
 pipeline workers in separate PowerShell windows.
 
 Usage:
-    python guide-welcome.py
+    python guide-welcome.py                     # Interactive mode (legacy)
+    python guide-welcome.py --gateway --launch  # Start workers in gateway mode
+    python guide-welcome.py --gateway <mint>    # Submit mint via gateway REST API
+    python guide-welcome.py --gateway           # Interactive gateway prompt
 
-Workers launched:
-    - guide-producer.py (with mint address)
-    - guide-shredder.py
-    - guide-funder.py
-    - guide-sync-funding.py
+Gateway Mode:
+    1. First, launch workers: python guide-welcome.py --gateway --launch
+    2. Wait for workers to initialize (~5 seconds)
+    3. Submit requests: python guide-welcome.py --gateway <mint_address>
+    4. Or use interactive: python guide-welcome.py --gateway
+
+Workers (Gateway Mode):
+    - guide-gateway.py --with-response-consumer  (REST API + auto-cascade)
+    - guide-producer.py --queue-consumer
+    - guide-shredder.py --queue-consumer
+    - guide-detailer.py --queue-consumer
+    - guide-funder.py --queue-consumer
 """
 
 import subprocess
@@ -256,6 +266,13 @@ RABBITMQ_CONFIG = {
     "password": "admin123",
 }
 
+# Gateway REST API config
+GATEWAY_CONFIG = {
+    "host": "localhost",
+    "port": 5100,
+    "api_key": "admin_master_key",
+}
+
 # =============================================================================
 # Argument Parser
 # =============================================================================
@@ -273,6 +290,12 @@ Examples:
     python guide-welcome.py --preflight        # Run pre-flight checks only
     python guide-welcome.py --workers all      # Launch all workers
     python guide-welcome.py <mint_address>     # Launch with mint address (skip prompt)
+
+Gateway Mode (new):
+    python guide-welcome.py --gateway          # Check gateway status
+    python guide-welcome.py --gateway --launch # Launch workers in gateway mode
+    python guide-welcome.py --gateway <mint>   # Submit mint to gateway (workers must be running)
+    python guide-welcome.py --gateway <mint> --limit 500  # With custom signature limit
         """
     )
     parser.add_argument('mint', nargs='?', help='Mint address (skip interactive prompt)')
@@ -289,6 +312,15 @@ Examples:
                         help='Skip ASCII banner')
     parser.add_argument('--json', action='store_true',
                         help='Output in JSON format (for --audit, --status)')
+    # Gateway mode options
+    parser.add_argument('--gateway', action='store_true',
+                        help='Use gateway REST API mode')
+    parser.add_argument('--launch', action='store_true',
+                        help='Launch workers in gateway mode (--queue-consumer)')
+    parser.add_argument('--limit', type=int, default=100,
+                        help='Max signatures to fetch (default: 100)')
+    parser.add_argument('--check-status', metavar='REQUEST_ID',
+                        help='Check status of a gateway request')
     return parser.parse_args()
 
 
@@ -549,6 +581,182 @@ def print_preflight_results(results: dict):
             print(f"        - Missing: {m}")
 
     print()
+
+
+# =============================================================================
+# Gateway REST API Functions
+# =============================================================================
+
+def get_gateway_url(endpoint: str = "") -> str:
+    """Build gateway URL"""
+    return f"http://{GATEWAY_CONFIG['host']}:{GATEWAY_CONFIG['port']}{endpoint}"
+
+
+def check_gateway_health() -> dict:
+    """Check if gateway is running and healthy"""
+    try:
+        import requests
+        response = requests.get(get_gateway_url("/api/health"), timeout=5)
+        return response.json()
+    except ImportError:
+        return {"error": "requests library not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def submit_gateway_request(worker: str, payload: dict) -> dict:
+    """
+    Submit a request to the gateway REST API.
+
+    Args:
+        worker: Target worker name (producer, shredder, etc.)
+        payload: Request payload with action and batch
+
+    Returns:
+        Response dict with success status and request_id
+    """
+    try:
+        import requests
+        url = get_gateway_url(f"/api/trigger/{worker}")
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": GATEWAY_CONFIG["api_key"]
+        }
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        return response.json()
+    except ImportError:
+        return {"success": False, "error": "requests library not installed"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_request_status(request_id: str) -> dict:
+    """Get status of a gateway request"""
+    try:
+        import requests
+        url = get_gateway_url(f"/api/status/{request_id}")
+        response = requests.get(url, timeout=10)
+        return response.json()
+    except ImportError:
+        return {"error": "requests library not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def list_gateway_workers() -> dict:
+    """List available workers from gateway"""
+    try:
+        import requests
+        url = get_gateway_url("/api/workers")
+        response = requests.get(url, timeout=10)
+        return response.json()
+    except ImportError:
+        return {"error": "requests library not installed"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def print_gateway_status():
+    """Print gateway health and worker status"""
+    print("\n    GATEWAY STATUS")
+    print("    " + "=" * 50)
+
+    health = check_gateway_health()
+    if "error" in health:
+        print(f"    [!!] Gateway: {health['error']}")
+        print(f"    [*]  Make sure gateway is running:")
+        print(f"         python guide-gateway.py --with-response-consumer")
+        return False
+
+    print(f"    [OK] Gateway: {health.get('status', 'unknown')}")
+    checks = health.get('checks', {})
+    for check, status in checks.items():
+        icon = "[OK]" if status else "[!!]"
+        print(f"         {icon} {check}")
+
+    # List workers
+    workers = list_gateway_workers()
+    if "workers" in workers:
+        print(f"\n    Available workers: {', '.join(workers['workers'].keys())}")
+
+    print()
+    return True
+
+
+def submit_pipeline_request(mint_address: str, limit: int = 100) -> dict:
+    """
+    Submit a full pipeline request starting with producer.
+
+    The gateway will handle cascading to downstream workers.
+    """
+    payload = {
+        "action": "process",
+        "priority": 5,
+        "batch": {
+            "filters": {
+                "mint_address": mint_address
+            },
+            "limit": limit
+        }
+    }
+
+    print(f"\n    Submitting request to gateway...")
+    print(f"    Target: producer")
+    print(f"    Mint: {mint_address}")
+    print(f"    Limit: {limit} signatures")
+    print()
+
+    result = submit_gateway_request("producer", payload)
+
+    if result.get("success"):
+        print(f"    [OK] Request queued successfully!")
+        print(f"         Request ID: {result.get('request_id')}")
+        print(f"         Worker: {result.get('worker')}")
+        print(f"         Queued at: {result.get('queued_at')}")
+        print()
+        print(f"    [*]  Check status with:")
+        print(f"         curl http://localhost:5100/api/status/{result.get('request_id')}")
+    else:
+        print(f"    [!!] Request failed: {result.get('error')}")
+
+    return result
+
+
+def launch_gateway_workers():
+    """Launch workers in queue-consumer mode for gateway integration"""
+    print("\n    Launching workers in gateway mode (--queue-consumer)...\n")
+
+    # Workers to launch with --queue-consumer flag
+    gateway_workers = [
+        {"name": "Gateway", "script": "guide-gateway.py", "args": "--with-response-consumer", "color": "White"},
+        {"name": "Producer", "script": "guide-producer.py", "args": "--queue-consumer", "color": "Green"},
+        {"name": "Shredder", "script": "guide-shredder.py", "args": "--queue-consumer", "color": "Cyan"},
+        {"name": "Detailer", "script": "guide-detailer.py", "args": "--queue-consumer", "color": "Blue"},
+        {"name": "Funder", "script": "guide-funder.py", "args": "--queue-consumer", "color": "Yellow"},
+    ]
+
+    launched = 0
+    for worker in gateway_workers:
+        script_path = os.path.join(SCRIPT_DIR, worker["script"])
+        if not os.path.exists(script_path):
+            print_status(f"{worker['name']}: Script not found", "error")
+            continue
+
+        args = worker.get("args", "")
+        py_cmd = f"python '{script_path}' {args}".strip()
+        title = f"theGuide - {worker['name']} (Gateway)"
+        cmd_str = f'start "{title}" powershell -NoExit -Command "{py_cmd}"'
+
+        try:
+            subprocess.Popen(cmd_str, shell=True)
+            print_status(f"{worker['name']}: Launched ({args})", "ok")
+            launched += 1
+            time.sleep(0.5)
+        except Exception as e:
+            print_status(f"{worker['name']}: Failed - {e}", "error")
+
+    print(f"\n    Launched {launched}/{len(gateway_workers)} workers in gateway mode")
+    return launched == len(gateway_workers)
 
 
 # =============================================================================
@@ -849,6 +1057,111 @@ def main():
             print(json.dumps(results, indent=2))
         else:
             print_preflight_results(results)
+        return 0
+
+    # Check request status
+    if args.check_status:
+        status = get_request_status(args.check_status)
+        if args.json:
+            print(json.dumps(status, indent=2))
+        else:
+            print(f"\n    Request Status: {args.check_status}")
+            print("    " + "=" * 50)
+            if "error" in status:
+                print(f"    [!!] {status['error']}")
+            else:
+                print(f"    Status: {status.get('status', 'unknown')}")
+                print(f"    Worker: {status.get('target_worker', 'unknown')}")
+                print(f"    Action: {status.get('action', 'unknown')}")
+                if status.get('created_at'):
+                    print(f"    Created: {status['created_at']}")
+                if status.get('completed_at'):
+                    print(f"    Completed: {status['completed_at']}")
+                if status.get('duration_ms'):
+                    print(f"    Duration: {status['duration_ms']}ms")
+                if status.get('result'):
+                    print(f"    Result: {json.dumps(status['result'], indent=2)}")
+            print()
+        return 0
+
+    # Gateway mode
+    if args.gateway:
+        if not args.no_banner:
+            print_banner()
+
+        # Launch workers in gateway mode
+        if args.launch:
+            print("\n    GATEWAY MODE - Launch Workers")
+            print("    " + "=" * 50)
+            success = launch_gateway_workers()
+            print()
+            if success:
+                print("    [*]  Workers launched in gateway mode.")
+                print("    [*]  Wait a few seconds for workers to initialize.")
+                print("    [*]  Then submit requests with:")
+                print("         python guide-welcome.py --gateway <mint_address>")
+            return 0 if success else 1
+
+        # Check gateway status first
+        gateway_ok = print_gateway_status()
+
+        # If mint provided, submit request
+        if args.mint:
+            if not gateway_ok:
+                print("    [!!] Gateway not available. Start it with:")
+                print("         python guide-welcome.py --gateway --launch")
+                return 1
+
+            if not validate_mint_address(args.mint):
+                print_status(f"Invalid mint address: {args.mint}", "error")
+                return 1
+
+            result = submit_pipeline_request(args.mint, args.limit)
+            return 0 if result.get("success") else 1
+
+        # Interactive gateway mode
+        if gateway_ok:
+            print("    Enter a mint address to submit, or:")
+            print("    - 'workers' to list available workers")
+            print("    - 'status <request_id>' to check status")
+            print("    - 'q' to quit")
+            print()
+
+            while True:
+                try:
+                    user_input = input("    gateway> ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n\n    Goodbye!")
+                    return 0
+
+                if not user_input:
+                    continue
+
+                if user_input.lower() in ('q', 'quit', 'exit'):
+                    print("\n    Goodbye!")
+                    return 0
+
+                if user_input.lower() == 'workers':
+                    workers = list_gateway_workers()
+                    if "workers" in workers:
+                        for name, info in workers["workers"].items():
+                            print(f"      {name}: {info.get('description', '')}")
+                    continue
+
+                if user_input.lower().startswith('status '):
+                    req_id = user_input[7:].strip()
+                    status = get_request_status(req_id)
+                    print(f"      Status: {status.get('status', status.get('error', 'unknown'))}")
+                    if status.get('result'):
+                        print(f"      Result: {status['result']}")
+                    continue
+
+                # Assume it's a mint address
+                if validate_mint_address(user_input):
+                    submit_pipeline_request(user_input, args.limit)
+                else:
+                    print("      Invalid mint address or command")
+
         return 0
 
     # Interactive mode

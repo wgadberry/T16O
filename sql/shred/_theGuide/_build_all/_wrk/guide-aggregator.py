@@ -43,6 +43,12 @@ try:
 except ImportError:
     HAS_MYSQL = False
 
+try:
+    import pika
+    HAS_PIKA = True
+except ImportError:
+    HAS_PIKA = False
+
 
 # =============================================================================
 # Config Loading
@@ -93,6 +99,15 @@ DB_CONFIG = {
     'password': _CONFIG.get('DB_PASSWORD', 'rootpassword'),
     'database': _CONFIG.get('DB_NAME', 't16o_db')
 }
+
+# RabbitMQ (gateway - t16o_mq vhost)
+RABBITMQ_HOST = 'localhost'
+RABBITMQ_PORT = 5692
+RABBITMQ_USER = 'admin'
+RABBITMQ_PASS = 'admin123'
+RABBITMQ_VHOST = 't16o_mq'
+RABBITMQ_REQUEST_QUEUE = 'mq.guide.aggregator.request'
+RABBITMQ_RESPONSE_QUEUE = 'mq.guide.aggregator.response'
 
 # Deadlock retry settings
 MAX_DEADLOCK_RETRIES = 5
@@ -715,6 +730,158 @@ def print_status(status: Dict):
 
 
 # =============================================================================
+# RabbitMQ Gateway Integration
+# =============================================================================
+
+def setup_gateway_rabbitmq():
+    """Setup connection to gateway RabbitMQ (t16o_mq vhost)"""
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(
+            host=RABBITMQ_HOST,
+            port=RABBITMQ_PORT,
+            virtual_host=RABBITMQ_VHOST,
+            credentials=credentials,
+            heartbeat=600
+        )
+    )
+    channel = connection.channel()
+
+    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE]:
+        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+
+    return connection, channel
+
+
+def publish_response(channel, request_id: str, status: str, result: dict, error: str = None):
+    """Publish response to gateway response queue"""
+    response = {
+        'request_id': request_id,
+        'worker': 'aggregator',
+        'status': status,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'result': result
+    }
+    if error:
+        response['error'] = error
+
+    channel.basic_publish(
+        exchange='',
+        routing_key=RABBITMQ_RESPONSE_QUEUE,
+        body=json.dumps(response).encode('utf-8'),
+        properties=pika.BasicProperties(delivery_mode=2, priority=5)
+    )
+
+
+def run_queue_consumer(prefetch: int = 1):
+    """Run as a queue consumer, listening for gateway requests"""
+    print(f"""
++-----------------------------------------------------------+
+|         Guide Aggregator - Queue Consumer Mode            |
+|                                                           |
+|  vhost:     {RABBITMQ_VHOST}                                     |
+|  queue:     {RABBITMQ_REQUEST_QUEUE}           |
+|  prefetch:  {prefetch}                                            |
++-----------------------------------------------------------+
+""")
+
+    if not HAS_PIKA:
+        print("Error: pika not installed")
+        return 1
+
+    # Setup DB connection
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    print("[OK] Database connected")
+
+    while True:
+        try:
+            gateway_conn, gateway_channel = setup_gateway_rabbitmq()
+            gateway_channel.basic_qos(prefetch_count=prefetch)
+
+            print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
+            print("[INFO] Waiting for requests...")
+
+            def callback(ch, method, properties, body):
+                try:
+                    message = json.loads(body.decode('utf-8'))
+                    request_id = message.get('request_id', 'unknown')
+                    batch = message.get('batch', {})
+
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    # Get operations from batch or default to guide,funding,tokens
+                    operations = batch.get('operations', ['guide', 'funding', 'tokens'])
+                    if isinstance(operations, str):
+                        operations = [op.strip() for op in operations.split(',')]
+
+                    print(f"  Running operations: {', '.join(operations)}")
+
+                    try:
+                        # Run sync operations
+                        stats = run_sync(cursor, conn, operations,
+                                        batch_size=batch.get('batch_size', 10000),
+                                        guide_batch_size=batch.get('guide_batch_size', 1000),
+                                        max_batches=batch.get('max_batches', 0),
+                                        verbose=True)
+
+                        total = (stats['guide']['edges'] +
+                                stats['funding']['rows'] +
+                                stats['tokens']['rows'] +
+                                stats['bmap']['rows'])
+
+                        result = {
+                            'processed': total,
+                            'guide_edges': stats['guide']['edges'],
+                            'funding_rows': stats['funding']['rows'],
+                            'token_rows': stats['tokens']['rows'],
+                            'bmap_rows': stats['bmap']['rows']
+                        }
+                        status = 'completed'
+                        print(f"  Completed: {total} total rows processed")
+
+                    except Exception as e:
+                        print(f"  [ERROR] {e}")
+                        result = {'processed': 0, 'error': str(e)}
+                        status = 'failed'
+
+                    # Publish response
+                    publish_response(gateway_channel, request_id, status, result)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+            gateway_channel.basic_consume(
+                queue=RABBITMQ_REQUEST_QUEUE,
+                on_message_callback=callback,
+                auto_ack=False
+            )
+
+            gateway_channel.start_consuming()
+
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"[WARN] RabbitMQ connection lost: {e}")
+            print("[INFO] Reconnecting in 5 seconds...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n[INFO] Shutting down...")
+            break
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(5)
+
+    cursor.close()
+    conn.close()
+    return 0
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -758,8 +925,15 @@ Examples:
                         help='Minimal output')
     parser.add_argument('--json', action='store_true',
                         help='Output in JSON format')
+    parser.add_argument('--queue-consumer', action='store_true',
+                        help='Run as queue consumer, listening for gateway requests')
+    parser.add_argument('--prefetch', type=int, default=1,
+                        help='Prefetch count for queue consumer mode (default: 1)')
 
     args = parser.parse_args()
+
+    if args.queue_consumer:
+        return run_queue_consumer(prefetch=args.prefetch)
 
     if not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")

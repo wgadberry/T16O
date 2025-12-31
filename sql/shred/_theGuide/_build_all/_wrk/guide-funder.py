@@ -30,6 +30,7 @@ Usage:
     python guide-funder.py --address-file wallets.txt  # Read from local file instead of queue
     python guide-funder.py --sync-db-missing  # Query DB for missing funders
     python guide-funder.py --sync-db-missing --limit 500  # Process max 500 addresses
+    python guide-funder.py --queue-consumer  # Gateway mode (t16o_mq vhost)
 """
 
 import argparse
@@ -64,12 +65,17 @@ except ImportError:
 SOLSCAN_API_BASE = "https://pro-api.solscan.io/v2.0"
 SOLSCAN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
 
-# RabbitMQ
+# RabbitMQ (legacy queue)
 RABBITMQ_HOST = 'localhost'
 RABBITMQ_PORT = 5692
 RABBITMQ_USER = 'admin'
 RABBITMQ_PASS = 'admin123'
 RABBITMQ_QUEUE_IN = 'tx.guide.addresses'
+
+# Gateway RabbitMQ (t16o_mq vhost)
+RABBITMQ_VHOST = 't16o_mq'
+RABBITMQ_REQUEST_QUEUE = 'mq.guide.funder.request'
+RABBITMQ_RESPONSE_QUEUE = 'mq.guide.funder.response'
 
 # SOL token addresses for funding detection
 SOL_TOKEN = 'So11111111111111111111111111111111111111111'
@@ -268,6 +274,303 @@ def extract_signatures_from_defi_activities(data: Dict) -> Set[str]:
             signatures.add(sig)
 
     return signatures
+
+
+# =============================================================================
+# Gateway Integration
+# =============================================================================
+
+def setup_gateway_rabbitmq():
+    """Setup RabbitMQ connection to t16o_mq vhost for gateway integration"""
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(
+            host=RABBITMQ_HOST,
+            port=RABBITMQ_PORT,
+            virtual_host=RABBITMQ_VHOST,
+            credentials=credentials,
+            heartbeat=600,
+            blocked_connection_timeout=300
+        )
+    )
+    channel = connection.channel()
+
+    # Declare request and response queues (must match gateway's queue args)
+    channel.queue_declare(queue=RABBITMQ_REQUEST_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10})
+    channel.queue_declare(queue=RABBITMQ_RESPONSE_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10})
+
+    return connection, channel
+
+
+def publish_response(channel, request_id: str, status: str, result: Dict):
+    """Publish response message to gateway response queue"""
+    from datetime import datetime
+    import uuid
+
+    response = {
+        'request_id': request_id,
+        'worker': 'funder',
+        'status': status,
+        'timestamp': datetime.now().isoformat() + 'Z',
+        'result': result
+    }
+
+    channel.basic_publish(
+        exchange='',
+        routing_key=RABBITMQ_RESPONSE_QUEUE,
+        body=json.dumps(response),
+        properties=pika.BasicProperties(
+            delivery_mode=2,  # persistent
+            content_type='application/json'
+        )
+    )
+
+
+def run_queue_consumer(args):
+    """
+    Run in gateway queue consumer mode.
+    Consumes from mq.guide.funder.request, processes addresses,
+    and publishes responses to mq.guide.funder.response.
+    """
+    import uuid
+    from datetime import datetime
+
+    print(f"\n{'='*60}")
+    print(f"  FUNDER - Gateway Queue Consumer Mode")
+    print(f"{'='*60}")
+    print(f"  Request queue: {RABBITMQ_REQUEST_QUEUE}")
+    print(f"  Response queue: {RABBITMQ_RESPONSE_QUEUE}")
+    print(f"  VHost: {RABBITMQ_VHOST}")
+    print(f"{'='*60}\n")
+
+    # Connect to MySQL
+    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
+    db_conn = mysql.connector.connect(
+        host=args.db_host,
+        port=args.db_port,
+        user=args.db_user,
+        password=args.db_pass,
+        database=args.db_name
+    )
+    cursor = db_conn.cursor(dictionary=True)
+
+    # Verify init_tx_fetched column exists
+    try:
+        cursor.execute("SELECT init_tx_fetched FROM tx_address LIMIT 1")
+        cursor.fetchall()
+    except mysql.connector.Error:
+        print("Adding init_tx_fetched column to tx_address...")
+        cursor.execute("""
+            ALTER TABLE tx_address
+            ADD COLUMN init_tx_fetched TINYINT(1) DEFAULT NULL
+        """)
+        db_conn.commit()
+        print("Column added successfully")
+
+    # Create Solscan client
+    solscan = SolscanClient()
+
+    # Connect to gateway RabbitMQ
+    print(f"Connecting to RabbitMQ (vhost: {RABBITMQ_VHOST})...")
+    connection, channel = setup_gateway_rabbitmq()
+    channel.basic_qos(prefetch_count=1)
+
+    print(f"Waiting for requests on '{RABBITMQ_REQUEST_QUEUE}'...")
+    print("Press Ctrl+C to exit\n")
+
+    def process_request(ch, method, properties, body):
+        """Process a single request from gateway"""
+        start_time = time.time()
+
+        try:
+            request = json.loads(body)
+            request_id = request.get('request_id', str(uuid.uuid4()))
+            action = request.get('action', 'process')
+            batch = request.get('batch', {})
+
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]}...")
+            print(f"  Action: {action}")
+
+            # Extract addresses from batch
+            addresses = batch.get('addresses', [])
+            address_ids = batch.get('address_ids', [])
+
+            # If we got address_ids, look them up
+            if address_ids and not addresses:
+                placeholders = ','.join(['%s'] * len(address_ids))
+                cursor.execute(f"SELECT address FROM tx_address WHERE id IN ({placeholders})", address_ids)
+                addresses = [row['address'] for row in cursor.fetchall()]
+
+            if not addresses:
+                print(f"  No addresses to process")
+                publish_response(ch, request_id, 'completed', {
+                    'processed': 0,
+                    'funders_found': 0,
+                    'funders_not_found': 0
+                })
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                return
+
+            print(f"  Addresses: {len(addresses)}")
+
+            # Filter out known programs and system addresses
+            addresses = [a for a in addresses if not should_skip_address(a)]
+
+            # Ensure addresses exist in DB
+            for addr in addresses:
+                cursor.execute("""
+                    INSERT IGNORE INTO tx_address (address, address_type)
+                    VALUES (%s, 'unknown')
+                """, (addr,))
+            db_conn.commit()
+
+            # Get address info
+            addr_info = {}
+            if addresses:
+                placeholders = ','.join(['%s'] * len(addresses))
+                cursor.execute(f"""
+                    SELECT id, address, address_type, init_tx_fetched
+                    FROM tx_address WHERE address IN ({placeholders})
+                """, addresses)
+                addr_info = {row['address']: row for row in cursor.fetchall()}
+
+            # Filter to unprocessed addresses and claim them
+            candidates = [a for a in addresses
+                         if not addr_info.get(a, {}).get('init_tx_fetched')]
+
+            claimed = []
+            for addr in candidates:
+                cursor.execute("""
+                    UPDATE tx_address SET init_tx_fetched = 2
+                    WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+                """, (addr,))
+                if cursor.rowcount > 0:
+                    claimed.append(addr)
+            db_conn.commit()
+
+            print(f"  Claimed: {len(claimed)} (skipped {len(addresses) - len(claimed)})")
+
+            # Process each address
+            funders_found = 0
+            funders_not_found = 0
+            initialized = []
+
+            for i, addr in enumerate(claimed):
+                print(f"  [{i+1}/{len(claimed)}] {addr[:20]}...", end='')
+
+                time.sleep(args.api_delay)
+                data = solscan.get_account_transfers(addr, args.tx_limit)
+                funding_info = solscan.find_funding_wallet(addr, data) if data else None
+
+                if funding_info:
+                    print(f" -> funded by {funding_info['funder'][:16]}...")
+                    # Save funding info (simplified version)
+                    funder = funding_info['funder']
+                    signature = funding_info['signature']
+                    amount = funding_info['amount']
+                    block_time = funding_info['block_time']
+
+                    cursor.execute("""
+                        INSERT IGNORE INTO tx_address (address, address_type)
+                        VALUES (%s, 'wallet')
+                    """, (funder,))
+                    cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
+                    funder_row = cursor.fetchone()
+                    funder_id = funder_row['id'] if funder_row else None
+
+                    cursor.execute("SELECT id FROM tx_address WHERE address = %s", (addr,))
+                    target_row = cursor.fetchone()
+                    target_id = target_row['id'] if target_row else None
+
+                    tx_id = None
+                    if signature:
+                        cursor.execute("""
+                            INSERT IGNORE INTO tx (signature, block_time, tx_state)
+                            VALUES (%s, %s, 1)
+                        """, (signature, block_time))
+                        cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
+                        tx_row = cursor.fetchone()
+                        tx_id = tx_row['id'] if tx_row else None
+
+                    cursor.execute("""
+                        UPDATE tx_address
+                        SET funded_by_address_id = %s, funding_tx_id = %s,
+                            funding_amount = %s, first_seen_block_time = %s
+                        WHERE address = %s AND funded_by_address_id IS NULL
+                    """, (funder_id, tx_id, amount, block_time, addr))
+
+                    # Create funding edge
+                    sol_amount = float(amount) / 1e9 if amount else 0
+                    if funder_id and target_id:
+                        cursor.execute("""
+                            INSERT INTO tx_funding_edge
+                            (from_address_id, to_address_id, total_sol, transfer_count,
+                             first_transfer_time, last_transfer_time)
+                            VALUES (%s, %s, %s, 1, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                total_sol = VALUES(total_sol),
+                                transfer_count = transfer_count + 1,
+                                last_transfer_time = VALUES(last_transfer_time)
+                        """, (funder_id, target_id, sol_amount, block_time, block_time))
+
+                    funders_found += 1
+                else:
+                    print(f" -> no funder found")
+                    funders_not_found += 1
+
+                initialized.append(addr)
+
+            # Mark all as initialized
+            if initialized:
+                placeholders = ','.join(['%s'] * len(initialized))
+                cursor.execute(f"""
+                    UPDATE tx_address SET init_tx_fetched = 1
+                    WHERE address IN ({placeholders})
+                """, initialized)
+            db_conn.commit()
+
+            elapsed = time.time() - start_time
+
+            # Publish response
+            publish_response(ch, request_id, 'completed', {
+                'processed': len(claimed),
+                'funders_found': funders_found,
+                'funders_not_found': funders_not_found,
+                'elapsed_seconds': round(elapsed, 2)
+            })
+
+            print(f"  Completed in {elapsed:.1f}s: {funders_found} found, {funders_not_found} not found")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+
+            request_id = request.get('request_id', 'unknown') if 'request' in dir() else 'unknown'
+            publish_response(ch, request_id, 'failed', {
+                'error': str(e)
+            })
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+    channel.basic_consume(
+        queue=RABBITMQ_REQUEST_QUEUE,
+        on_message_callback=process_request
+    )
+
+    try:
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        print("\n\nShutting down...")
+        channel.stop_consuming()
+    finally:
+        solscan.close()
+        connection.close()
+        db_conn.close()
+
+    return 0
 
 
 # =============================================================================
@@ -729,8 +1032,20 @@ def main():
                         help='Query DB for addresses with funded_by_address_id=NULL and init_tx_fetched=0, then process them.')
     parser.add_argument('--limit', type=int, default=0,
                         help='Max addresses to process in --sync-db-missing mode (0 = unlimited)')
+    parser.add_argument('--queue-consumer', action='store_true',
+                        help='Run as gateway queue consumer (uses t16o_mq vhost)')
 
     args = parser.parse_args()
+
+    # Gateway queue consumer mode
+    if args.queue_consumer:
+        if not HAS_PIKA:
+            print("Error: pika not installed (required for queue consumer mode)")
+            return 1
+        if not HAS_MYSQL:
+            print("Error: mysql-connector-python not installed")
+            return 1
+        return run_queue_consumer(args)
 
     if not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")
