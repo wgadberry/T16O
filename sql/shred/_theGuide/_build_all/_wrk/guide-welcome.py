@@ -109,7 +109,7 @@ WORKER_REGISTRY = {
         "tx_state_names": [],
         "queues_out": [],
         "queues_in": [],
-        "description": "Consolidated: guide edges, funding, token participants",
+        "description": "Consolidated: guide edges, funding, token participants, bmap state",
     },
 
     # === ENRICHMENT (optional, improves data quality) ===
@@ -127,6 +127,19 @@ WORKER_REGISTRY = {
         "deprecated": True,
         "replaced_by": "aggregator",
     },
+    "enricher": {
+        "name": "Enricher",
+        "script": "guide-enricher.py",
+        "category": "enrichment",
+        "needs_mint": False,
+        "args": "--daemon --interval 60",
+        "color": "DarkYellow",
+        "tx_state_bits": [7, 8],
+        "tx_state_names": ["TOKENS_ENRICHED", "POOLS_ENRICHED"],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Consolidated: token metadata, pool data from Solscan",
+    },
     "backfill-tokens": {
         "name": "Backfill-Tokens",
         "script": "guide-backfill-tokens.py",
@@ -138,7 +151,9 @@ WORKER_REGISTRY = {
         "tx_state_names": ["TOKENS_ENRICHED"],
         "queues_out": [],
         "queues_in": [],
-        "description": "Fetches token metadata from Solscan",
+        "description": "Fetches token metadata from Solscan (use enricher instead)",
+        "deprecated": True,
+        "replaced_by": "enricher",
     },
     "pool-enricher": {
         "name": "Pool-Enricher",
@@ -150,7 +165,9 @@ WORKER_REGISTRY = {
         "tx_state_names": ["POOLS_ENRICHED"],
         "queues_out": [],
         "queues_in": [],
-        "description": "Fetches pool/AMM data from Solscan",
+        "description": "Fetches pool/AMM data from Solscan (use enricher instead)",
+        "deprecated": True,
+        "replaced_by": "enricher",
     },
     "address-classifier": {
         "name": "Address-Classifier",
@@ -201,8 +218,8 @@ TX_STATE_PHASES = {
     4: {"name": "SWAPS_PARSED", "bit": 16, "worker": "shredder"},
     5: {"name": "TRANSFERS_PARSED", "bit": 32, "worker": "shredder"},
     6: {"name": "DETAILED", "bit": 64, "worker": "detailer"},
-    7: {"name": "TOKENS_ENRICHED", "bit": 128, "worker": "backfill-tokens"},
-    8: {"name": "POOLS_ENRICHED", "bit": 256, "worker": "pool-enricher"},
+    7: {"name": "TOKENS_ENRICHED", "bit": 128, "worker": "enricher"},
+    8: {"name": "POOLS_ENRICHED", "bit": 256, "worker": "enricher"},
     9: {"name": "FUNDING_COMPLETE", "bit": 512, "worker": "funder"},
     10: {"name": "CLASSIFIED", "bit": 1024, "worker": "address-classifier"},
 }
@@ -215,8 +232,12 @@ SYNTHETIC_ADDRESSES = {
     "CREATE1111111111111111111111111111111111111": {"id": 742705, "type": "source", "purpose": "create"},
 }
 
-# Default workers launched by interactive mode (backward compatible)
-DEFAULT_WORKERS = ["producer", "shredder", "detailer", "funder", "sync-funding"]
+# Default workers launched by interactive mode
+# Uses consolidated workers: aggregator replaces sync-funding + loader
+DEFAULT_WORKERS = ["producer", "shredder", "detailer", "funder", "aggregator"]
+
+# Optional enrichment workers (use --workers enrichment or --workers all)
+ENRICHMENT_WORKERS = ["enricher"]
 
 # Database connection config
 DB_CONFIG = {
@@ -272,15 +293,27 @@ Examples:
 
 
 def get_workers_to_launch(mode: str) -> list:
-    """Get list of worker configs based on launch mode."""
+    """Get list of worker configs based on launch mode.
+
+    Modes:
+        default    - Core pipeline workers (consolidated)
+        core       - Only core category workers (non-deprecated)
+        enrichment - Default + enrichment workers (consolidated)
+        all        - All non-utility, non-deprecated workers
+    """
     if mode == 'default':
         worker_keys = DEFAULT_WORKERS
     elif mode == 'core':
-        worker_keys = [k for k, v in WORKER_REGISTRY.items() if v["category"] == "core"]
+        # Core workers, excluding deprecated
+        worker_keys = [k for k, v in WORKER_REGISTRY.items()
+                       if v["category"] == "core" and not v.get("deprecated")]
     elif mode == 'enrichment':
-        worker_keys = [k for k, v in WORKER_REGISTRY.items() if v["category"] in ("core", "enrichment")]
+        # Default + enrichment workers (using consolidated workers)
+        worker_keys = DEFAULT_WORKERS + ENRICHMENT_WORKERS
     elif mode == 'all':
-        worker_keys = [k for k, v in WORKER_REGISTRY.items() if v["category"] != "utility"]
+        # All non-utility, non-deprecated workers
+        worker_keys = [k for k, v in WORKER_REGISTRY.items()
+                       if v["category"] != "utility" and not v.get("deprecated")]
     else:
         worker_keys = DEFAULT_WORKERS
 
@@ -322,18 +355,17 @@ def print_banner(show_pipeline: bool = False):
                                      |
                                      +---(transactions)--> [Detailer]
                                      |
-                                     +---> [Sync-Funding] --> tx_funding_edge
+                                     +---> [Aggregator] --> tx_guide, tx_funding_edge, tx_bmap_state
 
     tx_state Phases (11 bits):
     ==========================
     Bits 0-5: SHREDDED|DECODED|GUIDE_EDGES|ADDRESSES_QUEUED|SWAPS|TRANSFERS [Shredder]
     Bit 6:    DETAILED [Detailer]
-    Bit 7:    TOKENS_ENRICHED [Backfill-Tokens] *
-    Bit 8:    POOLS_ENRICHED [Pool-Enricher] *
+    Bits 7-8: TOKENS_ENRICHED|POOLS_ENRICHED [Enricher] *
     Bit 9:    FUNDING_COMPLETE [Funder]
     Bit 10:   CLASSIFIED [Address-Classifier] *
 
-    * = Optional enrichment workers (use --workers all to include)
+    * = Optional enrichment workers (use --workers enrichment to include)
     """
         print(pipeline)
 

@@ -1405,6 +1405,170 @@ class IntegrityChecker:
         # For now, just report - swap enrichment is complex
         return stats
 
+    def heal(self, dry_run: bool = False) -> Dict[str, int]:
+        """
+        Automatically fix recoverable data issues using existing data.
+        Only performs safe fixes where we have the data to support it.
+        """
+        print("\n" + "=" * 60)
+        print("HEAL: Auto-fixing recoverable issues")
+        print("=" * 60)
+        if dry_run:
+            print("  [DRY RUN MODE - no changes will be made]")
+
+        healed = {
+            'duplicates_removed': 0,
+            'burns_reset': 0,
+            'mints_reset': 0,
+            'create_accounts_reset': 0,
+            'fees_backfilled': 0,
+            'guide_edges_created': 0,
+        }
+
+        # 1. Remove duplicate tx_guide rows
+        print("\n  [1/5] Checking for duplicate tx_guide rows...")
+        dup_count = self.run_scalar("""
+            SELECT COUNT(*) FROM (
+                SELECT tx_id, from_address_id, to_address_id, token_id, amount, edge_type_id
+                FROM tx_guide
+                GROUP BY tx_id, from_address_id, to_address_id, token_id, amount, edge_type_id
+                HAVING COUNT(*) > 1
+            ) d
+        """)
+        if dup_count > 0:
+            if not dry_run:
+                self.cursor.execute("""
+                    DELETE g1 FROM tx_guide g1
+                    INNER JOIN tx_guide g2
+                      ON g1.tx_id = g2.tx_id
+                      AND g1.from_address_id = g2.from_address_id
+                      AND g1.to_address_id = g2.to_address_id
+                      AND COALESCE(g1.token_id, 0) = COALESCE(g2.token_id, 0)
+                      AND COALESCE(g1.amount, 0) = COALESCE(g2.amount, 0)
+                      AND g1.edge_type_id = g2.edge_type_id
+                      AND g1.id > g2.id
+                """)
+                healed['duplicates_removed'] = self.cursor.rowcount
+                self.db_conn.commit()
+            print(f"       {'Would remove' if dry_run else 'Removed'} {dup_count} duplicate groups")
+        else:
+            print("       No duplicates found")
+
+        # 2. Reset burns without edges for reprocessing
+        print("\n  [2/5] Checking burns without guide edges...")
+        burns_missing = self.run_scalar("""
+            SELECT COUNT(*) FROM tx_transfer t
+            JOIN tx_activity a ON a.id = t.activity_id
+            LEFT JOIN tx_guide g ON g.source_id = 1 AND g.source_row_id = t.id
+            WHERE t.transfer_type = 'ACTIVITY_SPL_BURN'
+              AND g.id IS NULL
+              AND t.source_owner_address_id IS NOT NULL
+              AND a.guide_loaded = 1
+        """)
+        if burns_missing > 0:
+            if not dry_run:
+                self.cursor.execute("""
+                    UPDATE tx_activity a
+                    JOIN tx_transfer t ON t.activity_id = a.id
+                    LEFT JOIN tx_guide g ON g.source_id = 1 AND g.source_row_id = t.id
+                    SET a.guide_loaded = 0
+                    WHERE t.transfer_type = 'ACTIVITY_SPL_BURN'
+                      AND g.id IS NULL
+                      AND t.source_owner_address_id IS NOT NULL
+                      AND a.guide_loaded = 1
+                """)
+                healed['burns_reset'] = self.cursor.rowcount
+                self.db_conn.commit()
+            print(f"       {'Would reset' if dry_run else 'Reset'} {burns_missing} burns for reprocessing")
+        else:
+            print("       All burns have edges")
+
+        # 3. Reset mints without edges for reprocessing
+        print("\n  [3/5] Checking mints without guide edges...")
+        mints_missing = self.run_scalar("""
+            SELECT COUNT(*) FROM tx_transfer t
+            JOIN tx_activity a ON a.id = t.activity_id
+            LEFT JOIN tx_guide g ON g.source_id = 1 AND g.source_row_id = t.id
+            WHERE t.transfer_type = 'ACTIVITY_SPL_MINT'
+              AND g.id IS NULL
+              AND t.destination_owner_address_id IS NOT NULL
+              AND a.guide_loaded = 1
+        """)
+        if mints_missing > 0:
+            if not dry_run:
+                self.cursor.execute("""
+                    UPDATE tx_activity a
+                    JOIN tx_transfer t ON t.activity_id = a.id
+                    LEFT JOIN tx_guide g ON g.source_id = 1 AND g.source_row_id = t.id
+                    SET a.guide_loaded = 0
+                    WHERE t.transfer_type = 'ACTIVITY_SPL_MINT'
+                      AND g.id IS NULL
+                      AND t.destination_owner_address_id IS NOT NULL
+                      AND a.guide_loaded = 1
+                """)
+                healed['mints_reset'] = self.cursor.rowcount
+                self.db_conn.commit()
+            print(f"       {'Would reset' if dry_run else 'Reset'} {mints_missing} mints for reprocessing")
+        else:
+            print("       All mints have edges")
+
+        # 4. Backfill missing fee data from tx table
+        print("\n  [4/5] Checking for missing fee data...")
+        fees_missing = self.run_scalar("""
+            SELECT COUNT(*) FROM tx_guide g
+            JOIN tx t ON t.id = g.tx_id
+            WHERE g.fee IS NULL AND t.fee IS NOT NULL
+        """)
+        if fees_missing > 0:
+            if not dry_run:
+                self.cursor.execute("""
+                    UPDATE tx_guide g
+                    JOIN tx t ON t.id = g.tx_id
+                    SET g.fee = t.fee, g.priority_fee = t.priority_fee
+                    WHERE g.fee IS NULL AND t.fee IS NOT NULL
+                """)
+                healed['fees_backfilled'] = self.cursor.rowcount
+                self.db_conn.commit()
+            print(f"       {'Would backfill' if dry_run else 'Backfilled'} {fees_missing} fee records")
+        else:
+            print("       All edges have fee data")
+
+        # 5. Process any pending activities
+        print("\n  [5/5] Processing pending activities...")
+        pending = self.run_scalar("SELECT COUNT(*) FROM tx_activity WHERE guide_loaded = 0")
+        if pending > 0 and not dry_run:
+            total_edges = 0
+            batches = 0
+            while batches < 100:  # Max 100 batches to avoid infinite loop
+                self.cursor.execute("CALL sp_tx_guide_batch(5000, @g, @f, @p)")
+                self.cursor.execute("SELECT @g")
+                result = self.cursor.fetchone()
+                edges = list(result.values())[0] if result else 0
+                if edges == 0:
+                    break
+                total_edges += edges
+                batches += 1
+                self.db_conn.commit()
+            healed['guide_edges_created'] = total_edges
+            print(f"       Created {total_edges} guide edges in {batches} batches")
+        elif pending > 0:
+            print(f"       Would process {pending} pending activities")
+        else:
+            print("       No pending activities")
+
+        # Summary
+        print("\n  " + "-" * 50)
+        print("  HEAL SUMMARY:")
+        total_fixed = sum(healed.values())
+        if total_fixed > 0 or dry_run:
+            for key, val in healed.items():
+                if val > 0 or (dry_run and key in ['duplicates_removed', 'burns_reset', 'mints_reset']):
+                    print(f"    - {key.replace('_', ' ').title()}: {val}")
+        else:
+            print("    No issues to heal")
+
+        return healed
+
     def print_summary(self):
         """Print summary of all issues"""
         print("\n" + "=" * 60)
@@ -1421,7 +1585,7 @@ class IntegrityChecker:
     def run_all(self, fix: bool = False, diagnose: bool = False,
                  backfill: bool = False, reset: bool = False,
                  link_orphans: bool = False, enrich_missing: bool = False,
-                 purge_empty_orphans: bool = False,
+                 purge_empty_orphans: bool = False, heal: bool = False,
                  limit: int = 0, batch_size: int = 10000, dry_run: bool = False):
         """Run all checks and optionally fix issues"""
         self.check_row_counts()
@@ -1442,6 +1606,10 @@ class IntegrityChecker:
         # Detailed diagnosis of missing coverage
         if diagnose:
             self.diagnose_missing_coverage()
+
+        # Heal: auto-fix recoverable issues
+        if heal:
+            self.heal(dry_run=dry_run)
 
         # Fix operations
         if fix:
@@ -1478,17 +1646,19 @@ def main():
         epilog="""
 Examples:
   python guide-integrity-check.py                    # Run all checks
+  python guide-integrity-check.py --heal            # Auto-fix all recoverable issues
+  python guide-integrity-check.py --heal --dry-run  # Preview what would be fixed
   python guide-integrity-check.py --diagnose        # Detailed diagnosis of missing coverage
   python guide-integrity-check.py --fix             # Fix duplicates and add unique index
   python guide-integrity-check.py --backfill        # Backfill missing transfer/swap edges
   python guide-integrity-check.py --reset           # Reset stuck activities for reprocessing
   python guide-integrity-check.py --link-orphans    # Link orphaned transfers to activities
   python guide-integrity-check.py --purge-empty-orphans  # Delete empty orphan transfers
-  python guide-integrity-check.py --purge-empty-orphans --dry-run  # Preview purge
   python guide-integrity-check.py --enrich-missing  # Fetch missing owners via Solscan API
-  python guide-integrity-check.py --enrich-missing --limit 500 --dry-run  # Preview enrichment
         """
     )
+    parser.add_argument('--heal', action='store_true',
+                        help='Auto-fix all recoverable issues (duplicates, burns, mints, fees)')
     parser.add_argument('--fix', action='store_true',
                         help='Fix duplicates and add unique index')
     parser.add_argument('--diagnose', action='store_true',
@@ -1527,6 +1697,8 @@ Examples:
     print(f"Database: {args.db_host}:{args.db_port}/{args.db_name}")
 
     modes = []
+    if args.heal:
+        modes.append("HEAL")
     if args.fix:
         modes.append("FIX")
     if args.link_orphans:
@@ -1564,6 +1736,7 @@ Examples:
             link_orphans=args.link_orphans,
             enrich_missing=args.enrich_missing,
             purge_empty_orphans=args.purge_empty_orphans,
+            heal=args.heal,
             limit=args.limit,
             batch_size=args.batch_size,
             dry_run=args.dry_run

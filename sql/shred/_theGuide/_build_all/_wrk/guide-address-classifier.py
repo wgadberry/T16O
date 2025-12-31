@@ -7,6 +7,13 @@ Uses hybrid approach:
 2. Second pass: Solscan API for ambiguous cases
 3. Updates tx_address.address_type in MySQL
 
+Configuration:
+    Copy guide-config.json.example to guide-config.json and fill in your API keys.
+    Alternatively, set environment variables:
+    - SOLANA_RPC_URL: Solana RPC endpoint (e.g., Chainstack, Helius)
+    - SOLSCAN_API_TOKEN: Solscan Pro API JWT token
+    - MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+
 Usage:
     python guide-address-classifier.py                           # Process suspect_wallets_for_rpc_check.txt
     python guide-address-classifier.py --file addresses.txt     # Custom file
@@ -19,37 +26,155 @@ import json
 import time
 import base64
 import struct
-from typing import Dict, List, Optional, Tuple
+import os
+import functools
+import random
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Callable, Any
 from collections import defaultdict
 from datetime import datetime
 
 import requests
 import mysql.connector
 
+
 # =============================================================================
-# Configuration
+# Config Loading
+# =============================================================================
+
+def load_config() -> dict:
+    """
+    Load configuration from JSON file with environment variable fallback.
+
+    Config file search order:
+    1. ./guide-config.json (current directory)
+    2. Same directory as this script
+    3. Environment variables
+    """
+    config = {}
+    config_paths = [
+        Path('./guide-config.json'),
+        Path(__file__).parent / 'guide-config.json',
+    ]
+
+    # Try to load from JSON file
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                print(f"Loaded config from: {config_path}")
+                break
+            except Exception as e:
+                print(f"Warning: Failed to load {config_path}: {e}")
+
+    # Environment variable fallback/override
+    env_mappings = {
+        'RPC_URL': 'SOLANA_RPC_URL',
+        'SOLSCAN_API': 'SOLSCAN_API_URL',
+        'SOLSCAN_TOKEN': 'SOLSCAN_API_TOKEN',
+        'DB_HOST': 'MYSQL_HOST',
+        'DB_PORT': 'MYSQL_PORT',
+        'DB_USER': 'MYSQL_USER',
+        'DB_PASSWORD': 'MYSQL_PASSWORD',
+        'DB_NAME': 'MYSQL_DATABASE',
+    }
+
+    for config_key, env_var in env_mappings.items():
+        if os.environ.get(env_var):
+            config[config_key] = os.environ[env_var]
+            if config_key == 'DB_PORT':
+                config[config_key] = int(config[config_key])
+
+    return config
+
+
+# Load config at module level
+_CONFIG = load_config()
+
+
+# =============================================================================
+# Retry Logic
+# =============================================================================
+
+def retry_with_backoff(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exponential_base: float = 2.0,
+    jitter: bool = True,
+    retryable_exceptions: tuple = (requests.RequestException, ConnectionError, TimeoutError)
+) -> Callable:
+    """
+    Decorator for retrying functions with exponential backoff.
+
+    Args:
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay in seconds
+        max_delay: Maximum delay cap in seconds
+        exponential_base: Base for exponential calculation
+        jitter: Add random jitter to prevent thundering herd
+        retryable_exceptions: Tuple of exceptions to retry on
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            last_exception = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+
+                    if attempt == max_retries:
+                        break
+
+                    # Calculate delay with exponential backoff
+                    delay = min(base_delay * (exponential_base ** attempt), max_delay)
+
+                    # Add jitter (0-50% of delay)
+                    if jitter:
+                        delay = delay * (1 + random.random() * 0.5)
+
+                    print(f"    Retry {attempt + 1}/{max_retries} for {func.__name__} after {delay:.1f}s: {e}")
+                    time.sleep(delay)
+
+            # All retries exhausted
+            raise last_exception
+
+        return wrapper
+    return decorator
+
+# =============================================================================
+# Configuration (loaded from guide-config.json or environment variables)
 # =============================================================================
 
 # Chainstack RPC
-RPC_URL = "https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb"
+RPC_URL = _CONFIG.get('RPC_URL', '')
 
 # Solscan API
-SOLSCAN_API = "https://pro-api.solscan.io/v2.0"
-SOLSCAN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
+SOLSCAN_API = _CONFIG.get('SOLSCAN_API', 'https://pro-api.solscan.io/v2.0')
+SOLSCAN_TOKEN = _CONFIG.get('SOLSCAN_TOKEN', '')
 
 # MySQL
 DB_CONFIG = {
-    'host': 'localhost',
-    'port': 3396,
-    'user': 'root',
-    'password': 'rootpassword',
-    'database': 't16o_db'
+    'host': _CONFIG.get('DB_HOST', 'localhost'),
+    'port': _CONFIG.get('DB_PORT', 3396),
+    'user': _CONFIG.get('DB_USER', 'root'),
+    'password': _CONFIG.get('DB_PASSWORD', ''),
+    'database': _CONFIG.get('DB_NAME', 't16o_db')
 }
 
 # Rate limiting
-RPC_BATCH_SIZE = 100  # Max accounts per getMultipleAccounts call
-RPC_DELAY = 0.2       # Seconds between RPC calls
-SOLSCAN_DELAY = 0.25  # Seconds between Solscan calls (4 req/sec)
+RPC_BATCH_SIZE = _CONFIG.get('RPC_BATCH_SIZE', 100)    # Max accounts per getMultipleAccounts call
+RPC_DELAY = _CONFIG.get('RPC_DELAY', 0.2)              # Seconds between RPC calls
+SOLSCAN_DELAY = _CONFIG.get('SOLSCAN_DELAY', 0.25)     # Seconds between Solscan calls (4 req/sec)
+
+# Retry settings
+RETRY_MAX_ATTEMPTS = _CONFIG.get('RETRY_MAX_ATTEMPTS', 3)
+RETRY_BASE_DELAY = _CONFIG.get('RETRY_BASE_DELAY', 1.0)
+RETRY_MAX_DELAY = _CONFIG.get('RETRY_MAX_DELAY', 30.0)
 
 # =============================================================================
 # Known Program IDs for Classification
@@ -107,8 +232,16 @@ VAULT_PROGRAMS = {
 # RPC Functions
 # =============================================================================
 
+@retry_with_backoff(
+    max_retries=RETRY_MAX_ATTEMPTS,
+    base_delay=RETRY_BASE_DELAY,
+    max_delay=RETRY_MAX_DELAY
+)
 def rpc_get_multiple_accounts(session: requests.Session, addresses: List[str]) -> dict:
     """Fetch multiple accounts in one RPC call"""
+    if not RPC_URL:
+        raise ValueError("RPC_URL not configured. Set in guide-config.json or SOLANA_RPC_URL env var.")
+
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -202,57 +335,101 @@ def classify_from_rpc(account_info: dict, address: str) -> Tuple[str, str]:
 # Solscan Functions
 # =============================================================================
 
+def _solscan_request(session: requests.Session, url: str, params: dict = None) -> requests.Response:
+    """Internal helper for Solscan requests with retry logic"""
+    if not SOLSCAN_TOKEN:
+        raise ValueError("SOLSCAN_TOKEN not configured. Set in guide-config.json or SOLSCAN_API_TOKEN env var.")
+
+    headers = {"token": SOLSCAN_TOKEN}
+    response = session.get(url, headers=headers, params=params, timeout=30)
+    response.raise_for_status()
+    return response
+
+
+@retry_with_backoff(
+    max_retries=RETRY_MAX_ATTEMPTS,
+    base_delay=RETRY_BASE_DELAY,
+    max_delay=RETRY_MAX_DELAY,
+    retryable_exceptions=(requests.RequestException, ConnectionError, TimeoutError)
+)
 def solscan_get_account(session: requests.Session, address: str) -> Optional[dict]:
     """Get account info from Solscan API"""
     url = f"{SOLSCAN_API}/account/{address}"
-    headers = {"token": SOLSCAN_TOKEN}
 
     try:
-        response = session.get(url, headers=headers, timeout=30)
-        if response.status_code == 404:
+        response = _solscan_request(session, url)
+        # Don't retry on 4xx client errors (400, 404, etc.)
+        if response.status_code >= 400 and response.status_code < 500:
             return None
-        response.raise_for_status()
         result = response.json()
         return result.get('data') if result.get('success') else None
-    except Exception as e:
-        print(f"    Solscan error for {address[:16]}...: {e}")
+    except requests.exceptions.HTTPError as e:
+        # Don't retry 4xx errors
+        if e.response is not None and e.response.status_code < 500:
+            return None
+        raise
+    except ValueError as e:
+        # Config error - don't retry
+        print(f"    Config error: {e}")
         return None
 
 
+@retry_with_backoff(
+    max_retries=RETRY_MAX_ATTEMPTS,
+    base_delay=RETRY_BASE_DELAY,
+    max_delay=RETRY_MAX_DELAY,
+    retryable_exceptions=(requests.RequestException, ConnectionError, TimeoutError)
+)
 def solscan_get_data_decoded(session: requests.Session, address: str) -> Optional[dict]:
     """Get decoded account data from Solscan API - reveals Pool structure etc."""
     url = f"{SOLSCAN_API}/account/data-decoded"
-    headers = {"token": SOLSCAN_TOKEN}
     params = {"address": address}
 
     try:
-        response = session.get(url, headers=headers, params=params, timeout=30)
-        if response.status_code == 404:
+        response = _solscan_request(session, url, params)
+        # Don't retry on 4xx client errors (400, 404, etc.)
+        if response.status_code >= 400 and response.status_code < 500:
             return None
-        response.raise_for_status()
         result = response.json()
         # Return the full response as it contains data_decoded at top level
         return result if result.get('data_decoded') else None
-    except Exception as e:
-        print(f"    Solscan data-decoded error for {address[:16]}...: {e}")
+    except requests.exceptions.HTTPError as e:
+        # Don't retry 4xx errors
+        if e.response is not None and e.response.status_code < 500:
+            return None
+        raise
+    except ValueError as e:
+        # Config error - don't retry
+        print(f"    Config error: {e}")
         return None
 
 
+@retry_with_backoff(
+    max_retries=RETRY_MAX_ATTEMPTS,
+    base_delay=RETRY_BASE_DELAY,
+    max_delay=RETRY_MAX_DELAY,
+    retryable_exceptions=(requests.RequestException, ConnectionError, TimeoutError)
+)
 def solscan_get_metadata(session: requests.Session, address: str) -> Optional[dict]:
     """Get account metadata from Solscan API - labels, tags, funding info"""
     url = f"{SOLSCAN_API}/account/metadata"
-    headers = {"token": SOLSCAN_TOKEN}
     params = {"address": address}
 
     try:
-        response = session.get(url, headers=headers, params=params, timeout=30)
-        if response.status_code == 404:
+        response = _solscan_request(session, url, params)
+        # Don't retry on 4xx client errors (400, 404, etc.)
+        if response.status_code >= 400 and response.status_code < 500:
             return None
-        response.raise_for_status()
         result = response.json()
         return result.get('data') if result.get('success') else None
-    except Exception as e:
-        print(f"    Solscan metadata error for {address[:16]}...: {e}")
+    except requests.exceptions.HTTPError as e:
+        # Don't retry 4xx errors
+        if e.response is not None and e.response.status_code < 500:
+            return None
+        raise
+    except ValueError as e:
+        # Config error - don't retry
+        print(f"    Config error: {e}")
         return None
 
 

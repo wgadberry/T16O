@@ -14,33 +14,129 @@ Pipeline position:
 
 Tracks last processed tx_guide.id in config table for efficient incremental updates.
 
+Configuration:
+    Copy guide-config.json.example to guide-config.json and fill in your API keys.
+    Alternatively, set environment variables:
+    - SOLSCAN_API_TOKEN: Solscan Pro API JWT token (for --db-sync-unknown)
+    - MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+
 Usage:
     python guide-sync-funding.py                       # Sync both tables
     python guide-sync-funding.py --table funding       # Only tx_funding_edge
     python guide-sync-funding.py --table participant   # Only tx_token_participant
     python guide-sync-funding.py --daemon --interval 60  # Run continuously
+    python guide-sync-funding.py --db-sync-unknown     # Fetch funders for unknown addresses via Solscan
 """
 
 import argparse
 import sys
 import time
 import random
+import os
+import json
+import functools
+from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional, Dict, Any, Callable, List, Tuple
+
+import requests
 import mysql.connector
 from mysql.connector import Error
+
+
+# =============================================================================
+# Config Loading
+# =============================================================================
+
+def load_config() -> dict:
+    """
+    Load configuration from JSON file with environment variable fallback.
+    """
+    config = {}
+    config_paths = [
+        Path('./guide-config.json'),
+        Path(__file__).parent / 'guide-config.json',
+    ]
+
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                break
+            except Exception:
+                pass
+
+    # Environment variable fallback/override
+    env_mappings = {
+        'SOLSCAN_API': 'SOLSCAN_API_URL',
+        'SOLSCAN_TOKEN': 'SOLSCAN_API_TOKEN',
+        'DB_HOST': 'MYSQL_HOST',
+        'DB_PORT': 'MYSQL_PORT',
+        'DB_USER': 'MYSQL_USER',
+        'DB_PASSWORD': 'MYSQL_PASSWORD',
+        'DB_NAME': 'MYSQL_DATABASE',
+    }
+
+    for config_key, env_var in env_mappings.items():
+        if os.environ.get(env_var):
+            config[config_key] = os.environ[env_var]
+            if config_key == 'DB_PORT':
+                config[config_key] = int(config[config_key])
+
+    return config
+
+
+_CONFIG = load_config()
+
+
+# =============================================================================
+# Retry Logic
+# =============================================================================
+
+def retry_with_backoff(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retryable_exceptions: tuple = (requests.RequestException, ConnectionError, TimeoutError)
+) -> Callable:
+    """Decorator for retrying functions with exponential backoff."""
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            last_exception = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+                    if attempt == max_retries:
+                        break
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    delay = delay * (1 + random.random() * 0.5)
+                    print(f"    Retry {attempt + 1}/{max_retries} after {delay:.1f}s: {e}")
+                    time.sleep(delay)
+            raise last_exception
+        return wrapper
+    return decorator
 
 # Deadlock retry settings
 MAX_DEADLOCK_RETRIES = 5
 DEADLOCK_BASE_DELAY = 0.1  # seconds
 
-# Database configuration
+# Database configuration (from config file or env vars)
 DB_CONFIG = {
-    'host': 'localhost',
-    'port': 3396,
-    'user': 'root',
-    'password': 'rootpassword',
-    'database': 't16o_db'
+    'host': _CONFIG.get('DB_HOST', 'localhost'),
+    'port': _CONFIG.get('DB_PORT', 3396),
+    'user': _CONFIG.get('DB_USER', 'root'),
+    'password': _CONFIG.get('DB_PASSWORD', ''),
+    'database': _CONFIG.get('DB_NAME', 't16o_db')
 }
+
+# Solscan API configuration
+SOLSCAN_API = _CONFIG.get('SOLSCAN_API', 'https://pro-api.solscan.io/v2.0')
+SOLSCAN_TOKEN = _CONFIG.get('SOLSCAN_TOKEN', '')
+SOLSCAN_DELAY = _CONFIG.get('SOLSCAN_DELAY', 0.25)  # 4 req/sec
 
 # Config keys
 CONFIG_TYPE = 'sync'
@@ -374,6 +470,302 @@ def backfill_funding_edges(cursor, conn) -> int:
     return total_updated
 
 
+# =============================================================================
+# Solscan API Functions for Unknown Funder Sync
+# =============================================================================
+
+def _is_retryable_error(e: Exception) -> bool:
+    """Check if an HTTP error should be retried (only 5xx server errors)."""
+    if isinstance(e, requests.exceptions.HTTPError):
+        if e.response is not None:
+            # Only retry on 5xx server errors, not 4xx client errors
+            return e.response.status_code >= 500
+    return True  # Retry connection errors, timeouts, etc.
+
+
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=30.0)
+def solscan_get_first_transfer(session: requests.Session, address: str) -> Optional[Dict]:
+    """
+    Get the first SOL transfer to this address (the funder) via Solscan API.
+    Returns dict with funder address and transaction info, or None if not found.
+    """
+    if not SOLSCAN_TOKEN:
+        raise ValueError("SOLSCAN_TOKEN not configured. Set in guide-config.json or SOLSCAN_API_TOKEN env var.")
+
+    url = f"{SOLSCAN_API}/account/transfer"
+    headers = {"token": SOLSCAN_TOKEN}
+    params = {
+        "address": address,
+        "activity_type": "ACTIVITY_SPL_TRANSFER",  # Will also catch SOL
+        "page": 1,
+        "page_size": 1,
+        "sort_by": "block_time",
+        "sort_order": "asc"  # Oldest first
+    }
+
+    try:
+        response = session.get(url, headers=headers, params=params, timeout=30)
+
+        # Don't retry on 4xx client errors (400, 404, etc.)
+        if response.status_code >= 400 and response.status_code < 500:
+            return None
+
+        response.raise_for_status()
+        result = response.json()
+
+        if not result.get('success') or not result.get('data'):
+            return None
+
+        transfers = result['data']
+        if not transfers:
+            return None
+
+        # Find first incoming transfer (where this address is the recipient)
+        for xfer in transfers:
+            to_addr = xfer.get('to_address')
+            from_addr = xfer.get('from_address')
+
+            if to_addr == address and from_addr and from_addr != address:
+                return {
+                    'funder_address': from_addr,
+                    'tx_hash': xfer.get('trans_id'),
+                    'block_time': xfer.get('block_time'),
+                    'amount': xfer.get('amount'),
+                    'token': xfer.get('token_address', 'SOL')
+                }
+
+        return None
+
+    except requests.exceptions.HTTPError as e:
+        # Don't retry 4xx errors
+        if e.response is not None and e.response.status_code < 500:
+            return None
+        raise
+    except ValueError:
+        return None
+
+
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=30.0)
+def solscan_get_sol_transfers(session: requests.Session, address: str) -> Optional[Dict]:
+    """
+    Get first SOL transfer to this address via Solscan sol-transfer endpoint.
+    More reliable for finding the initial funding transaction.
+    """
+    if not SOLSCAN_TOKEN:
+        raise ValueError("SOLSCAN_TOKEN not configured.")
+
+    url = f"{SOLSCAN_API}/account/transfer"
+    headers = {"token": SOLSCAN_TOKEN}
+    params = {
+        "address": address,
+        "activity_type": "ACTIVITY_SOL_TRANSFER",
+        "flow": "in",  # Only incoming
+        "page": 1,
+        "page_size": 1,
+        "sort_by": "block_time",
+        "sort_order": "asc"
+    }
+
+    try:
+        response = session.get(url, headers=headers, params=params, timeout=30)
+
+        # Don't retry on 4xx client errors (400, 404, etc.)
+        if response.status_code >= 400 and response.status_code < 500:
+            return None
+
+        response.raise_for_status()
+        result = response.json()
+
+        if not result.get('success') or not result.get('data'):
+            return None
+
+        transfers = result['data']
+        if not transfers:
+            return None
+
+        xfer = transfers[0]
+        from_addr = xfer.get('from_address')
+
+        if from_addr and from_addr != address:
+            return {
+                'funder_address': from_addr,
+                'tx_hash': xfer.get('trans_id'),
+                'block_time': xfer.get('block_time'),
+                'amount': xfer.get('amount'),
+                'token': 'SOL'
+            }
+
+        return None
+
+    except requests.exceptions.HTTPError as e:
+        # Don't retry 4xx errors
+        if e.response is not None and e.response.status_code < 500:
+            return None
+        raise
+    except ValueError:
+        return None
+
+
+def sync_unknown_funders(
+    cursor,
+    conn,
+    limit: int = 1000,
+    dry_run: bool = False,
+    verbose: bool = True
+) -> Dict[str, int]:
+    """
+    Scan tx_address for addresses with unknown funders and attempt to
+    discover their funder via Solscan API.
+
+    Targets addresses where:
+    - funded_by_address_id IS NULL
+    - init_tx_fetched = 0 (not yet attempted)
+    - address_type IN ('wallet', 'unknown')
+
+    Returns stats dict with counts.
+    """
+    stats = {
+        'scanned': 0,
+        'found': 0,
+        'not_found': 0,
+        'errors': 0,
+        'skipped': 0
+    }
+
+    if not SOLSCAN_TOKEN:
+        print("ERROR: SOLSCAN_TOKEN not configured. Set in guide-config.json or SOLSCAN_API_TOKEN env var.")
+        return stats
+
+    print(f"\n{'='*70}")
+    print(f"SYNC UNKNOWN FUNDERS via Solscan API")
+    print(f"{'='*70}")
+    print(f"Dry run: {dry_run}")
+    print(f"Limit: {limit}")
+    print()
+
+    # Query for addresses needing funder lookup
+    query = """
+        SELECT id, address
+        FROM tx_address
+        WHERE funded_by_address_id IS NULL
+          AND init_tx_fetched = 0
+          AND address_type IN ('wallet', 'unknown')
+        ORDER BY id ASC
+        LIMIT %s
+    """
+    cursor.execute(query, (limit,))
+    addresses = cursor.fetchall()
+
+    if not addresses:
+        print("No addresses found needing funder lookup.")
+        return stats
+
+    print(f"Found {len(addresses)} addresses to process...")
+
+    session = requests.Session()
+
+    for i, (addr_id, address) in enumerate(addresses):
+        stats['scanned'] += 1
+
+        if verbose and (i + 1) % 50 == 0:
+            print(f"  Progress: {i + 1}/{len(addresses)} "
+                  f"(found: {stats['found']}, not_found: {stats['not_found']}, errors: {stats['errors']})")
+
+        try:
+            # Mark as in-progress (init_tx_fetched = 2) to prevent duplicate work
+            if not dry_run:
+                cursor.execute(
+                    "UPDATE tx_address SET init_tx_fetched = 2 WHERE id = %s AND init_tx_fetched = 0",
+                    (addr_id,)
+                )
+                conn.commit()
+                if cursor.rowcount == 0:
+                    stats['skipped'] += 1
+                    continue
+
+            # Try SOL transfers only (most common funding method)
+            funder_info = solscan_get_sol_transfers(session, address)
+
+            if funder_info:
+                funder_address = funder_info['funder_address']
+
+                if dry_run:
+                    print(f"  [DRY] {address[:16]}... <- {funder_address[:16]}...")
+                    stats['found'] += 1
+                else:
+                    # Ensure funder address exists in tx_address
+                    cursor.execute(
+                        "SELECT id FROM tx_address WHERE address = %s",
+                        (funder_address,)
+                    )
+                    row = cursor.fetchone()
+
+                    if row:
+                        funder_id = row[0]
+                    else:
+                        cursor.execute(
+                            "INSERT INTO tx_address (address, address_type) VALUES (%s, 'unknown')",
+                            (funder_address,)
+                        )
+                        conn.commit()
+                        funder_id = cursor.lastrowid
+
+                    # Update the target address with funder info
+                    cursor.execute("""
+                        UPDATE tx_address
+                        SET funded_by_address_id = %s,
+                            init_tx_fetched = 1,
+                            init_tx_hash = %s
+                        WHERE id = %s
+                    """, (funder_id, funder_info.get('tx_hash'), addr_id))
+                    conn.commit()
+
+                    stats['found'] += 1
+
+                    if verbose:
+                        print(f"  [{i+1}] {address[:20]}... <- {funder_address[:20]}...")
+
+            else:
+                # No funder found - mark as attempted
+                if not dry_run:
+                    cursor.execute(
+                        "UPDATE tx_address SET init_tx_fetched = 1 WHERE id = %s",
+                        (addr_id,)
+                    )
+                    conn.commit()
+
+                stats['not_found'] += 1
+
+            time.sleep(SOLSCAN_DELAY)
+
+        except Exception as e:
+            stats['errors'] += 1
+            if verbose:
+                print(f"  ERROR for {address[:20]}...: {e}")
+
+            # Reset to allow retry later
+            if not dry_run:
+                cursor.execute(
+                    "UPDATE tx_address SET init_tx_fetched = 0 WHERE id = %s",
+                    (addr_id,)
+                )
+                conn.commit()
+
+            time.sleep(SOLSCAN_DELAY * 2)  # Extra delay on error
+
+    # Final summary
+    print(f"\n{'='*70}")
+    print(f"SYNC COMPLETE")
+    print(f"{'='*70}")
+    print(f"  Scanned:   {stats['scanned']:,}")
+    print(f"  Found:     {stats['found']:,}")
+    print(f"  Not found: {stats['not_found']:,}")
+    print(f"  Errors:    {stats['errors']:,}")
+    print(f"  Skipped:   {stats['skipped']:,}")
+
+    return stats
+
+
 def run_sync(cursor, conn, table: str = 'both', batch_size: int = 10000, verbose: bool = True) -> dict:
     """
     Run sync for specified table(s).
@@ -437,10 +829,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python sync-funding-tables.py                        # Sync both tables once
-  python sync-funding-tables.py --table funding        # Only tx_funding_edge
-  python sync-funding-tables.py --daemon --interval 60 # Run every 60 seconds
-  python sync-funding-tables.py --status               # Show current sync status
+  python guide-sync-funding.py                         # Sync both tables once
+  python guide-sync-funding.py --table funding         # Only tx_funding_edge
+  python guide-sync-funding.py --daemon --interval 60  # Run every 60 seconds
+  python guide-sync-funding.py --status                # Show current sync status
+  python guide-sync-funding.py --db-sync-unknown       # Fetch funders via Solscan
+  python guide-sync-funding.py --db-sync-unknown --limit 5000  # Process 5000 addresses
+  python guide-sync-funding.py --db-sync-unknown --dry-run     # Preview without DB changes
         """
     )
 
@@ -458,6 +853,12 @@ Examples:
                         help='Minimal output')
     parser.add_argument('--backfill', action='store_true',
                         help='Backfill edges with missing total_sol or total_tokens from tx_guide')
+    parser.add_argument('--db-sync-unknown', action='store_true',
+                        help='Fetch funders for unknown addresses via Solscan API')
+    parser.add_argument('--limit', '-l', type=int, default=1000,
+                        help='Limit addresses to process for --db-sync-unknown (default: 1000)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Preview changes without updating database (for --db-sync-unknown)')
 
     args = parser.parse_args()
 
@@ -482,6 +883,16 @@ Examples:
             print("Backfilling funding edges with missing data...")
             count = backfill_funding_edges(cursor, conn)
             print(f"  Updated {count:,} funding edge records")
+            return
+
+        if args.db_sync_unknown:
+            # Sync unknown funders via Solscan API
+            stats = sync_unknown_funders(
+                cursor, conn,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                verbose=not args.quiet
+            )
             return
 
         if args.daemon:

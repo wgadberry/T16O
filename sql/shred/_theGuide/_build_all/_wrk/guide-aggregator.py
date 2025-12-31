@@ -5,13 +5,14 @@ Guide Aggregator - Consolidated daemon for guide table synchronization
 Merges functionality from:
 - guide-loader.py: Processes tx_activity into tx_guide via sp_tx_guide_batch
 - guide-sync-funding.py: Syncs tx_funding_edge and tx_token_participant
+- tx_bmap_state: Pre-computed running balances for BMap visualization
 
 Pipeline position:
     guide-shredder.py → tx_activity, tx_swap, tx_transfer
                              ↓
                     guide-aggregator.py (this script)
                              ↓
-              tx_guide, tx_funding_edge, tx_token_participant
+              tx_guide, tx_funding_edge, tx_token_participant, tx_bmap_state
 
 Usage:
     python guide-aggregator.py                          # All operations, single run
@@ -19,6 +20,7 @@ Usage:
     python guide-aggregator.py --sync guide             # Only sp_tx_guide_batch
     python guide-aggregator.py --sync funding           # Only tx_funding_edge
     python guide-aggregator.py --sync tokens            # Only tx_token_participant
+    python guide-aggregator.py --sync bmap              # Only tx_bmap_state
     python guide-aggregator.py --sync funding,tokens    # Multiple operations
     python guide-aggregator.py --status                 # Show sync status
 """
@@ -100,6 +102,7 @@ DEADLOCK_BASE_DELAY = 0.1
 CONFIG_TYPE = 'sync'
 FUNDING_EDGE_KEY = 'funding_edge_last_guide_id'
 TOKEN_PARTICIPANT_KEY = 'token_participant_last_guide_id'
+BMAP_STATE_KEY = 'bmap_state_last_guide_id'
 
 
 # =============================================================================
@@ -416,6 +419,118 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
 
 
 # =============================================================================
+# BMap State Sync (running balances for visualization)
+# =============================================================================
+
+def get_affected_tokens(cursor, last_id: int, max_id: int) -> List[int]:
+    """Get list of token_ids that have new tx_guide edges since last_id."""
+    cursor.execute("""
+        SELECT DISTINCT token_id
+        FROM tx_guide
+        WHERE id > %s AND id <= %s
+          AND token_id IS NOT NULL
+        ORDER BY token_id
+    """, (last_id, max_id))
+    return [row[0] for row in cursor.fetchall()]
+
+
+def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
+    """
+    Recalculate tx_bmap_state for a single token.
+    Hybrid approach: delete existing + rebuild using window function.
+    Returns rows inserted.
+    """
+    # Delete existing state for this token
+    cursor.execute("DELETE FROM tx_bmap_state WHERE token_id = %s", (token_id,))
+    conn.commit()
+
+    # Rebuild running balances using the same logic as sp_tx_bmap_state_backfill
+    query = """
+        INSERT INTO tx_bmap_state (token_id, tx_id, address_id, delta, balance, block_time)
+        SELECT
+            token_id,
+            tx_id,
+            address_id,
+            delta,
+            SUM(delta) OVER (
+                PARTITION BY token_id, address_id
+                ORDER BY block_time, tx_id
+            ) AS balance,
+            block_time
+        FROM (
+            SELECT
+                g.token_id,
+                g.tx_id,
+                g.address_id,
+                SUM(g.delta) AS delta,
+                t.block_time
+            FROM (
+                -- Inflows (to_address receives)
+                SELECT
+                    token_id,
+                    tx_id,
+                    to_address_id AS address_id,
+                    (amount / POW(10, COALESCE(decimals, 9))) AS delta
+                FROM tx_guide
+                WHERE token_id = %s
+                  AND to_address_id IS NOT NULL
+
+                UNION ALL
+
+                -- Outflows (from_address sends) - negative
+                SELECT
+                    token_id,
+                    tx_id,
+                    from_address_id AS address_id,
+                    -(amount / POW(10, COALESCE(decimals, 9))) AS delta
+                FROM tx_guide
+                WHERE token_id = %s
+                  AND from_address_id IS NOT NULL
+            ) g
+            JOIN tx t ON t.id = g.tx_id
+            GROUP BY g.token_id, g.tx_id, g.address_id, t.block_time
+        ) deltas
+        ORDER BY token_id, address_id, block_time, tx_id
+    """
+    cursor.execute(query, (token_id, token_id))
+    rows = cursor.rowcount
+    conn.commit()
+    return rows
+
+
+def sync_bmap_state(cursor, conn, last_id: int, max_id: int,
+                    verbose: bool = True) -> Dict[str, int]:
+    """
+    Sync tx_bmap_state using hybrid approach:
+    - Find tokens with new activity since last_id
+    - Recalculate only affected tokens (not full table rebuild)
+
+    Returns dict with tokens_processed, rows_inserted.
+    """
+    if last_id >= max_id:
+        return {'tokens': 0, 'rows': 0}
+
+    # Get tokens that have new edges
+    affected_tokens = get_affected_tokens(cursor, last_id, max_id)
+
+    if not affected_tokens:
+        return {'tokens': 0, 'rows': 0}
+
+    if verbose:
+        print(f"    Found {len(affected_tokens):,} tokens with new activity")
+
+    total_rows = 0
+    for i, token_id in enumerate(affected_tokens):
+        rows = recalc_token_bmap_state(cursor, conn, token_id)
+        total_rows += rows
+
+        if verbose and (i + 1) % 100 == 0:
+            print(f"    Progress: {i + 1}/{len(affected_tokens)} tokens, {total_rows:,} rows")
+
+    return {'tokens': len(affected_tokens), 'rows': total_rows}
+
+
+# =============================================================================
 # Main Aggregation Logic
 # =============================================================================
 
@@ -424,7 +539,7 @@ def run_sync(cursor, conn, operations: List[str], batch_size: int = 10000,
              verbose: bool = True) -> Dict[str, Any]:
     """
     Run sync for specified operations.
-    operations: list containing 'guide', 'funding', 'tokens'
+    operations: list containing 'guide', 'funding', 'tokens', 'bmap'
     Returns stats dict.
     """
     stats = {
@@ -432,6 +547,7 @@ def run_sync(cursor, conn, operations: List[str], batch_size: int = 10000,
         'guide': {'pending': 0, 'batches': 0, 'edges': 0},
         'funding': {'last_id': 0, 'new_id': 0, 'rows': 0},
         'tokens': {'last_id': 0, 'new_id': 0, 'rows': 0},
+        'bmap': {'last_id': 0, 'new_id': 0, 'tokens': 0, 'rows': 0},
     }
 
     # Guide edges (sp_tx_guide_batch)
@@ -487,6 +603,25 @@ def run_sync(cursor, conn, operations: List[str], batch_size: int = 10000,
             if verbose:
                 print(f"  [tokens] Up to date (id={last_id:,})")
 
+    # BMap state (running balances for visualization)
+    if 'bmap' in operations:
+        last_id = get_last_processed_id(cursor, BMAP_STATE_KEY)
+        stats['bmap']['last_id'] = last_id
+
+        if last_id < max_id:
+            if verbose:
+                print(f"  [bmap] Syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} records)")
+            result = sync_bmap_state(cursor, conn, last_id, max_id, verbose)
+            set_last_processed_id(cursor, conn, BMAP_STATE_KEY, max_id)
+            stats['bmap']['new_id'] = max_id
+            stats['bmap']['tokens'] = result['tokens']
+            stats['bmap']['rows'] = result['rows']
+            if verbose:
+                print(f"  [bmap] {result['tokens']:,} tokens, {result['rows']:,} rows")
+        else:
+            if verbose:
+                print(f"  [bmap] Up to date (id={last_id:,})")
+
     return stats
 
 
@@ -496,6 +631,11 @@ def get_sync_status(cursor) -> Dict[str, Any]:
     pending = get_pending_activity_count(cursor)
     funding_last = get_last_processed_id(cursor, FUNDING_EDGE_KEY)
     tokens_last = get_last_processed_id(cursor, TOKEN_PARTICIPANT_KEY)
+    bmap_last = get_last_processed_id(cursor, BMAP_STATE_KEY)
+
+    # Get bmap state row count
+    cursor.execute("SELECT COUNT(*) FROM tx_bmap_state")
+    bmap_rows = cursor.fetchone()[0]
 
     return {
         'max_guide_id': max_id,
@@ -508,6 +648,11 @@ def get_sync_status(cursor) -> Dict[str, Any]:
             'last_synced': tokens_last,
             'behind': max_id - tokens_last,
         },
+        'bmap': {
+            'last_synced': bmap_last,
+            'behind': max_id - bmap_last,
+            'rows': bmap_rows,
+        },
     }
 
 
@@ -516,10 +661,12 @@ def print_status(status: Dict):
     print(f"\n{'='*60}")
     print(f"Guide Aggregator Status")
     print(f"{'='*60}")
-    print(f"  tx_guide max id:        {status['max_guide_id']:,}")
-    print(f"  Pending activities:     {status['pending_activities']:,}")
-    print(f"  Funding edge synced:    {status['funding']['last_synced']:,} (behind: {status['funding']['behind']:,})")
+    print(f"  tx_guide max id:          {status['max_guide_id']:,}")
+    print(f"  Pending activities:       {status['pending_activities']:,}")
+    print(f"  Funding edge synced:      {status['funding']['last_synced']:,} (behind: {status['funding']['behind']:,})")
     print(f"  Token participant synced: {status['tokens']['last_synced']:,} (behind: {status['tokens']['behind']:,})")
+    print(f"  BMap state synced:        {status['bmap']['last_synced']:,} (behind: {status['bmap']['behind']:,})")
+    print(f"  BMap state rows:          {status['bmap']['rows']:,}")
     print(f"{'='*60}\n")
 
 
@@ -536,6 +683,7 @@ Operations (--sync):
   guide   - Process tx_activity into tx_guide via sp_tx_guide_batch
   funding - Sync tx_funding_edge from tx_guide
   tokens  - Sync tx_token_participant from tx_guide
+  bmap    - Sync tx_bmap_state running balances
   all     - All operations (default)
 
 Examples:
@@ -543,12 +691,13 @@ Examples:
   python guide-aggregator.py --daemon --interval 30   # Continuous mode
   python guide-aggregator.py --sync guide             # Only sp_tx_guide_batch
   python guide-aggregator.py --sync funding,tokens    # Multiple operations
+  python guide-aggregator.py --sync bmap              # Only bmap state sync
   python guide-aggregator.py --status                 # Show sync status
         """
     )
 
     parser.add_argument('--sync', '-s', type=str, default='all',
-                        help='Operations to run: guide,funding,tokens,all (default: all)')
+                        help='Operations to run: guide,funding,tokens,bmap,all (default: all)')
     parser.add_argument('--daemon', '-d', action='store_true',
                         help='Run continuously in daemon mode')
     parser.add_argument('--interval', '-i', type=int, default=30,
@@ -574,13 +723,13 @@ Examples:
 
     # Parse operations
     if args.sync.lower() == 'all':
-        operations = ['guide', 'funding', 'tokens']
+        operations = ['guide', 'funding', 'tokens', 'bmap']
     else:
         operations = [op.strip().lower() for op in args.sync.split(',')]
-        valid_ops = {'guide', 'funding', 'tokens'}
+        valid_ops = {'guide', 'funding', 'tokens', 'bmap'}
         invalid = set(operations) - valid_ops
         if invalid:
-            print(f"Error: Invalid operations: {invalid}. Valid: guide, funding, tokens, all")
+            print(f"Error: Invalid operations: {invalid}. Valid: guide, funding, tokens, bmap, all")
             return 1
 
     conn = get_db_connection()
@@ -624,7 +773,8 @@ Examples:
                     elif not args.quiet:
                         total = (stats['guide']['edges'] +
                                 stats['funding']['rows'] +
-                                stats['tokens']['rows'])
+                                stats['tokens']['rows'] +
+                                stats['bmap']['rows'])
                         if total > 0:
                             print(f"[{timestamp}] Complete: {total:,} rows affected\n")
                         else:
@@ -668,13 +818,15 @@ Examples:
             elif not args.quiet:
                 total = (stats['guide']['edges'] +
                         stats['funding']['rows'] +
-                        stats['tokens']['rows'])
+                        stats['tokens']['rows'] +
+                        stats['bmap']['rows'])
                 print(f"\n{'='*60}")
                 print(f"Sync Complete")
                 print(f"{'='*60}")
                 print(f"  Guide edges:        {stats['guide']['edges']:,}")
                 print(f"  Funding rows:       {stats['funding']['rows']:,}")
                 print(f"  Token participant:  {stats['tokens']['rows']:,}")
+                print(f"  BMap state:         {stats['bmap']['rows']:,} rows ({stats['bmap']['tokens']:,} tokens)")
                 print(f"  Total:              {total:,}")
                 print(f"{'='*60}\n")
 
