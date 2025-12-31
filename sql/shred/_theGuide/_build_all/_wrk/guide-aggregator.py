@@ -104,6 +104,9 @@ FUNDING_EDGE_KEY = 'funding_edge_last_guide_id'
 TOKEN_PARTICIPANT_KEY = 'token_participant_last_guide_id'
 BMAP_STATE_KEY = 'bmap_state_last_guide_id'
 
+# Base tokens to exclude from bmap sync (appear in almost every tx, not useful for analysis)
+BMAP_EXCLUDE_SYMBOLS = {'SOL', 'WSOL', 'USDC', 'USDT'}
+
 
 # =============================================================================
 # Database Utilities
@@ -422,15 +425,33 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
 # BMap State Sync (running balances for visualization)
 # =============================================================================
 
-def get_affected_tokens(cursor, last_id: int, max_id: int) -> List[int]:
-    """Get list of token_ids that have new tx_guide edges since last_id."""
-    cursor.execute("""
-        SELECT DISTINCT token_id
-        FROM tx_guide
-        WHERE id > %s AND id <= %s
-          AND token_id IS NOT NULL
-        ORDER BY token_id
-    """, (last_id, max_id))
+def get_affected_tokens(cursor, last_id: int, max_id: int,
+                        exclude_symbols: set = None) -> List[int]:
+    """Get list of token_ids that have new tx_guide edges since last_id.
+
+    Args:
+        exclude_symbols: Set of token symbols to exclude (e.g., {'SOL', 'WSOL', 'USDC'})
+    """
+    if exclude_symbols:
+        # Build placeholders for IN clause
+        placeholders = ','.join(['%s'] * len(exclude_symbols))
+        cursor.execute(f"""
+            SELECT DISTINCT g.token_id
+            FROM tx_guide g
+            JOIN tx_token t ON t.id = g.token_id
+            WHERE g.id > %s AND g.id <= %s
+              AND g.token_id IS NOT NULL
+              AND (t.token_symbol IS NULL OR t.token_symbol NOT IN ({placeholders}))
+            ORDER BY g.token_id
+        """, (last_id, max_id, *exclude_symbols))
+    else:
+        cursor.execute("""
+            SELECT DISTINCT token_id
+            FROM tx_guide
+            WHERE id > %s AND id <= %s
+              AND token_id IS NOT NULL
+            ORDER BY token_id
+        """, (last_id, max_id))
     return [row[0] for row in cursor.fetchall()]
 
 
@@ -499,25 +520,36 @@ def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
 
 
 def sync_bmap_state(cursor, conn, last_id: int, max_id: int,
-                    verbose: bool = True) -> Dict[str, int]:
+                    verbose: bool = True,
+                    exclude_symbols: set = None) -> Dict[str, int]:
     """
     Sync tx_bmap_state using hybrid approach:
     - Find tokens with new activity since last_id
     - Recalculate only affected tokens (not full table rebuild)
+    - Excludes base tokens (SOL, WSOL, USDC, USDT) by default
 
-    Returns dict with tokens_processed, rows_inserted.
+    Returns dict with tokens_processed, rows_inserted, skipped.
     """
     if last_id >= max_id:
-        return {'tokens': 0, 'rows': 0}
+        return {'tokens': 0, 'rows': 0, 'skipped': 0}
 
-    # Get tokens that have new edges
-    affected_tokens = get_affected_tokens(cursor, last_id, max_id)
+    # Use default exclusions if not specified
+    if exclude_symbols is None:
+        exclude_symbols = BMAP_EXCLUDE_SYMBOLS
+
+    # Get tokens that have new edges (excluding base tokens)
+    affected_tokens = get_affected_tokens(cursor, last_id, max_id, exclude_symbols)
 
     if not affected_tokens:
-        return {'tokens': 0, 'rows': 0}
+        if verbose and exclude_symbols:
+            print(f"    No tokens to sync (excluding {', '.join(sorted(exclude_symbols))})")
+        return {'tokens': 0, 'rows': 0, 'skipped': 0}
 
     if verbose:
-        print(f"    Found {len(affected_tokens):,} tokens with new activity")
+        msg = f"    Found {len(affected_tokens):,} tokens with new activity"
+        if exclude_symbols:
+            msg += f" (excluding {', '.join(sorted(exclude_symbols))})"
+        print(msg)
 
     total_rows = 0
     for i, token_id in enumerate(affected_tokens):
@@ -527,7 +559,7 @@ def sync_bmap_state(cursor, conn, last_id: int, max_id: int,
         if verbose and (i + 1) % 100 == 0:
             print(f"    Progress: {i + 1}/{len(affected_tokens)} tokens, {total_rows:,} rows")
 
-    return {'tokens': len(affected_tokens), 'rows': total_rows}
+    return {'tokens': len(affected_tokens), 'rows': total_rows, 'skipped': len(exclude_symbols) if exclude_symbols else 0}
 
 
 # =============================================================================
