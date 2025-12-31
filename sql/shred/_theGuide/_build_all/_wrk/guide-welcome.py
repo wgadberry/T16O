@@ -775,7 +775,8 @@ def launch_worker(worker: dict, mint_address: str = None) -> bool:
     # Build the command - use single quotes for paths to avoid escaping issues
     extra_args = worker.get("args", "")
     if worker["needs_mint"] and mint_address:
-        py_cmd = f"python '{script_path}' {mint_address} {extra_args}".strip()
+        # Limit signature fetch to 1000 for requested mint address
+        py_cmd = f"python '{script_path}' {mint_address} --limit 1000 {extra_args}".strip()
     else:
         py_cmd = f"python '{script_path}' {extra_args}".strip()
 
