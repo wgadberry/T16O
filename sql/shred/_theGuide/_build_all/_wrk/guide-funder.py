@@ -85,8 +85,24 @@ KNOWN_PROGRAMS = {
     'So11111111111111111111111111111111111111112',  # SOL Mint variant
 }
 
+# Address prefixes to skip (system/MEV addresses that won't have funders)
+SKIP_PREFIXES = (
+    'jitodontfront',  # Jito tip accounts
+    'Jito',           # Jito-related
+)
+
 # Rate limiting
 API_DELAY = 0.15  # seconds between API calls
+
+
+def should_skip_address(address: str) -> bool:
+    """Check if address should be skipped (programs, system addresses, etc.)"""
+    if address in KNOWN_PROGRAMS:
+        return True
+    for prefix in SKIP_PREFIXES:
+        if address.startswith(prefix):
+            return True
+    return False
 
 
 # =============================================================================
@@ -475,8 +491,8 @@ class AddressHistoryWorker:
         Fetch first transactions for address and find funding wallet.
         Returns funding info dict or None.
         """
-        # Skip known programs
-        if address in KNOWN_PROGRAMS:
+        # Skip known programs and system addresses
+        if should_skip_address(address):
             return None
 
         time.sleep(self.api_delay)
@@ -493,8 +509,8 @@ class AddressHistoryWorker:
         """
         signatures = set()
 
-        # Skip known programs
-        if address in KNOWN_PROGRAMS:
+        # Skip known programs and system addresses
+        if should_skip_address(address):
             return signatures
 
         # Determine which APIs to call based on address type
@@ -550,8 +566,8 @@ class AddressHistoryWorker:
             except json.JSONDecodeError:
                 continue
 
-        # Filter out known programs
-        all_addresses = all_addresses - KNOWN_PROGRAMS
+        # Filter out known programs and system addresses
+        all_addresses = {a for a in all_addresses if not should_skip_address(a)}
 
         print(f"  Unique addresses: {len(all_addresses)}")
 
@@ -788,8 +804,8 @@ def main():
                     if addr and not addr.startswith('#') and len(addr) >= 32:
                         all_addresses.append(addr)
 
-            # Filter out known programs
-            all_addresses = [a for a in all_addresses if a not in KNOWN_PROGRAMS]
+            # Filter out known programs and skip prefixes
+            all_addresses = [a for a in all_addresses if not should_skip_address(a)]
             print(f"Loaded {len(all_addresses)} addresses from file")
         else:
             # sync-db-missing mode: will query DB after FileWorker is created
@@ -860,7 +876,7 @@ def main():
                 return claimed
 
             def find_funder_for_address(self, address):
-                if address in KNOWN_PROGRAMS:
+                if should_skip_address(address):
                     return None
                 time.sleep(self.api_delay)
                 data = self.solscan.get_account_transfers(address, self.tx_limit)
@@ -950,12 +966,19 @@ def main():
                     print("\nNo more addresses to process.")
                     break
 
-                # Filter out known programs
-                candidates = [a for a in candidates if a not in KNOWN_PROGRAMS]
+                # Filter out known programs and skip prefixes
+                original_count = len(candidates)
+                skipped_addrs = [a for a in candidates if should_skip_address(a)]
+                candidates = [a for a in candidates if not should_skip_address(a)]
+
+                # Mark skipped addresses so they don't appear again
+                if skipped_addrs and not args.dry_run:
+                    worker.mark_addresses_initialized(skipped_addrs)
+                    print(f"  Marked {len(skipped_addrs)} system/program addresses as processed (skipped)")
 
                 if not candidates:
-                    print("\nNo valid candidates (all were known programs).")
-                    break
+                    print("  No valid candidates in this batch, continuing...")
+                    continue
 
                 batch_num += 1
                 print(f"\n{'='*60}")

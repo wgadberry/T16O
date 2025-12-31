@@ -24,13 +24,16 @@ BEGIN
         guide_type_id TINYINT UNSIGNED,
         creates_edge TINYINT,
         edge_direction VARCHAR(10),
+        fee BIGINT UNSIGNED,
+        priority_fee BIGINT UNSIGNED,
         INDEX idx_tx (tx_id)
     ) ENGINE=MEMORY;
 
     INSERT INTO tmp_batch (activity_id, tx_id, ins_index, block_time, activity_type,
-                           guide_type_id, creates_edge, edge_direction)
+                           guide_type_id, creates_edge, edge_direction, fee, priority_fee)
     SELECT a.id, a.tx_id, a.ins_index, t.block_time, a.activity_type,
-           atm.guide_type_id, COALESCE(atm.creates_edge, 0), COALESCE(atm.edge_direction, 'none')
+           atm.guide_type_id, COALESCE(atm.creates_edge, 0), COALESCE(atm.edge_direction, 'none'),
+           t.fee, t.priority_fee
     FROM tx_activity a
     JOIN tx t ON t.id = a.tx_id
     LEFT JOIN tx_activity_type_map atm ON atm.activity_type = a.activity_type
@@ -47,46 +50,103 @@ BEGIN
     -- Broken into two steps to avoid CROSS JOIN issues with temp tables
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index, fee, priority_fee)
     SELECT s.tx_id, b.block_time, s.account_address_id, tk.mint_address_id,
-           s.token_1_id, s.amount_1, tk.decimals, 3, 2, s.id, s.ins_index
+           s.token_1_id, s.amount_1, tk.decimals, 3, 2, s.id, s.ins_index, b.fee, b.priority_fee
     FROM tmp_batch b
     JOIN tx_swap s ON s.activity_id = b.activity_id
     JOIN tx_token tk ON tk.id = s.token_1_id
     WHERE b.creates_edge = 1 AND b.edge_direction IN ('both', 'out')
       AND s.account_address_id IS NOT NULL AND tk.mint_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
     SET p_guide_count = ROW_COUNT();
 
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index, fee, priority_fee)
     SELECT s.tx_id, b.block_time, tk.mint_address_id, s.account_address_id,
-           s.token_2_id, s.amount_2, tk.decimals, 4, 2, s.id, s.ins_index
+           s.token_2_id, s.amount_2, tk.decimals, 4, 2, s.id, s.ins_index, b.fee, b.priority_fee
     FROM tmp_batch b
     JOIN tx_swap s ON s.activity_id = b.activity_id
     JOIN tx_token tk ON tk.id = s.token_2_id
     WHERE b.creates_edge = 1 AND b.edge_direction IN ('both', 'in')
       AND s.account_address_id IS NOT NULL AND tk.mint_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
     SET p_guide_count = p_guide_count + ROW_COUNT();
 
     -- 3. TRANSFER EDGES
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index, fee, priority_fee)
     SELECT t.tx_id, b.block_time, t.source_owner_address_id, t.destination_owner_address_id,
            t.source_address_id, t.destination_address_id,
            t.token_id, t.amount, t.decimals,
            CASE WHEN t.token_id = v_sol_token_id THEN 1 ELSE COALESCE(b.guide_type_id, 2) END,
-           1, t.id, t.ins_index
+           1, t.id, t.ins_index, b.fee, b.priority_fee
     FROM tmp_batch b
     JOIN tx_transfer t ON t.activity_id = b.activity_id
     WHERE b.creates_edge = 1
       AND t.source_owner_address_id IS NOT NULL
       AND t.destination_owner_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
+    SET p_guide_count = p_guide_count + ROW_COUNT();
+
+    -- 3b. BURN EDGES (wallet → BURN sink)
+    -- For burns, destination is NULL - use synthetic BURN address
+    -- Note: Check t.transfer_type since activity_type may differ
+    INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
+                          from_token_account_id, to_token_account_id,
+                          token_id, amount, decimals, edge_type_id,
+                          source_id, source_row_id, ins_index, fee, priority_fee)
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742702,  -- BURN sink
+           t.source_address_id, NULL,
+           t.token_id, t.amount, t.decimals, 39,  -- burn edge_type
+           1, t.id, t.ins_index, b.fee, b.priority_fee
+    FROM tmp_batch b
+    JOIN tx_transfer t ON t.activity_id = b.activity_id
+    WHERE t.transfer_type = 'ACTIVITY_SPL_BURN'
+      AND t.source_owner_address_id IS NOT NULL
+      AND t.destination_owner_address_id IS NULL
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
+    SET p_guide_count = p_guide_count + ROW_COUNT();
+
+    -- 3c. MINT EDGES (MINT source → wallet)
+    -- For mints, source is NULL - use synthetic MINT address
+    -- Note: Check t.transfer_type since activity_type may differ
+    INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
+                          from_token_account_id, to_token_account_id,
+                          token_id, amount, decimals, edge_type_id,
+                          source_id, source_row_id, ins_index, fee, priority_fee)
+    SELECT t.tx_id, b.block_time, 742703, t.destination_owner_address_id,  -- MINT source
+           NULL, t.destination_address_id,
+           t.token_id, t.amount, t.decimals, 38,  -- mint edge_type
+           1, t.id, t.ins_index, b.fee, b.priority_fee
+    FROM tmp_batch b
+    JOIN tx_transfer t ON t.activity_id = b.activity_id
+    WHERE t.transfer_type = 'ACTIVITY_SPL_MINT'
+      AND t.destination_owner_address_id IS NOT NULL
+      AND t.source_owner_address_id IS NULL
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
+    SET p_guide_count = p_guide_count + ROW_COUNT();
+
+    -- 3d. CREATE_ACCOUNT EDGES (wallet → CREATE sink)
+    -- For account creation where destination is NULL
+    -- Note: Check t.transfer_type since activity_type may differ
+    INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
+                          from_token_account_id, to_token_account_id,
+                          token_id, amount, decimals, edge_type_id,
+                          source_id, source_row_id, ins_index, fee, priority_fee)
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742705,  -- CREATE sink
+           t.source_address_id, t.destination_address_id,
+           t.token_id, t.amount, t.decimals, 8,  -- create_account edge_type
+           1, t.id, t.ins_index, b.fee, b.priority_fee
+    FROM tmp_batch b
+    JOIN tx_transfer t ON t.activity_id = b.activity_id
+    WHERE t.transfer_type = 'ACTIVITY_SPL_CREATE_ACCOUNT'
+      AND t.source_owner_address_id IS NOT NULL
+      AND t.destination_owner_address_id IS NULL
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
     SET p_guide_count = p_guide_count + ROW_COUNT();
 
     -- 4. FUNDING EDGES

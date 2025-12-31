@@ -118,7 +118,20 @@ def filter_existing_signatures(cursor, signatures: list) -> tuple:
 
     existing = {}
     for row in cursor.fetchall():
-        existing[row[0]] = row[1] or 0  # signature -> tx_state (bitmask)
+        # Handle both old VARCHAR ('shredded', 'detailed') and new BIGINT bitmask
+        state_val = row[1]
+        if state_val is None:
+            existing[row[0]] = 0
+        elif isinstance(state_val, int):
+            existing[row[0]] = state_val
+        elif state_val == 'detailed':
+            existing[row[0]] = 64 | 63  # DETAILED + SHREDDED bits
+        elif state_val == 'shredded':
+            existing[row[0]] = 63  # SHREDDED bits only
+        elif state_val.isdigit():
+            existing[row[0]] = int(state_val)
+        else:
+            existing[row[0]] = 0  # Unknown state, treat as new
 
     if not existing:
         return signatures, []
@@ -128,6 +141,42 @@ def filter_existing_signatures(cursor, signatures: list) -> tuple:
     need_detail = [sig for sig, state in existing.items() if (state & DETAILED_BIT) == 0]
 
     return new_sigs, need_detail
+
+
+# =============================================================================
+# Signer Extraction
+# =============================================================================
+
+def extract_signers_from_json(data: dict) -> dict:
+    """
+    Extract signers for each transaction from Solscan response.
+    Returns dict: {signature: [signer_addresses]}
+    """
+    tx_signers = {}
+
+    if not data.get('success') or not data.get('data'):
+        return tx_signers
+
+    for tx in data['data']:
+        sig = tx.get('tx_hash') or tx.get('signature')
+        if not sig:
+            continue
+
+        signers = []
+        # Solscan includes signers in the transaction data
+        if 'signers' in tx:
+            signers = tx['signers'] if isinstance(tx['signers'], list) else [tx['signers']]
+        # Fallback: try to get from fee_payer or first signer
+        elif 'fee_payer' in tx:
+            signers = [tx['fee_payer']]
+        # Fallback: look in parsed data
+        elif 'signer' in tx:
+            signers = [tx['signer']] if isinstance(tx['signer'], str) else tx['signer']
+
+        if signers:
+            tx_signers[sig] = signers
+
+    return tx_signers
 
 
 # =============================================================================
@@ -198,6 +247,8 @@ class GuideConsumerV2:
         self.total_transfers = 0
         self.total_swaps = 0
         self.total_activities = 0
+        self.total_signers = 0
+        self.total_instructions = 0
         self.total_detail_queued = 0
         self.should_stop = False
 
@@ -252,6 +303,81 @@ class GuideConsumerV2:
             )
         )
         return len(signatures)
+
+    def store_signers(self, tx_signers: dict):
+        """
+        Store signers in tx_signer table.
+        tx_signers: {signature: [signer_addresses]}
+        """
+        if not tx_signers:
+            return 0
+
+        stored = 0
+        for sig, signers in tx_signers.items():
+            # Get tx_id
+            self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (sig,))
+            row = self.cursor.fetchone()
+            if not row:
+                continue
+            tx_id = row[0]
+
+            for idx, signer_addr in enumerate(signers):
+                # Ensure signer address exists
+                self.cursor.execute("""
+                    INSERT IGNORE INTO tx_address (address, address_type)
+                    VALUES (%s, 'wallet')
+                """, (signer_addr,))
+
+                # Get signer address_id
+                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (signer_addr,))
+                addr_row = self.cursor.fetchone()
+                if not addr_row:
+                    continue
+                signer_id = addr_row[0]
+
+                # Insert into tx_signer
+                self.cursor.execute("""
+                    INSERT IGNORE INTO tx_signer (tx_id, signer_address_id, signer_index)
+                    VALUES (%s, %s, %s)
+                """, (tx_id, signer_id, idx))
+                stored += 1
+
+        self.db_conn.commit()
+        return stored
+
+    def store_instruction_data(self, decoded_response: dict):
+        """
+        Compress and store raw instruction data in tx.instruction_data.
+        Uses MySQL COMPRESS() for storage efficiency.
+        """
+        if not decoded_response.get('success') or not decoded_response.get('data'):
+            return 0
+
+        stored = 0
+        for tx in decoded_response['data']:
+            sig = tx.get('tx_hash') or tx.get('signature')
+            if not sig:
+                continue
+
+            # Extract the instruction-relevant data (activities, transfers)
+            instruction_payload = {
+                'activities': tx.get('activities', []),
+                'transfers': tx.get('transfers', []),
+                'block_time': tx.get('block_time'),
+            }
+
+            # Compress JSON and store
+            json_str = json.dumps(instruction_payload, separators=(',', ':'))
+
+            self.cursor.execute("""
+                UPDATE tx SET instruction_data = COMPRESS(%s)
+                WHERE signature = %s AND instruction_data IS NULL
+            """, (json_str, sig))
+            if self.cursor.rowcount > 0:
+                stored += 1
+
+        self.db_conn.commit()
+        return stored
 
     def call_shred_batch(self, json_data: dict) -> tuple:
         """Call sp_tx_shred_batch with JSON, return (tx_count, edge_count, address_count, transfer_count, swap_count, activity_count)"""
@@ -334,9 +460,15 @@ class GuideConsumerV2:
             tx_count, edge_count, address_count, transfer_count, swap_count, activity_count = self.call_shred_batch(decoded_response)
             sp_time = time.time() - sp_start
 
+            # === Phase 3b: Store signers and instruction data ===
+            tx_signers = extract_signers_from_json(decoded_response)
+            signers_stored = self.store_signers(tx_signers)
+            instructions_stored = self.store_instruction_data(decoded_response)
+
             total_time = time.time() - start_time
 
             print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} acts={activity_count} addrs={address_count} "
+                  f"signers={signers_stored} instrs={instructions_stored} "
                   f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
 
             if addr_queued > 0:
@@ -357,6 +489,8 @@ class GuideConsumerV2:
             self.total_transfers += transfer_count
             self.total_swaps += swap_count
             self.total_activities += activity_count
+            self.total_signers += signers_stored
+            self.total_instructions += instructions_stored
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
             self.message_count += 1
@@ -493,6 +627,8 @@ def main():
     print(f"  Total swaps: {consumer.total_swaps}")
     print(f"  Total activities: {consumer.total_activities}")
     print(f"  Total addresses: {consumer.total_addresses}")
+    print(f"  Total signers: {consumer.total_signers}")
+    print(f"  Total instructions: {consumer.total_instructions}")
     print(f"{'='*60}")
 
     return 0

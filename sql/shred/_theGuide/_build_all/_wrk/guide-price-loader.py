@@ -6,10 +6,12 @@ Queries tx_guide for distinct tokens by day, then fetches prices from Solscan
 and stores them in tx_token_price table.
 
 Usage:
-    python guide-price-loader.py                     # Process all days
+    python guide-price-loader.py                     # Process all days (50+ activities)
     python guide-price-loader.py --days 7            # Process last 7 days only
     python guide-price-loader.py --date 20251210     # Process specific date
     python guide-price-loader.py --skip-existing     # Skip tokens that already have prices
+    python guide-price-loader.py --force             # Re-fetch and overwrite existing prices
+    python guide-price-loader.py --min-activities 100  # Only tokens with 100+ activities
 """
 
 import argparse
@@ -62,10 +64,26 @@ class PriceLoader:
             self.conn.close()
 
     def get_tokens_by_day(self, specific_date: Optional[int] = None,
-                          days_limit: Optional[int] = None) -> List[Dict]:
-        """Get distinct tokens for each day from tx_guide"""
+                          days_limit: Optional[int] = None,
+                          min_activities: int = 50) -> List[Dict]:
+        """
+        Get distinct tokens for each day from tx_guide.
+        Only includes tokens with at least min_activities guide records.
+        """
 
-        query = """
+        # First, get tokens with sufficient activity
+        activity_filter = ""
+        if min_activities > 0:
+            activity_filter = f"""
+                AND g.token_id IN (
+                    SELECT token_id FROM tx_guide
+                    WHERE token_id IS NOT NULL
+                    GROUP BY token_id
+                    HAVING COUNT(*) >= {min_activities}
+                )
+            """
+
+        query = f"""
             SELECT
                 block_time_num,
                 COUNT(*) AS token_count,
@@ -77,8 +95,8 @@ class PriceLoader:
                 FROM tx_guide g
                 JOIN tx_token tk ON g.token_id = tk.id
                 JOIN tx_address mint ON tk.mint_address_id = mint.id
-               -- WHERE g.amount > 0
-                  WHERE g.token_id IS NOT NULL
+                WHERE g.token_id IS NOT NULL
+                {activity_filter}
         """
 
         params = []
@@ -188,7 +206,7 @@ class PriceLoader:
             return False
 
     def process_day(self, date_num: int, mint_addresses: List[str],
-                    skip_existing: bool = False):
+                    skip_existing: bool = False, force: bool = False):
         """Process all tokens for a single day"""
         date_str = str(date_num)
         date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
@@ -204,8 +222,8 @@ class PriceLoader:
                 print(f"  [{i+1}/{len(mint_addresses)}] {mint[:20]}... - token not found")
                 continue
 
-            # Check if price exists
-            if skip_existing and self.price_exists(token_id, date_num):
+            # Check if price exists (skip unless force)
+            if not force and skip_existing and self.price_exists(token_id, date_num):
                 self.skipped += 1
                 continue
 
@@ -236,7 +254,11 @@ def main():
     parser.add_argument('--date', type=int, help='Process specific date (YYYYMMDD)')
     parser.add_argument('--days', type=int, help='Process last N days only')
     parser.add_argument('--skip-existing', action='store_true',
-                        help='Skip tokens that already have prices')
+                        help='Skip tokens that already have prices for a given day')
+    parser.add_argument('--force', action='store_true',
+                        help='Re-fetch and overwrite prices even if they already exist')
+    parser.add_argument('--min-activities', type=int, default=50,
+                        help='Only process tokens with at least N guide activities (default: 50, 0=all)')
     parser.add_argument('--db-host', default='localhost', help='MySQL host')
     parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
     parser.add_argument('--db-user', default='root', help='MySQL user')
@@ -251,6 +273,16 @@ def main():
 
     print("PRICE LOADER")
     print(f"{'='*60}")
+    print(f"Min activities: {args.min_activities}")
+    if args.days:
+        print(f"Days limit: {args.days}")
+    if args.date:
+        print(f"Specific date: {args.date}")
+    if args.skip_existing:
+        print(f"Skip existing: Yes")
+    if args.force:
+        print(f"Force refresh: Yes")
+    print()
 
     db_config = {
         'host': args.db_host,
@@ -265,10 +297,11 @@ def main():
 
     try:
         # Get tokens by day
-        print("Querying tokens by day...")
+        print(f"Querying tokens by day (min {args.min_activities} activities)...")
         days_data = loader.get_tokens_by_day(
             specific_date=args.date,
-            days_limit=args.days
+            days_limit=args.days,
+            min_activities=args.min_activities
         )
 
         total_tokens = sum(d['token_count'] for d in days_data)
@@ -283,7 +316,8 @@ def main():
             loader.process_day(
                 day_data['date'],
                 day_data['mint_addresses'],
-                skip_existing=args.skip_existing
+                skip_existing=args.skip_existing,
+                force=args.force
             )
 
         loader.print_summary()

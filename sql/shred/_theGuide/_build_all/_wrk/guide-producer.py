@@ -37,6 +37,10 @@ Usage:
     python guide-producer.py --direct-to-detail
     python guide-producer.py --direct-to-detail --detail-max-batches 100
 
+    # Reprocess signatures from file (delete + re-queue)
+    python guide-producer.py --reprocess-signatures-file reprocess.txt
+    python guide-producer.py --reprocess-signatures-file reprocess.txt --reprocess-priority 8
+
     # Limit signatures per address
     python guide-producer.py addr1 --max-signatures 5000
 
@@ -417,6 +421,44 @@ def get_last_known_signature(cursor, address: str) -> Optional[str]:
     return row[0] if row else None
 
 
+def load_signatures_from_file(filepath: str) -> List[str]:
+    """Load signatures from a file (one per line), skip header if present"""
+    signatures = []
+    with open(filepath, 'r') as f:
+        for line in f:
+            sig = line.strip()
+            # Skip empty lines, comments, and header
+            if sig and not sig.startswith('#') and sig != 'signature' and len(sig) >= 64:
+                signatures.append(sig)
+    return signatures
+
+
+def delete_signatures_from_db(cursor, conn, signatures: List[str], dry_run: bool = False) -> int:
+    """
+    Delete signatures from tx table (cascades to all child tables).
+    Returns count of deleted rows.
+    """
+    if not signatures:
+        return 0
+
+    deleted = 0
+    for sig in signatures:
+        if dry_run:
+            # Just check if exists
+            cursor.execute("SELECT id FROM tx WHERE signature = %s", (sig,))
+            if cursor.fetchone():
+                deleted += 1
+        else:
+            cursor.execute("DELETE FROM tx WHERE signature = %s", (sig,))
+            if cursor.rowcount > 0:
+                deleted += 1
+
+    if not dry_run:
+        conn.commit()
+
+    return deleted
+
+
 def get_signatures_needing_detail(cursor, batch_size: int = 20, max_batches: int = 0) -> Generator[List[str], None, None]:
     """Generator that yields batches of signatures that need detail enrichment.
 
@@ -507,6 +549,10 @@ def main():
                         help='Query DB for shredded txs missing detail and send to tx.detail.transactions queue')
     parser.add_argument('--detail-max-batches', type=int, default=0,
                         help='Max batches to send in direct-to-detail mode (0 = unlimited)')
+    parser.add_argument('--reprocess-signatures-file', type=str, default=None,
+                        help='File with signatures to reprocess (delete existing + re-queue)')
+    parser.add_argument('--reprocess-priority', type=int, default=8,
+                        help='Priority for reprocessed signatures (default: 8)')
 
     args = parser.parse_args()
 
@@ -525,10 +571,10 @@ def main():
     if args.address_file:
         addresses.extend(load_addresses_from_file(args.address_file))
 
-    # Validate: need addresses OR --sync-mint-transactions OR --direct-to-detail
-    if not addresses and not args.sync_mint_transactions and not args.direct_to_detail:
+    # Validate: need addresses OR --sync-mint-transactions OR --direct-to-detail OR --reprocess-signatures-file
+    if not addresses and not args.sync_mint_transactions and not args.direct_to_detail and not args.reprocess_signatures_file:
         print("Error: No addresses provided")
-        print("Usage: python guide-producer.py <address> [--address-file file.txt] [--sync-mint-transactions] [--direct-to-detail]")
+        print("Usage: python guide-producer.py <address> [--address-file file.txt] [--sync-mint-transactions] [--direct-to-detail] [--reprocess-signatures-file file.txt]")
         return 1
 
     # Check dependencies
@@ -537,8 +583,8 @@ def main():
         print("Install with: pip install pika")
         return 1
 
-    # DB required for --sync-mint-transactions, smart sync, or --direct-to-detail
-    needs_db = args.sync_mint_transactions or args.filter_existing or args.direct_to_detail or (not args.force_all and addresses)
+    # DB required for --sync-mint-transactions, smart sync, --direct-to-detail, or --reprocess-signatures-file
+    needs_db = args.sync_mint_transactions or args.filter_existing or args.direct_to_detail or args.reprocess_signatures_file or (not args.force_all and addresses)
     if needs_db and not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")
         print("Install with: pip install mysql-connector-python")
@@ -640,6 +686,73 @@ def main():
             print(f"  Signatures queued: {detail_signatures}")
             print(f"{'='*60}")
         
+        # Cleanup and exit
+        if rabbitmq_conn:
+            rabbitmq_conn.close()
+        if db_conn:
+            db_conn.close()
+        return 0
+
+    # =========================================================================
+    # Reprocess Signatures Mode
+    # =========================================================================
+    if args.reprocess_signatures_file:
+        import os
+        print()
+        print("--- Reprocess Signatures Mode ---")
+
+        if not os.path.exists(args.reprocess_signatures_file):
+            print(f"Error: File not found: {args.reprocess_signatures_file}")
+            return 1
+
+        # Load signatures from file
+        print(f"Loading signatures from {args.reprocess_signatures_file}...")
+        reprocess_sigs = load_signatures_from_file(args.reprocess_signatures_file)
+        print(f"  Found {len(reprocess_sigs)} signatures to reprocess")
+
+        if not reprocess_sigs:
+            print("  No signatures to reprocess!")
+            if rabbitmq_conn:
+                rabbitmq_conn.close()
+            if db_conn:
+                db_conn.close()
+            return 0
+
+        # Step 1: Delete existing records
+        print(f"\nStep 1: Deleting existing records from DB...")
+        deleted_count = delete_signatures_from_db(db_cursor, db_conn, reprocess_sigs, args.dry_run)
+        print(f"  {'Would delete' if args.dry_run else 'Deleted'} {deleted_count} transactions (cascades to all child tables)")
+
+        # Step 2: Publish to queue
+        print(f"\nStep 2: Publishing to queue with priority {args.reprocess_priority}...")
+        reprocess_batches = 0
+        reprocess_queued = 0
+
+        for i in range(0, len(reprocess_sigs), args.batch_size):
+            batch = reprocess_sigs[i:i + args.batch_size]
+
+            if args.dry_run:
+                print(f"  [DRY RUN] Batch {reprocess_batches + 1}: {len(batch)} signatures")
+                reprocess_batches += 1
+                reprocess_queued += len(batch)
+            else:
+                if publish_batch(rabbitmq_channel, batch, args.reprocess_priority):
+                    reprocess_batches += 1
+                    reprocess_queued += len(batch)
+
+                    if reprocess_batches % 10 == 0:
+                        print(f"  Published {reprocess_batches} batches ({reprocess_queued} signatures)")
+
+        print()
+        print("=" * 60)
+        print(f"Reprocess Complete!")
+        print(f"  Signatures processed: {len(reprocess_sigs)}")
+        print(f"  DB records deleted: {deleted_count}")
+        print(f"  Batches published: {reprocess_batches}")
+        print(f"  Signatures queued: {reprocess_queued}")
+        print(f"  Priority: {args.reprocess_priority}")
+        print(f"{'='*60}")
+
         # Cleanup and exit
         if rabbitmq_conn:
             rabbitmq_conn.close()
