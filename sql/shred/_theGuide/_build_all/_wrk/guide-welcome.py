@@ -19,6 +19,9 @@ import subprocess
 import sys
 import os
 import time
+import argparse
+import json
+from datetime import datetime
 
 # =============================================================================
 # Configuration
@@ -26,40 +29,246 @@ import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Core pipeline workers to launch
-WORKERS = [
-    {
+# =============================================================================
+# Worker Registry - All pipeline workers with metadata
+# =============================================================================
+
+WORKER_REGISTRY = {
+    # === CORE PIPELINE (required for basic processing) ===
+    "producer": {
         "name": "Producer",
         "script": "guide-producer.py",
+        "category": "core",
         "needs_mint": True,
         "color": "Green",
+        "tx_state_bits": [],
+        "tx_state_names": [],
+        "queues_out": ["tx.guide.signatures"],
+        "queues_in": [],
+        "description": "Fetches transaction signatures from RPC",
     },
-    {
+    "shredder": {
         "name": "Shredder",
         "script": "guide-shredder.py",
+        "category": "core",
         "needs_mint": False,
         "color": "Cyan",
+        "tx_state_bits": [0, 1, 2, 3, 4, 5],
+        "tx_state_names": ["SHREDDED", "DECODED", "GUIDE_EDGES", "ADDRESSES_QUEUED", "SWAPS_PARSED", "TRANSFERS_PARSED"],
+        "queues_out": ["tx.guide.addresses", "tx.detail.transactions"],
+        "queues_in": ["tx.guide.signatures"],
+        "description": "Decodes transactions, creates edges, queues addresses",
     },
-    {
+    "detailer": {
         "name": "Detailer",
         "script": "guide-detailer.py",
+        "category": "core",
         "needs_mint": False,
         "color": "Blue",
+        "tx_state_bits": [6],
+        "tx_state_names": ["DETAILED"],
+        "queues_out": [],
+        "queues_in": ["tx.detail.transactions"],
+        "description": "Fetches balance change details from Solscan",
     },
-    {
+    "funder": {
         "name": "Funder",
         "script": "guide-funder.py",
+        "category": "core",
         "needs_mint": False,
         "color": "Yellow",
+        "tx_state_bits": [9],
+        "tx_state_names": ["FUNDING_COMPLETE"],
+        "queues_out": [],
+        "queues_in": ["tx.guide.addresses"],
+        "description": "Discovers wallet funding relationships",
     },
-    {
+    "sync-funding": {
         "name": "Sync-Funding",
         "script": "guide-sync-funding.py",
+        "category": "core",
         "needs_mint": False,
         "args": "--daemon --interval 60",
         "color": "Magenta",
+        "tx_state_bits": [],
+        "tx_state_names": [],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Syncs tx_funding_edge and tx_token_participant",
     },
-]
+
+    # === ENRICHMENT (optional, improves data quality) ===
+    "loader": {
+        "name": "Loader",
+        "script": "guide-loader.py",
+        "category": "enrichment",
+        "needs_mint": False,
+        "color": "White",
+        "tx_state_bits": [],
+        "tx_state_names": [],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Orchestrates sp_tx_guide_batch for edge creation",
+    },
+    "backfill-tokens": {
+        "name": "Backfill-Tokens",
+        "script": "guide-backfill-tokens.py",
+        "category": "enrichment",
+        "needs_mint": False,
+        "args": "--daemon --interval 60",
+        "color": "DarkYellow",
+        "tx_state_bits": [7],
+        "tx_state_names": ["TOKENS_ENRICHED"],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Fetches token metadata from Solscan",
+    },
+    "pool-enricher": {
+        "name": "Pool-Enricher",
+        "script": "guide-pool-enricher.py",
+        "category": "enrichment",
+        "needs_mint": False,
+        "color": "DarkCyan",
+        "tx_state_bits": [8],
+        "tx_state_names": ["POOLS_ENRICHED"],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Fetches pool/AMM data from Solscan",
+    },
+    "address-classifier": {
+        "name": "Address-Classifier",
+        "script": "guide-address-classifier.py",
+        "category": "enrichment",
+        "needs_mint": False,
+        "color": "DarkMagenta",
+        "tx_state_bits": [10],
+        "tx_state_names": ["CLASSIFIED"],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Classifies address types via RPC/Solscan",
+    },
+    "price-loader": {
+        "name": "Price-Loader",
+        "script": "guide-price-loader.py",
+        "category": "enrichment",
+        "needs_mint": False,
+        "color": "Gray",
+        "tx_state_bits": [],
+        "tx_state_names": [],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Loads historical token prices",
+    },
+
+    # === UTILITIES (run on-demand) ===
+    "integrity-check": {
+        "name": "Integrity-Check",
+        "script": "guide-integrity-check.py",
+        "category": "utility",
+        "needs_mint": False,
+        "color": "Gray",
+        "tx_state_bits": [],
+        "tx_state_names": [],
+        "queues_out": [],
+        "queues_in": [],
+        "description": "Data quality validation and healing",
+    },
+}
+
+# tx_state bitmask phase definitions
+TX_STATE_PHASES = {
+    0: {"name": "SHREDDED", "bit": 1, "worker": "shredder"},
+    1: {"name": "DECODED", "bit": 2, "worker": "shredder"},
+    2: {"name": "GUIDE_EDGES", "bit": 4, "worker": "shredder"},
+    3: {"name": "ADDRESSES_QUEUED", "bit": 8, "worker": "shredder"},
+    4: {"name": "SWAPS_PARSED", "bit": 16, "worker": "shredder"},
+    5: {"name": "TRANSFERS_PARSED", "bit": 32, "worker": "shredder"},
+    6: {"name": "DETAILED", "bit": 64, "worker": "detailer"},
+    7: {"name": "TOKENS_ENRICHED", "bit": 128, "worker": "backfill-tokens"},
+    8: {"name": "POOLS_ENRICHED", "bit": 256, "worker": "pool-enricher"},
+    9: {"name": "FUNDING_COMPLETE", "bit": 512, "worker": "funder"},
+    10: {"name": "CLASSIFIED", "bit": 1024, "worker": "address-classifier"},
+}
+
+# Synthetic addresses that must exist for special edge types
+SYNTHETIC_ADDRESSES = {
+    "BURN111111111111111111111111111111111111111": {"id": 742702, "type": "sink", "purpose": "burn"},
+    "MINT111111111111111111111111111111111111111": {"id": 742703, "type": "source", "purpose": "mint"},
+    "CLOSE11111111111111111111111111111111111111": {"id": 742704, "type": "sink", "purpose": "close"},
+    "CREATE1111111111111111111111111111111111111": {"id": 742705, "type": "source", "purpose": "create"},
+}
+
+# Default workers launched by interactive mode (backward compatible)
+DEFAULT_WORKERS = ["producer", "shredder", "detailer", "funder", "sync-funding"]
+
+# Database connection config
+DB_CONFIG = {
+    "host": "127.0.0.1",
+    "port": 3396,
+    "user": "root",
+    "password": "rootpassword",
+    "database": "t16o_db",
+}
+
+# RabbitMQ connection config
+RABBITMQ_CONFIG = {
+    "host": "localhost",
+    "port": 5692,
+    "user": "admin",
+    "password": "admin123",
+}
+
+# =============================================================================
+# Argument Parser
+# =============================================================================
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='theGuide Pipeline Launcher - Solana Transaction Flow Analysis',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python guide-welcome.py                    # Interactive mode (default)
+    python guide-welcome.py --audit            # Full pipeline audit
+    python guide-welcome.py --status           # Current DB statistics
+    python guide-welcome.py --preflight        # Run pre-flight checks only
+    python guide-welcome.py --workers all      # Launch all workers
+    python guide-welcome.py <mint_address>     # Launch with mint address (skip prompt)
+        """
+    )
+    parser.add_argument('mint', nargs='?', help='Mint address (skip interactive prompt)')
+    parser.add_argument('--audit', action='store_true',
+                        help='Full pipeline audit: workers, phases, gaps')
+    parser.add_argument('--status', action='store_true',
+                        help='Show current database statistics')
+    parser.add_argument('--preflight', action='store_true',
+                        help='Run pre-flight checks without launching')
+    parser.add_argument('--workers', choices=['default', 'core', 'all', 'enrichment'],
+                        default='default',
+                        help='Worker set to launch (default: %(default)s)')
+    parser.add_argument('--no-banner', action='store_true',
+                        help='Skip ASCII banner')
+    parser.add_argument('--json', action='store_true',
+                        help='Output in JSON format (for --audit, --status)')
+    return parser.parse_args()
+
+
+def get_workers_to_launch(mode: str) -> list:
+    """Get list of worker configs based on launch mode."""
+    if mode == 'default':
+        worker_keys = DEFAULT_WORKERS
+    elif mode == 'core':
+        worker_keys = [k for k, v in WORKER_REGISTRY.items() if v["category"] == "core"]
+    elif mode == 'enrichment':
+        worker_keys = [k for k, v in WORKER_REGISTRY.items() if v["category"] in ("core", "enrichment")]
+    elif mode == 'all':
+        worker_keys = [k for k, v in WORKER_REGISTRY.items() if v["category"] != "utility"]
+    else:
+        worker_keys = DEFAULT_WORKERS
+
+    # Convert to list of worker configs
+    return [WORKER_REGISTRY[k] for k in worker_keys if k in WORKER_REGISTRY]
 
 
 # =============================================================================
@@ -71,8 +280,8 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 
-def print_banner():
-    """Print welcome banner"""
+def print_banner(show_pipeline: bool = False):
+    """Print welcome banner with optional pipeline diagram."""
     banner = """
     +===============================================================+
     |                                                               |
@@ -87,6 +296,29 @@ def print_banner():
     +===============================================================+
     """
     print(banner)
+
+    if show_pipeline:
+        pipeline = """
+    Pipeline Flow:
+    ==============
+    [Producer] --(signatures)--> [Shredder] --(addresses)--> [Funder]
+                                     |
+                                     +---(transactions)--> [Detailer]
+                                     |
+                                     +---> [Sync-Funding] --> tx_funding_edge
+
+    tx_state Phases (11 bits):
+    ==========================
+    Bits 0-5: SHREDDED|DECODED|GUIDE_EDGES|ADDRESSES_QUEUED|SWAPS|TRANSFERS [Shredder]
+    Bit 6:    DETAILED [Detailer]
+    Bit 7:    TOKENS_ENRICHED [Backfill-Tokens] *
+    Bit 8:    POOLS_ENRICHED [Pool-Enricher] *
+    Bit 9:    FUNDING_COMPLETE [Funder]
+    Bit 10:   CLASSIFIED [Address-Classifier] *
+
+    * = Optional enrichment workers (use --workers all to include)
+    """
+        print(pipeline)
 
 
 def print_status(message: str, status: str = "info"):
@@ -114,6 +346,369 @@ def validate_mint_address(address: str) -> bool:
     # Check for valid base58 characters
     valid_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     return all(c in valid_chars for c in address)
+
+
+# =============================================================================
+# Pre-flight Checks
+# =============================================================================
+
+def run_preflight_checks() -> dict:
+    """
+    Run pre-flight checks for pipeline readiness.
+    Returns dict with check results.
+    """
+    results = {
+        "timestamp": datetime.now().isoformat(),
+        "mysql": {"status": "unknown", "detail": ""},
+        "rabbitmq": {"status": "unknown", "detail": ""},
+        "synthetic_addresses": {"status": "unknown", "detail": "", "missing": []},
+        "queues": {"status": "unknown", "detail": "", "missing": []},
+    }
+
+    # MySQL check
+    try:
+        import mysql.connector
+        conn = mysql.connector.connect(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            database=DB_CONFIG["database"],
+            connection_timeout=5
+        )
+        cursor = conn.cursor(dictionary=True)
+
+        # Check synthetic addresses
+        addr_list = list(SYNTHETIC_ADDRESSES.keys())
+        placeholders = ", ".join(["%s"] * len(addr_list))
+        cursor.execute(f"""
+            SELECT address, id FROM tx_address
+            WHERE address IN ({placeholders})
+        """, tuple(addr_list))
+        found = {row['address']: row['id'] for row in cursor.fetchall()}
+
+        missing = []
+        for addr, expected in SYNTHETIC_ADDRESSES.items():
+            if addr not in found:
+                missing.append(f"{expected['purpose'].upper()} ({addr[:8]}...)")
+            elif found[addr] != expected["id"]:
+                missing.append(f"{expected['purpose'].upper()} (wrong ID: {found[addr]} != {expected['id']})")
+
+        results["synthetic_addresses"]["missing"] = missing
+        results["synthetic_addresses"]["status"] = "ok" if not missing else "error"
+        results["synthetic_addresses"]["detail"] = f"{4 - len(missing)}/4 present"
+
+        cursor.close()
+        conn.close()
+        results["mysql"]["status"] = "ok"
+        results["mysql"]["detail"] = f"Connected to {DB_CONFIG['database']}"
+    except ImportError:
+        results["mysql"]["status"] = "skip"
+        results["mysql"]["detail"] = "mysql.connector not installed"
+    except Exception as e:
+        results["mysql"]["status"] = "error"
+        results["mysql"]["detail"] = str(e)[:50]
+
+    # RabbitMQ check
+    try:
+        import pika
+        credentials = pika.PlainCredentials(RABBITMQ_CONFIG["user"], RABBITMQ_CONFIG["password"])
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=RABBITMQ_CONFIG["host"],
+                port=RABBITMQ_CONFIG["port"],
+                credentials=credentials,
+                connection_attempts=1,
+                socket_timeout=5
+            )
+        )
+        channel = connection.channel()
+
+        expected_queues = ["tx.guide.signatures", "tx.guide.addresses", "tx.detail.transactions"]
+        missing = []
+        for queue in expected_queues:
+            try:
+                channel.queue_declare(queue=queue, passive=True)
+            except Exception:
+                missing.append(queue)
+                # Reconnect after failed passive declare
+                try:
+                    connection = pika.BlockingConnection(
+                        pika.ConnectionParameters(
+                            host=RABBITMQ_CONFIG["host"],
+                            port=RABBITMQ_CONFIG["port"],
+                            credentials=credentials,
+                            connection_attempts=1,
+                            socket_timeout=5
+                        )
+                    )
+                    channel = connection.channel()
+                except Exception:
+                    pass
+
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+        results["rabbitmq"]["status"] = "ok"
+        results["rabbitmq"]["detail"] = "Connected"
+        results["queues"]["missing"] = missing
+        results["queues"]["status"] = "ok" if not missing else "warning"
+        results["queues"]["detail"] = f"{len(expected_queues) - len(missing)}/{len(expected_queues)} queues"
+    except ImportError:
+        results["rabbitmq"]["status"] = "skip"
+        results["rabbitmq"]["detail"] = "pika not installed"
+    except Exception as e:
+        results["rabbitmq"]["status"] = "error"
+        results["rabbitmq"]["detail"] = str(e)[:50]
+
+    return results
+
+
+def print_preflight_results(results: dict):
+    """Print pre-flight check results in human-readable format."""
+    print("\n    PRE-FLIGHT CHECKS")
+    print("    " + "=" * 50)
+
+    status_icons = {"ok": "[OK]", "error": "[!!]", "warning": "[!?]", "skip": "[--]", "unknown": "[??]"}
+
+    # MySQL
+    mysql = results["mysql"]
+    icon = status_icons.get(mysql["status"], "[??]")
+    print(f"    {icon} MySQL connection        {mysql['detail']}")
+
+    # Synthetic addresses
+    synth = results["synthetic_addresses"]
+    icon = status_icons.get(synth["status"], "[??]")
+    print(f"    {icon} Synthetic addresses     {synth['detail']}")
+    if synth["missing"]:
+        for m in synth["missing"]:
+            print(f"        - Missing: {m}")
+
+    # RabbitMQ
+    rmq = results["rabbitmq"]
+    icon = status_icons.get(rmq["status"], "[??]")
+    print(f"    {icon} RabbitMQ connection     {rmq['detail']}")
+
+    # Queues
+    queues = results["queues"]
+    icon = status_icons.get(queues["status"], "[??]")
+    print(f"    {icon} Queue availability      {queues['detail']}")
+    if queues["missing"]:
+        for m in queues["missing"]:
+            print(f"        - Missing: {m}")
+
+    print()
+
+
+# =============================================================================
+# Database Status
+# =============================================================================
+
+def get_db_status() -> dict:
+    """Get current database statistics."""
+    status = {
+        "timestamp": datetime.now().isoformat(),
+        "tx_count": 0,
+        "tx_by_state": {},
+        "address_count": 0,
+        "guide_edge_count": 0,
+        "funding_edge_count": 0,
+        "token_count": 0,
+        "error": None,
+    }
+
+    try:
+        import mysql.connector
+        conn = mysql.connector.connect(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            database=DB_CONFIG["database"],
+        )
+        cursor = conn.cursor(dictionary=True)
+
+        # Transaction count
+        cursor.execute("SELECT COUNT(*) as cnt FROM tx")
+        status["tx_count"] = cursor.fetchone()["cnt"]
+
+        # Count by tx_state completeness
+        cursor.execute("""
+            SELECT
+                CASE
+                    WHEN tx_state IS NULL OR tx_state = 0 THEN 'unprocessed'
+                    WHEN (tx_state & 63) = 63 AND (tx_state & 64) = 0 THEN 'shredded'
+                    WHEN (tx_state & 127) = 127 THEN 'detailed'
+                    WHEN tx_state = 2047 THEN 'fully_processed'
+                    ELSE 'partial'
+                END as state_group,
+                COUNT(*) as cnt
+            FROM tx
+            GROUP BY state_group
+        """)
+        status["tx_by_state"] = {row["state_group"]: row["cnt"] for row in cursor.fetchall()}
+
+        cursor.execute("SELECT COUNT(*) as cnt FROM tx_address")
+        status["address_count"] = cursor.fetchone()["cnt"]
+
+        cursor.execute("SELECT COUNT(*) as cnt FROM tx_guide")
+        status["guide_edge_count"] = cursor.fetchone()["cnt"]
+
+        cursor.execute("SELECT COUNT(*) as cnt FROM tx_funding_edge")
+        status["funding_edge_count"] = cursor.fetchone()["cnt"]
+
+        cursor.execute("SELECT COUNT(*) as cnt FROM tx_token")
+        status["token_count"] = cursor.fetchone()["cnt"]
+
+        cursor.close()
+        conn.close()
+    except ImportError:
+        status["error"] = "mysql.connector not installed"
+    except Exception as e:
+        status["error"] = str(e)
+
+    return status
+
+
+def print_db_status(status: dict):
+    """Print database status in human-readable format."""
+    print("\n    DATABASE STATUS")
+    print("    " + "=" * 50)
+
+    if status.get("error"):
+        print(f"    [!!] Error: {status['error']}")
+        return
+
+    print(f"\n    TRANSACTION STATISTICS")
+    print(f"    -----------------------")
+    print(f"    Total transactions:      {status['tx_count']:,}")
+
+    if status["tx_by_state"]:
+        print(f"\n    By state:")
+        total = status["tx_count"] or 1
+        for state, cnt in sorted(status["tx_by_state"].items()):
+            pct = (cnt / total) * 100
+            print(f"      {state:20s} {cnt:>10,}  ({pct:5.1f}%)")
+
+    print(f"\n    OTHER STATISTICS")
+    print(f"    -----------------------")
+    print(f"    Addresses:               {status['address_count']:,}")
+    print(f"    Tokens:                  {status['token_count']:,}")
+    print(f"    Guide edges:             {status['guide_edge_count']:,}")
+    print(f"    Funding edges:           {status['funding_edge_count']:,}")
+    print()
+
+
+# =============================================================================
+# Pipeline Audit
+# =============================================================================
+
+def run_audit(workers_mode: str = "default") -> dict:
+    """
+    Full pipeline audit:
+    1. Worker availability (scripts exist?)
+    2. tx_state phase coverage
+    3. Pre-flight checks
+    4. Gaps analysis
+    """
+    audit = {
+        "timestamp": datetime.now().isoformat(),
+        "workers": {},
+        "phase_coverage": {},
+        "preflight": {},
+        "gaps": [],
+        "recommendations": [],
+    }
+
+    configured_workers = [k for k in DEFAULT_WORKERS]
+
+    # 1. Worker availability
+    for key, worker in WORKER_REGISTRY.items():
+        script_path = os.path.join(SCRIPT_DIR, worker["script"])
+        exists = os.path.exists(script_path)
+        is_configured = key in configured_workers
+        audit["workers"][key] = {
+            "name": worker["name"],
+            "exists": exists,
+            "configured": is_configured,
+            "category": worker["category"],
+            "tx_state_bits": worker["tx_state_bits"],
+            "description": worker["description"],
+        }
+        if not exists:
+            audit["gaps"].append(f"Worker script missing: {worker['script']}")
+
+    # 2. Phase coverage by configured workers
+    covered_bits = set()
+    for key in configured_workers:
+        if key in WORKER_REGISTRY:
+            covered_bits.update(WORKER_REGISTRY[key]["tx_state_bits"])
+
+    for bit, phase in TX_STATE_PHASES.items():
+        worker_key = phase["worker"]
+        audit["phase_coverage"][phase["name"]] = {
+            "bit": bit,
+            "value": phase["bit"],
+            "covered": bit in covered_bits,
+            "worker": worker_key,
+            "worker_configured": worker_key in configured_workers,
+        }
+        if bit not in covered_bits:
+            audit["gaps"].append(f"Phase {phase['name']} (bit {bit}) not covered by configured workers")
+            audit["recommendations"].append(f"Add '{worker_key}' to launch with --workers all")
+
+    # 3. Pre-flight checks
+    audit["preflight"] = run_preflight_checks()
+
+    return audit
+
+
+def print_audit(audit: dict):
+    """Print audit results in human-readable format."""
+    print("\n" + "=" * 70)
+    print("                        theGuide Pipeline Audit")
+    print("=" * 70)
+
+    # Worker availability
+    print("\n    WORKER AVAILABILITY")
+    print("    " + "-" * 50)
+
+    for key, info in audit["workers"].items():
+        exists_icon = "[OK]" if info["exists"] else "[!!]"
+        config_str = "(configured)" if info["configured"] else "(available)"
+        print(f"    {exists_icon} {info['name']:20s} {info['category']:12s} {config_str}")
+
+    # Phase coverage
+    print("\n    TX_STATE PHASE COVERAGE")
+    print("    " + "-" * 50)
+
+    for name, info in audit["phase_coverage"].items():
+        icon = "[OK]" if info["covered"] else "[!!]"
+        status = "(configured)" if info["worker_configured"] else "(NOT configured)"
+        print(f"    {icon} Bit {info['bit']:2d}  {name:20s} -> {info['worker']} {status}")
+
+    # Pre-flight summary
+    print("\n    PRE-FLIGHT CHECKS")
+    print("    " + "-" * 50)
+    pf = audit["preflight"]
+    status_icons = {"ok": "[OK]", "error": "[!!]", "warning": "[!?]", "skip": "[--]"}
+    print(f"    {status_icons.get(pf['mysql']['status'], '[??]')} MySQL: {pf['mysql']['detail']}")
+    print(f"    {status_icons.get(pf['rabbitmq']['status'], '[??]')} RabbitMQ: {pf['rabbitmq']['detail']}")
+    print(f"    {status_icons.get(pf['synthetic_addresses']['status'], '[??]')} Synthetic addresses: {pf['synthetic_addresses']['detail']}")
+    print(f"    {status_icons.get(pf['queues']['status'], '[??]')} Queues: {pf['queues']['detail']}")
+
+    # Gaps & Recommendations
+    if audit["gaps"]:
+        print("\n    GAPS & RECOMMENDATIONS")
+        print("    " + "-" * 50)
+        for gap in audit["gaps"]:
+            print(f"    [!] {gap}")
+        for rec in audit["recommendations"]:
+            print(f"    [>] {rec}")
+
+    print("\n" + "=" * 70 + "\n")
 
 
 # =============================================================================
@@ -151,18 +746,21 @@ def launch_worker(worker: dict, mint_address: str = None) -> bool:
         return False
 
 
-def launch_all_workers(mint_address: str):
-    """Launch all pipeline workers"""
+def launch_all_workers(mint_address: str, workers: list = None):
+    """Launch pipeline workers from provided list."""
+    if workers is None:
+        workers = get_workers_to_launch("default")
+
     print("\n    Launching pipeline workers...\n")
 
     launched = 0
-    for worker in WORKERS:
+    for worker in workers:
         if launch_worker(worker, mint_address):
             launched += 1
         time.sleep(0.5)  # Small delay between launches
 
-    print(f"\n    Launched {launched}/{len(WORKERS)} workers")
-    return launched == len(WORKERS)
+    print(f"\n    Launched {launched}/{len(workers)} workers")
+    return launched == len(workers)
 
 
 # =============================================================================
@@ -170,15 +768,52 @@ def launch_all_workers(mint_address: str):
 # =============================================================================
 
 def main():
+    args = parse_args()
+
+    # Handle non-interactive modes first
+    if args.audit:
+        if not args.no_banner:
+            print_banner(show_pipeline=True)
+        audit = run_audit(args.workers)
+        if args.json:
+            print(json.dumps(audit, indent=2))
+        else:
+            print_audit(audit)
+        return 0
+
+    if args.status:
+        if not args.no_banner:
+            print_banner()
+        status = get_db_status()
+        if args.json:
+            print(json.dumps(status, indent=2))
+        else:
+            print_db_status(status)
+        return 0
+
+    if args.preflight:
+        if not args.no_banner:
+            print_banner()
+        results = run_preflight_checks()
+        if args.json:
+            print(json.dumps(results, indent=2))
+        else:
+            print_preflight_results(results)
+        return 0
+
+    # Interactive mode
     clear_screen()
     print_banner()
+
+    # Get workers to launch based on --workers flag
+    workers = get_workers_to_launch(args.workers)
 
     print("\n    Welcome to theGuide Pipeline Launcher")
     print("    " + "=" * 45)
     print()
-    print_status("This will start the core analysis pipeline:")
+    print_status(f"Worker set: {args.workers} ({len(workers)} workers)")
     print()
-    for worker in WORKERS:
+    for worker in workers:
         suffixes = []
         if worker["needs_mint"]:
             suffixes.append("receives mint")
@@ -190,45 +825,53 @@ def main():
     print("    " + "-" * 45)
     print()
 
-    # Get mint address
-    while True:
-        try:
-            mint_input = input("    Enter mint address (or 'q' to quit): ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\n\n    Cancelled.")
-            return 0
+    # Get mint address (from args or prompt)
+    mint_input = args.mint
+    if not mint_input:
+        while True:
+            try:
+                mint_input = input("    Enter mint address (or 'q' to quit): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n\n    Cancelled.")
+                return 0
 
-        if mint_input.lower() in ('q', 'quit', 'exit'):
-            print("\n    Goodbye!")
-            return 0
+            if mint_input.lower() in ('q', 'quit', 'exit'):
+                print("\n    Goodbye!")
+                return 0
 
-        if not mint_input:
-            print_status("Please enter a mint address", "error")
-            continue
+            if not mint_input:
+                print_status("Please enter a mint address", "error")
+                continue
 
+            if not validate_mint_address(mint_input):
+                print_status("Invalid mint address format (expected 32-44 base58 chars)", "error")
+                continue
+
+            break
+    else:
+        # Validate mint from command line
         if not validate_mint_address(mint_input):
-            print_status("Invalid mint address format (expected 32-44 base58 chars)", "error")
-            continue
-
-        break
+            print_status(f"Invalid mint address: {mint_input}", "error")
+            return 1
 
     print()
     print_status(f"Mint: {mint_input}", "info")
     print()
 
-    # Confirm launch
-    try:
-        confirm = input("    Press Enter to launch pipeline (or 'q' to quit): ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\n\n    Cancelled.")
-        return 0
+    # Confirm launch (skip if mint was provided on command line)
+    if not args.mint:
+        try:
+            confirm = input("    Press Enter to launch pipeline (or 'q' to quit): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n    Cancelled.")
+            return 0
 
-    if confirm.lower() in ('q', 'quit', 'exit'):
-        print("\n    Goodbye!")
-        return 0
+        if confirm.lower() in ('q', 'quit', 'exit'):
+            print("\n    Goodbye!")
+            return 0
 
     # Launch workers
-    success = launch_all_workers(mint_input)
+    success = launch_all_workers(mint_input, workers)
 
     print()
     if success:
