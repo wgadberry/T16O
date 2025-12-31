@@ -455,17 +455,25 @@ def get_affected_tokens(cursor, last_id: int, max_id: int,
     return [row[0] for row in cursor.fetchall()]
 
 
+# Address types to include in tx_bmap_state (exclude pool, mint, program, vault)
+BMAP_INCLUDE_ADDRESS_TYPES = ('wallet', 'ata', 'unknown', None)
+
+
 def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
     """
     Recalculate tx_bmap_state for a single token.
     Hybrid approach: delete existing + rebuild using window function.
+
+    Only includes wallet/ata/unknown address types (excludes pool, mint, program, vault).
+    Pool/mint/program metadata is shown via edge data in sp_tx_bmap_get_token_state.
+
     Returns rows inserted.
     """
     # Delete existing state for this token
     cursor.execute("DELETE FROM tx_bmap_state WHERE token_id = %s", (token_id,))
     conn.commit()
 
-    # Rebuild running balances using the same logic as sp_tx_bmap_state_backfill
+    # Rebuild running balances - filtered to wallet/ata/unknown addresses only
     query = """
         INSERT INTO tx_bmap_state (token_id, tx_id, address_id, delta, balance, block_time)
         SELECT
@@ -486,27 +494,31 @@ def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
                 SUM(g.delta) AS delta,
                 t.block_time
             FROM (
-                -- Inflows (to_address receives)
+                -- Inflows (to_address receives) - wallets only
                 SELECT
-                    token_id,
-                    tx_id,
-                    to_address_id AS address_id,
-                    (amount / POW(10, COALESCE(decimals, 9))) AS delta
-                FROM tx_guide
-                WHERE token_id = %s
-                  AND to_address_id IS NOT NULL
+                    gu.token_id,
+                    gu.tx_id,
+                    gu.to_address_id AS address_id,
+                    (gu.amount / POW(10, COALESCE(gu.decimals, 9))) AS delta
+                FROM tx_guide gu
+                JOIN tx_address a ON a.id = gu.to_address_id
+                WHERE gu.token_id = %s
+                  AND gu.to_address_id IS NOT NULL
+                  AND (a.address_type IN ('wallet', 'ata', 'unknown') OR a.address_type IS NULL)
 
                 UNION ALL
 
-                -- Outflows (from_address sends) - negative
+                -- Outflows (from_address sends) - wallets only, negative delta
                 SELECT
-                    token_id,
-                    tx_id,
-                    from_address_id AS address_id,
-                    -(amount / POW(10, COALESCE(decimals, 9))) AS delta
-                FROM tx_guide
-                WHERE token_id = %s
-                  AND from_address_id IS NOT NULL
+                    gu.token_id,
+                    gu.tx_id,
+                    gu.from_address_id AS address_id,
+                    -(gu.amount / POW(10, COALESCE(gu.decimals, 9))) AS delta
+                FROM tx_guide gu
+                JOIN tx_address a ON a.id = gu.from_address_id
+                WHERE gu.token_id = %s
+                  AND gu.from_address_id IS NOT NULL
+                  AND (a.address_type IN ('wallet', 'ata', 'unknown') OR a.address_type IS NULL)
             ) g
             JOIN tx t ON t.id = g.tx_id
             GROUP BY g.token_id, g.tx_id, g.address_id, t.block_time

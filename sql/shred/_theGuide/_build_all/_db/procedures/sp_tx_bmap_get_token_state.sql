@@ -1,6 +1,8 @@
 -- sp_tx_bmap_get_token_state: Time-navigable cluster map for token
 -- Returns current holders (balance > 0) and sliding window of activity
 --
+-- DEPENDENCY: tx_bmap_state materialized table (run sp_tx_bmap_state_backfill to populate)
+--
 -- Parameters:
 --   p_token_name: Token name (optional)
 --   p_token_symbol: Token symbol (optional)
@@ -353,7 +355,11 @@ BEGIN
             token_name VARCHAR(255) DEFAULT NULL,
             balance DECIMAL(30,9) DEFAULT 0,
             sol_balance DECIMAL(20,9) DEFAULT NULL,
-            funded_by VARCHAR(44) DEFAULT NULL
+            funded_by VARCHAR(44) DEFAULT NULL,
+            -- Interaction summaries (aggregated from edges)
+            interactions_pools JSON DEFAULT NULL,
+            interactions_programs JSON DEFAULT NULL,
+            interactions_dexes JSON DEFAULT NULL
         );
 
         -- First: Insert all addresses that appear in the DISPLAY window (from OR to)
@@ -413,27 +419,17 @@ BEGIN
         SET n.token_name = tk.token_name
         WHERE tk.token_name IS NOT NULL;
 
-        -- Now calculate historical balance for each node: inflows - outflows up to current block_time
-        -- Inflows (to_address receives tokens)
+        -- Get balance from tx_bmap_state materialized table (single indexed lookup per address)
+        -- Replaces expensive SUM() aggregation over all historical tx_guide records
         UPDATE tmp_nodes n
-        SET balance = balance + COALESCE((
-            SELECT SUM(g.amount / POW(10, g.decimals))
-            FROM tx_guide g
-            JOIN tx t ON t.id = g.tx_id
-            WHERE g.token_id = v_token_id
-              AND g.to_address_id = n.address_id
-              AND t.block_time <= v_block_time
-        ), 0);
-
-        -- Outflows (from_address sends tokens) - subtract from balance
-        UPDATE tmp_nodes n
-        SET balance = balance - COALESCE((
-            SELECT SUM(g.amount / POW(10, g.decimals))
-            FROM tx_guide g
-            JOIN tx t ON t.id = g.tx_id
-            WHERE g.token_id = v_token_id
-              AND g.from_address_id = n.address_id
-              AND t.block_time <= v_block_time
+        SET balance = COALESCE((
+            SELECT bs.balance
+            FROM tx_bmap_state bs
+            WHERE bs.token_id = v_token_id
+              AND bs.address_id = n.address_id
+              AND bs.block_time <= v_block_time
+            ORDER BY bs.block_time DESC, bs.tx_id DESC
+            LIMIT 1
         ), 0);
 
         -- Update SOL balance for each node (latest balance up to current block_time)
@@ -448,6 +444,78 @@ BEGIN
             LIMIT 1
         );
 
+        -- ==========================================================================
+        -- STEP 5b: Populate interaction summaries (pools, programs, dexes per node)
+        -- Shows which pools/programs/dexes each wallet interacted with in this window
+        -- ==========================================================================
+
+        -- Create temp copy to avoid "Can't reopen table" error
+        DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
+        CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
+
+        -- Aggregate pools interacted with (from swap edges)
+        -- Use subquery with GROUP BY to get distinct pools, then aggregate
+        UPDATE tmp_nodes n
+        SET interactions_pools = (
+            SELECT JSON_ARRAYAGG(pool_info)
+            FROM (
+                SELECT DISTINCT JSON_OBJECT(
+                    'address', pool_addr.address,
+                    'label', COALESCE(p.pool_label, pool_addr.address)
+                ) AS pool_info
+                FROM tx_guide g
+                JOIN tmp_display_window_int w ON w.tx_id = g.tx_id
+                JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
+                JOIN tx_pool p ON p.id = s.amm_id
+                JOIN tx_address pool_addr ON pool_addr.id = p.pool_address_id
+                WHERE (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+                  AND s.amm_id IS NOT NULL
+                GROUP BY pool_addr.address, p.pool_label
+            ) pools
+        )
+        WHERE n.address_type IN ('wallet', 'ata', 'unknown') OR n.address_type IS NULL;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
+        CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
+
+        -- Aggregate programs interacted with
+        UPDATE tmp_nodes n
+        SET interactions_programs = (
+            SELECT JSON_ARRAYAGG(prog_address)
+            FROM (
+                SELECT DISTINCT prog_addr.address AS prog_address
+                FROM tx_guide g
+                JOIN tmp_display_window_int w ON w.tx_id = g.tx_id
+                LEFT JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
+                LEFT JOIN tx_transfer xf ON xf.tx_id = g.tx_id AND xf.ins_index = g.ins_index
+                LEFT JOIN tx_program prog ON prog.id = COALESCE(s.program_id, xf.program_id)
+                LEFT JOIN tx_address prog_addr ON prog_addr.id = prog.program_address_id
+                WHERE (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+                  AND prog_addr.address IS NOT NULL
+            ) progs
+        )
+        WHERE n.address_type IN ('wallet', 'ata', 'unknown') OR n.address_type IS NULL;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
+        CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
+
+        -- Aggregate DEXes interacted with (from swap edges)
+        UPDATE tmp_nodes n
+        SET interactions_dexes = (
+            SELECT JSON_ARRAYAGG(dex_name)
+            FROM (
+                SELECT DISTINCT s.name AS dex_name
+                FROM tx_guide g
+                JOIN tmp_display_window_int w ON w.tx_id = g.tx_id
+                JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
+                WHERE (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+                  AND s.name IS NOT NULL
+            ) dexes
+        )
+        WHERE n.address_type IN ('wallet', 'ata', 'unknown') OR n.address_type IS NULL;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
+
         -- Build JSON for ALL addresses in sliding window (not just balance > 0)
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
@@ -458,7 +526,12 @@ BEGIN
                 'token_name', n.token_name,
                 'balance', ROUND(n.balance, 6),
                 'sol_balance', ROUND(COALESCE(n.sol_balance, 0), 9),
-                'funded_by', n.funded_by
+                'funded_by', n.funded_by,
+                'interactions', JSON_OBJECT(
+                    'pools', COALESCE(n.interactions_pools, JSON_ARRAY()),
+                    'programs', COALESCE(n.interactions_programs, JSON_ARRAY()),
+                    'dexes', COALESCE(n.interactions_dexes, JSON_ARRAY())
+                )
             )
         ) INTO v_nodes_json
         FROM tmp_nodes n;
