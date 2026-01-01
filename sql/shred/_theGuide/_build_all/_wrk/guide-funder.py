@@ -46,9 +46,11 @@ import requests
 # MySQL connector
 try:
     import mysql.connector
+    from mysql.connector import Error as MySQLError
     HAS_MYSQL = True
 except ImportError:
     HAS_MYSQL = False
+    MySQLError = Exception  # Fallback
 
 # RabbitMQ
 try:
@@ -544,7 +546,12 @@ def run_queue_consumer(args):
             print(f"  Completed in {elapsed:.1f}s: {funders_found} found, {funders_not_found} not found")
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
+        except MySQLError as e:
+            # MySQL errors are transient - requeue for retry
+            print(f"  [DB ERROR] {e} - will retry")
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         except Exception as e:
+            # Other errors - send to DLQ
             print(f"  ERROR: {e}")
             import traceback
             traceback.print_exc()

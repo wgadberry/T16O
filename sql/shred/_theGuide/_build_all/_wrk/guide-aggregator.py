@@ -849,7 +849,12 @@ def run_queue_consumer(prefetch: int = 1):
                     publish_response(gateway_channel, request_id, status, result)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
+                except Error as e:
+                    # MySQL errors are transient - requeue for retry
+                    print(f"[DB ERROR] {e} - will retry")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                 except Exception as e:
+                    # Other errors - send to DLQ
                     print(f"[ERROR] Failed to process message: {e}")
                     import traceback
                     traceback.print_exc()
