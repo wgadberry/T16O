@@ -424,25 +424,51 @@ def run_queue_consumer(prefetch: int = 1):
 +-----------------------------------------------------------+
 """)
 
-    # Setup DB connection
-    db_conn = mysql.connector.connect(**DB_CONFIG)
-    print("[OK] Database connected")
+    # Setup DB connection with reconnect capability
+    db_state = {'conn': None, 'consumer': None}
+
+    def ensure_db_connection(gateway_channel):
+        """Ensure DB connection is alive, reconnect and recreate consumer if needed"""
+        try:
+            needs_reconnect = db_state['conn'] is None
+            if not needs_reconnect:
+                try:
+                    db_state['conn'].ping(reconnect=False, attempts=1, delay=0)
+                except:
+                    needs_reconnect = True
+
+            if needs_reconnect:
+                if db_state['conn']:
+                    try:
+                        db_state['conn'].close()
+                    except:
+                        pass
+                db_state['conn'] = mysql.connector.connect(**DB_CONFIG)
+                db_state['consumer'] = GuideDetailerConsumer(
+                    db_conn=db_state['conn'],
+                    channel=gateway_channel
+                )
+                print("[OK] Database (re)connected")
+            return db_state['consumer']
+        except Exception as e:
+            print(f"[WARN] Database connection failed: {e}")
+            db_state['conn'] = None
+            db_state['consumer'] = None
+            return None
 
     while True:
         try:
             gateway_conn, gateway_channel = setup_gateway_rabbitmq()
             gateway_channel.basic_qos(prefetch_count=prefetch)
 
-            # Instantiate consumer with proven processing logic
-            consumer = GuideDetailerConsumer(
-                db_conn=db_conn,
-                channel=gateway_channel
-            )
+            # Initial connection and consumer creation
+            ensure_db_connection(gateway_channel)
 
             print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
             print("[INFO] Waiting for requests...")
 
             def callback(ch, method, properties, body):
+                nonlocal gateway_channel
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
@@ -450,8 +476,14 @@ def run_queue_consumer(prefetch: int = 1):
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
 
+                    # Ensure DB connection is alive
+                    consumer = ensure_db_connection(gateway_channel)
+                    if not consumer:
+                        raise Exception("Database connection unavailable")
+
                     signatures = batch_data.get('signatures', [])
                     if not signatures:
+                        print(f"  [SKIP] No signatures in batch (keys: {list(batch_data.keys())})")
                         publish_response(gateway_channel, request_id, 'completed',
                                        {'processed': 0, 'message': 'No signatures provided'})
                         ch.basic_ack(delivery_tag=method.delivery_tag)

@@ -232,13 +232,16 @@ def log_request(
                 'action': action
             }
 
+        # Ensure correlation_id is set (default to request_id for REST requests)
+        effective_correlation_id = correlation_id if correlation_id else request_id
+
         cursor.execute("""
             INSERT INTO tx_request_log
             (request_id, correlation_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')
         """, (
             request_id,
-            correlation_id or request_id,  # Default to request_id if not provided
+            effective_correlation_id,
             api_key_id,
             source,
             target_worker,
@@ -247,6 +250,7 @@ def log_request(
             payload_hash,
             json.dumps(payload_summary) if payload_summary else None
         ))
+        print(f"[LOG] Request {request_id[:8]} logged (correlation: {effective_correlation_id[:8]})")
         conn.commit()
         cursor.close()
         conn.close()
@@ -778,7 +782,7 @@ def create_app():
 # Queue Consumer (for cascade messages)
 # =============================================================================
 
-def run_queue_consumer():
+def run_queue_consumer(ready_event: threading.Event = None):
     """Run a consumer for gateway request queue (cascade messages)"""
     print(f"[INFO] Starting queue consumer for {GATEWAY_REQUEST_QUEUE}")
 
@@ -806,7 +810,12 @@ def run_queue_consumer():
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=GATEWAY_REQUEST_QUEUE, on_message_callback=callback)
-            print(f"[INFO] Consuming from {GATEWAY_REQUEST_QUEUE}")
+            print(f"[OK] Queue consumer ready - consuming from {GATEWAY_REQUEST_QUEUE}")
+
+            # Signal that we're ready
+            if ready_event:
+                ready_event.set()
+
             channel.start_consuming()
 
         except Exception as e:
@@ -818,7 +827,7 @@ def run_queue_consumer():
 # Response Queue Consumer (for worker responses and auto-cascade)
 # =============================================================================
 
-def run_response_consumer():
+def run_response_consumer(ready_event: threading.Event = None):
     """
     Run a consumer for all worker response queues.
     When a worker completes, this triggers cascades to downstream workers.
@@ -847,15 +856,19 @@ def run_response_consumer():
                     print(f"[RESPONSE] {worker} -> {status} (request: {request_id[:8]}...)")
 
                     # Update request log
-                    if status == 'completed':
+                    # Update request status in DB
+                    if status in ('completed', 'partial'):
                         update_request_status(request_id, 'completed', result=result)
                     elif status == 'failed':
                         update_request_status(request_id, 'failed',
                                             error_message=result.get('error', 'Unknown error'),
                                             result=result)
+                    else:
+                        print(f"[WARN] Unknown status '{status}' - treating as completed")
+                        update_request_status(request_id, 'completed', result=result)
 
-                    # Check for auto-cascade (only on success)
-                    if status == 'completed' and worker in WORKER_REGISTRY:
+                    # Check for auto-cascade (on success or partial)
+                    if status in ('completed', 'partial') and worker in WORKER_REGISTRY:
                         cascade_to = WORKER_REGISTRY[worker].get('cascade_to', [])
 
                         if cascade_to and result.get('cascade_to'):
@@ -923,7 +936,12 @@ def run_response_consumer():
             for queue in response_queues:
                 channel.basic_consume(queue=queue, on_message_callback=callback)
 
-            print(f"[INFO] Consuming responses from {len(response_queues)} queues")
+            print(f"[OK] Response consumer ready - monitoring {len(response_queues)} queues")
+
+            # Signal that we're ready
+            if ready_event:
+                ready_event.set()
+
             channel.start_consuming()
 
         except Exception as e:
@@ -986,17 +1004,34 @@ def main():
         run_response_consumer()
         return 0
 
+    # Track consumer ready events
+    queue_consumer_ready = threading.Event()
+    response_consumer_ready = threading.Event()
+
     # Start queue consumer in background thread
     if args.with_queue_consumer:
-        consumer_thread = threading.Thread(target=run_queue_consumer, daemon=True)
+        consumer_thread = threading.Thread(target=run_queue_consumer, args=(queue_consumer_ready,), daemon=True)
         consumer_thread.start()
-        print("[INFO] Queue consumer started in background")
+        print("[INFO] Queue consumer starting...")
 
     # Start response consumer in background thread
     if args.with_response_consumer:
-        response_thread = threading.Thread(target=run_response_consumer, daemon=True)
+        response_thread = threading.Thread(target=run_response_consumer, args=(response_consumer_ready,), daemon=True)
         response_thread.start()
-        print("[INFO] Response consumer started in background (auto-cascade enabled)")
+        print("[INFO] Response consumer starting...")
+
+    # Wait for consumers to be ready before accepting REST requests
+    if args.with_queue_consumer:
+        if queue_consumer_ready.wait(timeout=10):
+            print("[OK] Queue consumer ready")
+        else:
+            print("[WARN] Queue consumer startup timeout - continuing anyway")
+
+    if args.with_response_consumer:
+        if response_consumer_ready.wait(timeout=10):
+            print("[OK] Response consumer ready")
+        else:
+            print("[WARN] Response consumer startup timeout - continuing anyway")
 
     # Start Flask server
     print(f"""

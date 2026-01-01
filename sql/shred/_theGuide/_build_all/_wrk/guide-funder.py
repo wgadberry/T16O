@@ -350,53 +350,83 @@ def run_queue_consumer(args):
     print(f"  VHost: {RABBITMQ_VHOST}")
     print(f"{'='*60}\n")
 
-    # Connect to MySQL
-    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
-    db_conn = mysql.connector.connect(
-        host=args.db_host,
-        port=args.db_port,
-        user=args.db_user,
-        password=args.db_pass,
-        database=args.db_name
-    )
-    cursor = db_conn.cursor(dictionary=True)
-
-    # Verify init_tx_fetched column exists
-    try:
-        cursor.execute("SELECT init_tx_fetched FROM tx_address LIMIT 1")
-        cursor.fetchall()
-    except mysql.connector.Error:
-        print("Adding init_tx_fetched column to tx_address...")
-        cursor.execute("""
-            ALTER TABLE tx_address
-            ADD COLUMN init_tx_fetched TINYINT(1) DEFAULT NULL
-        """)
-        db_conn.commit()
-        print("Column added successfully")
-
     # Create Solscan client
     solscan = SolscanClient()
+
+    # DB connection config for reconnection
+    db_config = {
+        'host': args.db_host,
+        'port': args.db_port,
+        'user': args.db_user,
+        'password': args.db_pass,
+        'database': args.db_name
+    }
+
+    # Setup DB connection with reconnect capability
+    db_state = {'conn': None, 'cursor': None, 'worker': None}
+
+    def ensure_db_connection(channel):
+        """Ensure DB connection is alive, reconnect and recreate worker if needed"""
+        try:
+            needs_reconnect = db_state['conn'] is None
+            if not needs_reconnect:
+                try:
+                    db_state['conn'].ping(reconnect=False, attempts=1, delay=0)
+                except:
+                    needs_reconnect = True
+
+            if needs_reconnect:
+                if db_state['conn']:
+                    try:
+                        db_state['conn'].close()
+                    except:
+                        pass
+                db_state['conn'] = mysql.connector.connect(**db_config)
+                db_state['cursor'] = db_state['conn'].cursor(dictionary=True)
+                db_state['worker'] = AddressHistoryWorker(
+                    db_conn=db_state['conn'],
+                    channel=channel,
+                    solscan=solscan,
+                    tx_limit=args.tx_limit,
+                    api_delay=args.api_delay,
+                    dry_run=False
+                )
+                print("[OK] Database (re)connected")
+            return db_state['worker'], db_state['cursor']
+        except Exception as e:
+            print(f"[WARN] Database connection failed: {e}")
+            db_state['conn'] = None
+            db_state['cursor'] = None
+            db_state['worker'] = None
+            return None, None
 
     # Connect to gateway RabbitMQ
     print(f"Connecting to RabbitMQ (vhost: {RABBITMQ_VHOST})...")
     connection, channel = setup_gateway_rabbitmq()
     channel.basic_qos(prefetch_count=1)
 
-    # Instantiate worker with proven processing logic
-    worker = AddressHistoryWorker(
-        db_conn=db_conn,
-        channel=channel,
-        solscan=solscan,
-        tx_limit=args.tx_limit,
-        api_delay=args.api_delay,
-        dry_run=False
-    )
+    # Initial connection
+    ensure_db_connection(channel)
+
+    # Verify init_tx_fetched column exists
+    try:
+        db_state['cursor'].execute("SELECT init_tx_fetched FROM tx_address LIMIT 1")
+        db_state['cursor'].fetchall()
+    except mysql.connector.Error:
+        print("Adding init_tx_fetched column to tx_address...")
+        db_state['cursor'].execute("""
+            ALTER TABLE tx_address
+            ADD COLUMN init_tx_fetched TINYINT(1) DEFAULT NULL
+        """)
+        db_state['conn'].commit()
+        print("Column added successfully")
 
     print(f"Waiting for requests on '{RABBITMQ_REQUEST_QUEUE}'...")
     print("Press Ctrl+C to exit\n")
 
     def process_request(ch, method, properties, body):
         """Process a single request from gateway"""
+        nonlocal channel
         start_time = time.time()
 
         try:
@@ -407,6 +437,11 @@ def run_queue_consumer(args):
 
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]}...")
             print(f"  Action: {action}")
+
+            # Ensure DB connection is alive
+            worker, cursor = ensure_db_connection(channel)
+            if not worker:
+                raise Exception("Database connection unavailable")
 
             # Extract addresses from batch
             # Check multiple keys: 'addresses', 'funder_addresses' (from shredder cascade), or 'address_ids'

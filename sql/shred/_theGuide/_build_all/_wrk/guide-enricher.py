@@ -715,10 +715,37 @@ def run_queue_consumer(prefetch: int = 1):
         print("Error: pika not installed")
         return 1
 
-    # Setup DB connection
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    print("[OK] Database connected")
+    # Setup DB connection with reconnect capability
+    db_state = {'conn': None, 'cursor': None}
+
+    def ensure_db_connection():
+        """Ensure DB connection is alive, reconnect if needed"""
+        try:
+            needs_reconnect = db_state['conn'] is None
+            if not needs_reconnect:
+                try:
+                    db_state['conn'].ping(reconnect=False, attempts=1, delay=0)
+                except:
+                    needs_reconnect = True
+
+            if needs_reconnect:
+                if db_state['conn']:
+                    try:
+                        db_state['conn'].close()
+                    except:
+                        pass
+                db_state['conn'] = get_db_connection()
+                db_state['cursor'] = db_state['conn'].cursor()
+                print("[OK] Database (re)connected")
+            return db_state['cursor'], db_state['conn']
+        except Exception as e:
+            print(f"[WARN] Database connection failed: {e}")
+            db_state['conn'] = None
+            db_state['cursor'] = None
+            return None, None
+
+    # Initial connection
+    ensure_db_connection()
 
     # Setup Solscan session
     session = create_api_session()
@@ -739,6 +766,11 @@ def run_queue_consumer(prefetch: int = 1):
                     batch = message.get('batch', {})
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    # Ensure DB connection is alive
+                    cursor, conn = ensure_db_connection()
+                    if not cursor:
+                        raise Exception("Database connection unavailable")
 
                     # Get operations from batch or default to tokens,pools
                     operations = batch.get('operations', ['tokens', 'pools'])

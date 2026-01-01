@@ -417,10 +417,18 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     address = filters.get('mint_address') or filters.get('address')
     max_signatures = batch.get('size', 100)
 
+    # Extract pagination parameters from request (override smart sync if provided)
+    request_before = filters.get('before')
+    request_until = filters.get('until')
+
     if not address:
         return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
 
     print(f"[{request_id[:8]}] Processing request for {address[:20]}... (correlation: {correlation_id[:8]})")
+    if request_before:
+        print(f"  Using request 'before': {request_before[:20]}...")
+    if request_until:
+        print(f"  Using request 'until': {request_until[:20]}...")
 
     # Fetch signatures
     total_fetched = 0
@@ -430,8 +438,9 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
     try:
         # Smart sync: determine if we need NEW signatures or MORE historical ones
-        until_sig = None  # For fetching new signatures (stop at this one)
-        before_sig = None  # For fetching older signatures (start from this one going back)
+        # Request-provided before/until take precedence over smart sync
+        until_sig = request_until  # For fetching new signatures (stop at this one)
+        before_sig = request_before  # For fetching older signatures (start from this one going back)
         existing_count = 0
 
         if db_cursor:
@@ -451,7 +460,8 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 """, (addr_id, addr_id, addr_id))
                 existing_count = db_cursor.fetchone()[0] or 0
 
-                if existing_count > 0:
+                # Only use smart sync if request didn't provide before/until
+                if existing_count > 0 and not request_before and not request_until:
                     if max_signatures > existing_count:
                         # User wants MORE historical data - use 'before' with oldest sig
                         db_cursor.execute("""
@@ -465,7 +475,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                         row = db_cursor.fetchone()
                         if row:
                             before_sig = row[0]
-                            print(f"  Fetching {max_signatures - existing_count} MORE historical sigs (have {existing_count}, want {max_signatures})")
+                            print(f"  Smart sync: fetching {max_signatures - existing_count} MORE historical sigs (have {existing_count}, want {max_signatures})")
                             print(f"  Starting before: {before_sig[:20]}...")
                     else:
                         # Only fetch NEW signatures - use 'until' with newest sig
@@ -503,14 +513,14 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
                 if publish_cascade_to_shredder(gateway_channel, request_id, correlation_id,
                                                 batch_to_send, total_batched, estimated_batches, priority):
-                    print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} → shredder ({len(batch_to_send)} sigs)")
+                    print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} -> shredder ({len(batch_to_send)} sigs)")
 
         # Publish remaining signatures
         if signatures:
             total_batched += 1
             if publish_cascade_to_shredder(gateway_channel, request_id, correlation_id,
                                             signatures, total_batched, total_batched, priority):
-                print(f"  [CASCADE] Batch {total_batched}/{total_batched} → shredder ({len(signatures)} sigs)")
+                print(f"  [CASCADE] Batch {total_batched}/{total_batched} -> shredder ({len(signatures)} sigs)")
 
         print(f"  Fetched {total_fetched} signatures, cascaded {total_batched} batches to shredder")
 
@@ -546,16 +556,40 @@ def run_queue_consumer(rpc_url: str = CHAINSTACK_RPC_URL, prefetch: int = 1):
     legacy_channel = None
     print("[INFO] Gateway mode: legacy queue publishing disabled (using cascade)")
 
-    # Setup DB connection
-    db_conn = None
-    db_cursor = None
-    if HAS_MYSQL:
+    # Setup DB connection with reconnect capability
+    db_state = {'conn': None, 'cursor': None}
+
+    def ensure_db_connection():
+        """Ensure DB connection is alive, reconnect if needed"""
+        if not HAS_MYSQL:
+            return None
         try:
-            db_conn = mysql.connector.connect(**DB_CONFIG)
-            db_cursor = db_conn.cursor()
-            print("[OK] Database connected")
+            # Check if connection exists and is truly alive (ping tests actual connectivity)
+            needs_reconnect = db_state['conn'] is None
+            if not needs_reconnect:
+                try:
+                    db_state['conn'].ping(reconnect=False, attempts=1, delay=0)
+                except:
+                    needs_reconnect = True
+
+            if needs_reconnect:
+                if db_state['conn']:
+                    try:
+                        db_state['conn'].close()
+                    except:
+                        pass
+                db_state['conn'] = mysql.connector.connect(**DB_CONFIG)
+                db_state['cursor'] = db_state['conn'].cursor()
+                print("[OK] Database (re)connected")
+            return db_state['cursor']
         except Exception as e:
-            print(f"[WARN] Database not available: {e}")
+            print(f"[WARN] Database connection failed: {e}")
+            db_state['conn'] = None
+            db_state['cursor'] = None
+            return None
+
+    # Initial connection
+    ensure_db_connection()
 
     while True:
         try:
@@ -572,6 +606,9 @@ def run_queue_consumer(rpc_url: str = CHAINSTACK_RPC_URL, prefetch: int = 1):
                     request_id = message.get('request_id', 'unknown')
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    # Ensure DB connection is alive before processing
+                    db_cursor = ensure_db_connection()
 
                     # Process the request (pass gateway_channel for incremental cascade)
                     result = process_gateway_request(message, rpc_session, gateway_channel, db_cursor)
@@ -609,8 +646,8 @@ def run_queue_consumer(rpc_url: str = CHAINSTACK_RPC_URL, prefetch: int = 1):
     # Cleanup
     if legacy_conn:
         legacy_conn.close()
-    if db_conn:
-        db_conn.close()
+    if db_state['conn']:
+        db_state['conn'].close()
 
 
 # =============================================================================
