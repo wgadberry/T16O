@@ -108,6 +108,7 @@ RABBITMQ_PASS = 'admin123'
 RABBITMQ_VHOST = 't16o_mq'
 RABBITMQ_REQUEST_QUEUE = 'mq.guide.aggregator.request'
 RABBITMQ_RESPONSE_QUEUE = 'mq.guide.aggregator.response'
+ENRICHER_REQUEST_QUEUE = 'mq.guide.enricher.request'  # For incremental cascade
 
 # Deadlock retry settings
 MAX_DEADLOCK_RETRIES = 5
@@ -773,6 +774,39 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
     )
 
 
+def publish_cascade_to_enricher(channel, request_id: str, result: dict, priority: int = 5) -> bool:
+    """Publish cascade directly to enricher request queue (incremental cascade)"""
+    cascade_msg = {
+        'request_id': f"{request_id}-enricher",
+        'parent_request_id': request_id,
+        'action': 'cascade',
+        'source_worker': 'aggregator',
+        'priority': priority,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'batch': {
+            'operations': 'tokens,pools',
+            'source_processed': result.get('processed', 0)
+        }
+    }
+
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=ENRICHER_REQUEST_QUEUE,
+            body=json.dumps(cascade_msg).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json',
+                priority=priority
+            )
+        )
+        print(f"  [CASCADE] → enricher (tokens,pools)")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to cascade to enricher: {e}")
+        return False
+
+
 def run_queue_consumer(prefetch: int = 1):
     """Run as a queue consumer, listening for gateway requests"""
     print(f"""
@@ -807,6 +841,7 @@ def run_queue_consumer(prefetch: int = 1):
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
                     batch = message.get('batch', {})
+                    priority = message.get('priority', 5)
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
 
@@ -847,6 +882,11 @@ def run_queue_consumer(prefetch: int = 1):
 
                     # Publish response
                     publish_response(gateway_channel, request_id, status, result)
+
+                    # Cascade to enricher if we processed data
+                    if status == 'completed' and result.get('processed', 0) > 0:
+                        publish_cascade_to_enricher(gateway_channel, request_id, result, priority)
+
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
                 except Error as e:

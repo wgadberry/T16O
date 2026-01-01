@@ -94,6 +94,7 @@ RABBITMQ_QUEUE_DETAIL = 'tx.detail.transactions'
 RABBITMQ_VHOST = 't16o_mq'
 RABBITMQ_REQUEST_QUEUE = 'mq.guide.producer.request'
 RABBITMQ_RESPONSE_QUEUE = 'mq.guide.producer.response'
+SHREDDER_REQUEST_QUEUE = 'mq.guide.shredder.request'  # For incremental cascade
 
 # Database
 DB_CONFIG = {
@@ -358,13 +359,47 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
         return False
 
 
-def process_gateway_request(message: dict, rpc_session, legacy_channel, db_cursor=None) -> dict:
-    """Process a request from the gateway
+def publish_cascade_to_shredder(channel, request_id: str, signatures: list, batch_num: int,
+                                 total_batches: int, priority: int = 5) -> bool:
+    """Publish a batch of signatures directly to shredder request queue (incremental cascade)"""
+    cascade_msg = {
+        'request_id': f"{request_id}-batch{batch_num}",
+        'parent_request_id': request_id,
+        'action': 'cascade',
+        'source_worker': 'producer',
+        'priority': priority,
+        'timestamp': datetime.now().isoformat() + 'Z',
+        'batch': {
+            'signatures': signatures,
+            'batch_num': batch_num,
+            'total_batches': total_batches
+        }
+    }
+
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=SHREDDER_REQUEST_QUEUE,
+            body=json.dumps(cascade_msg).encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type='application/json',
+                priority=priority
+            )
+        )
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to cascade to shredder: {e}")
+        return False
+
+
+def process_gateway_request(message: dict, rpc_session, gateway_channel, db_cursor=None) -> dict:
+    """Process a request from the gateway with incremental cascade to shredder
 
     Args:
         message: Gateway request message with batch descriptor
         rpc_session: Requests session for RPC calls
-        legacy_channel: Channel for publishing to legacy queue (tx.guide.signatures)
+        gateway_channel: Channel for publishing cascades to shredder
         db_cursor: Optional DB cursor for smart sync
 
     Returns:
@@ -388,6 +423,7 @@ def process_gateway_request(message: dict, rpc_session, legacy_channel, db_curso
     total_fetched = 0
     total_batched = 0
     batch_size = 20
+    estimated_batches = (max_signatures + batch_size - 1) // batch_size  # Ceiling division
 
     try:
         # Use smart sync if we have DB - find last known signature for this address
@@ -413,7 +449,7 @@ def process_gateway_request(message: dict, rpc_session, legacy_channel, db_curso
                     print(f"  Smart sync: starting after {last_sig[:20]}...")
 
         signatures = []
-        all_signatures = []  # Track all signatures for cascade
+        all_signatures = []  # Track all signatures for final response
         for sig_obj in fetch_all_signatures(
             rpc_session, address, CHAINSTACK_RPC_URL,
             max_signatures=max_signatures, until=last_sig
@@ -425,29 +461,31 @@ def process_gateway_request(message: dict, rpc_session, legacy_channel, db_curso
                 all_signatures.append(sig_str)
             total_fetched += 1
 
-            # Publish in batches of 20 (to legacy queue for backward compat)
-            # Skip if legacy_channel is None (gateway mode passes via cascade instead)
-            if legacy_channel:
-                while len(signatures) >= batch_size:
-                    batch_to_send = signatures[:batch_size]
-                    signatures = signatures[batch_size:]
-
-                    if publish_batch(legacy_channel, batch_to_send, priority):
-                        total_batched += 1
-
-        # Publish remaining (to legacy queue)
-        if legacy_channel and signatures:
-            if publish_batch(legacy_channel, signatures, priority):
+            # INCREMENTAL CASCADE: Publish to shredder every batch_size signatures
+            while len(signatures) >= batch_size:
+                batch_to_send = signatures[:batch_size]
+                signatures = signatures[batch_size:]
                 total_batched += 1
 
-        print(f"  Fetched {total_fetched} signatures, published {total_batched} batches")
+                if publish_cascade_to_shredder(gateway_channel, request_id, batch_to_send,
+                                                total_batched, estimated_batches, priority):
+                    print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} → shredder ({len(batch_to_send)} sigs)")
+
+        # Publish remaining signatures
+        if signatures:
+            total_batched += 1
+            if publish_cascade_to_shredder(gateway_channel, request_id, signatures,
+                                            total_batched, total_batched, priority):
+                print(f"  [CASCADE] Batch {total_batched}/{total_batched} → shredder ({len(signatures)} sigs)")
+
+        print(f"  Fetched {total_fetched} signatures, cascaded {total_batched} batches to shredder")
 
         return {
             'processed': total_fetched,
             'batches': total_batched,
             'errors': 0,
-            'signatures': all_signatures,  # Include for gateway cascade
-            'cascade_to': ['shredder']
+            # Don't include all signatures - they were already cascaded incrementally
+            'cascade_to': []  # Already cascaded directly
         }
 
     except Exception as e:
@@ -501,8 +539,8 @@ def run_queue_consumer(rpc_url: str = CHAINSTACK_RPC_URL, prefetch: int = 1):
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
 
-                    # Process the request
-                    result = process_gateway_request(message, rpc_session, legacy_channel, db_cursor)
+                    # Process the request (pass gateway_channel for incremental cascade)
+                    result = process_gateway_request(message, rpc_session, gateway_channel, db_cursor)
 
                     # Determine status
                     status = 'completed' if result.get('errors', 0) == 0 else 'partial'
