@@ -416,8 +416,130 @@ class GuideConsumerV2:
 
         return tx_count, edge_count, address_count, transfer_count, swap_count, activity_count
 
+    def process_signatures(self, signatures: list, skip_legacy_queues: bool = False) -> dict:
+        """
+        Core processing logic for a batch of signatures.
+        Returns dict with: processed, skipped, need_detail_sigs, addresses, funder_addresses, error
+
+        Used by both on_message() and run_queue_consumer() to avoid code duplication.
+        """
+        result = {
+            'processed': 0,
+            'skipped': 0,
+            'need_detail_sigs': [],
+            'new_sigs': [],
+            'addresses': set(),
+            'funder_addresses': [],
+            'tx_count': 0,
+            'edge_count': 0,
+            'transfer_count': 0,
+            'swap_count': 0,
+            'activity_count': 0,
+            'signers_stored': 0,
+            'instructions_stored': 0,
+            'error': None
+        }
+
+        if not signatures:
+            return result
+
+        # Phase 0: Pre-filter existing signatures
+        original_count = len(signatures)
+        new_sigs, need_detail_sigs = filter_existing_signatures(self.cursor, signatures)
+        result['skipped'] = original_count - len(new_sigs) - len(need_detail_sigs)
+        result['need_detail_sigs'] = need_detail_sigs
+        result['new_sigs'] = new_sigs
+
+        # Queue existing signatures that need detail enrichment (legacy mode only)
+        if need_detail_sigs and not self.no_detail and not skip_legacy_queues:
+            detail_backfill = self.publish_to_detail_queue(need_detail_sigs)
+            self.total_detail_queued += detail_backfill
+            print(f"  [>] Queued {detail_backfill} existing sigs for detail enrichment")
+
+        if result['skipped'] > 0:
+            print(f"  [~] Skipped {result['skipped']}/{original_count} already detailed signatures")
+
+        if not new_sigs:
+            print(f"  [=] No new signatures to shred")
+            return result
+
+        # Phase 1: Fetch decoded data from Solscan
+        start_time = time.time()
+        decoded_response = fetch_decoded_batch(self.solscan_session, new_sigs)
+        fetch_time = time.time() - start_time
+
+        if not decoded_response.get('success') or not decoded_response.get('data'):
+            result['error'] = 'Solscan API returned no data'
+            return result
+
+        # Phase 2: Extract addresses
+        addresses = extract_addresses_from_json(decoded_response)
+        result['addresses'] = addresses
+
+        # Publish to legacy funding queue (legacy mode only)
+        if not self.no_funding and not skip_legacy_queues:
+            addr_queued = self.publish_addresses(addresses)
+            if addr_queued > 0:
+                print(f"  [>] Queued {addr_queued} addresses for funding")
+
+        # Phase 3: Call stored procedure
+        sp_start = time.time()
+        tx_count, edge_count, address_count, transfer_count, swap_count, activity_count = self.call_shred_batch(decoded_response)
+        sp_time = time.time() - sp_start
+
+        result['tx_count'] = tx_count
+        result['edge_count'] = edge_count
+        result['transfer_count'] = transfer_count
+        result['swap_count'] = swap_count
+        result['activity_count'] = activity_count
+        result['processed'] = len(new_sigs)
+
+        # Phase 3b: Store signers and instruction data
+        tx_signers = extract_signers_from_json(decoded_response)
+        signers_stored = self.store_signers(tx_signers)
+        instructions_stored = self.store_instruction_data(decoded_response)
+        result['signers_stored'] = signers_stored
+        result['instructions_stored'] = instructions_stored
+
+        total_time = time.time() - start_time
+        print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} acts={activity_count} addrs={address_count} "
+              f"signers={signers_stored} instrs={instructions_stored} "
+              f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
+
+        # Phase 4: Queue signatures for detail enrichment (legacy mode only)
+        if not self.no_detail and not skip_legacy_queues:
+            detail_queued = self.publish_to_detail_queue(new_sigs)
+            self.total_detail_queued += detail_queued
+            if detail_queued > 0:
+                print(f"  [>] Queued {detail_queued} signatures for detail enrichment")
+
+        # Get addresses needing funding lookup (for gateway cascade)
+        if addresses:
+            placeholders = ','.join(['%s'] * len(addresses))
+            self.cursor.execute(f"""
+                SELECT address FROM tx_address
+                WHERE address IN ({placeholders})
+                AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+                AND address_type IN ('wallet', 'unknown')
+            """, list(addresses))
+            result['funder_addresses'] = [row[0] for row in self.cursor.fetchall()]
+            if result['funder_addresses']:
+                print(f"  [>] Found {len(result['funder_addresses'])} addresses needing funding lookup")
+
+        # Update totals
+        self.total_tx += tx_count
+        self.total_edges += edge_count
+        self.total_addresses += address_count
+        self.total_transfers += transfer_count
+        self.total_swaps += swap_count
+        self.total_activities += activity_count
+        self.total_signers += signers_stored
+        self.total_instructions += instructions_stored
+
+        return result
+
     def on_message(self, channel, method, properties, body):
-        """Handle incoming message"""
+        """Handle incoming message (legacy queue mode)"""
         try:
             data = json.loads(body)
             signatures = data.get('signatures', [])
@@ -439,73 +561,15 @@ class GuideConsumerV2:
                 self.message_count += 1
                 return
 
-            # === Phase 0: Pre-filter existing signatures (save API calls) ===
-            original_count = len(signatures)
-            signatures, need_detail_sigs = filter_existing_signatures(self.cursor, signatures)
-            skipped_count = original_count - len(signatures) - len(need_detail_sigs)
+            # Use shared processing logic (publishes to legacy queues)
+            result = self.process_signatures(signatures, skip_legacy_queues=False)
 
-            # Queue existing signatures that need detail enrichment
-            if need_detail_sigs and not self.no_detail:
-                detail_backfill = self.publish_to_detail_queue(need_detail_sigs)
-                self.total_detail_queued += detail_backfill
-                print(f"  [>] Queued {detail_backfill} existing sigs for detail enrichment")
-
-            if skipped_count > 0:
-                print(f"  [~] Skipped {skipped_count}/{original_count} already detailed signatures")
-
-            if not signatures:
-                print(f"  [=] No new signatures to shred, ACK and skip")
+            if result.get('error'):
+                print(f"  [!] Error: {result['error']}")
+                # Still ACK - no point retrying if Solscan returned nothing
                 channel.basic_ack(delivery_tag=method.delivery_tag)
                 self.message_count += 1
                 return
-
-            # === Phase 1: Fetch decoded data from Solscan ===
-            start_time = time.time()
-            decoded_response = fetch_decoded_batch(self.solscan_session, signatures)
-            fetch_time = time.time() - start_time
-
-            # === Phase 2: Extract addresses and send to funding queue ===
-            addresses = extract_addresses_from_json(decoded_response)
-            addr_queued = 0
-            if not self.no_funding:
-                addr_queued = self.publish_addresses(addresses)
-
-            # === Phase 3: Call stored procedure to process JSON ===
-            sp_start = time.time()
-            tx_count, edge_count, address_count, transfer_count, swap_count, activity_count = self.call_shred_batch(decoded_response)
-            sp_time = time.time() - sp_start
-
-            # === Phase 3b: Store signers and instruction data ===
-            tx_signers = extract_signers_from_json(decoded_response)
-            signers_stored = self.store_signers(tx_signers)
-            instructions_stored = self.store_instruction_data(decoded_response)
-
-            total_time = time.time() - start_time
-
-            print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} acts={activity_count} addrs={address_count} "
-                  f"signers={signers_stored} instrs={instructions_stored} "
-                  f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
-
-            if addr_queued > 0:
-                print(f"  [>] Queued {addr_queued} addresses for funding")
-
-            # === Phase 4: Queue signatures for detail enrichment ===
-            detail_queued = 0
-            if not self.no_detail:
-                detail_queued = self.publish_to_detail_queue(signatures)
-                self.total_detail_queued += detail_queued
-
-            if detail_queued > 0:
-                print(f"  [>] Queued {detail_queued} signatures for detail enrichment")
-
-            self.total_tx += tx_count
-            self.total_edges += edge_count
-            self.total_addresses += address_count
-            self.total_transfers += transfer_count
-            self.total_swaps += swap_count
-            self.total_activities += activity_count
-            self.total_signers += signers_stored
-            self.total_instructions += instructions_stored
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
             self.message_count += 1
@@ -626,7 +690,11 @@ def publish_cascade(channel, request_id: str, correlation_id: str, targets: list
 
 
 def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: bool = False):
-    """Run as a queue consumer, listening for gateway requests"""
+    """Run as a queue consumer, listening for gateway requests.
+
+    Uses GuideConsumerV2.process_signatures() for core processing logic.
+    Gateway-specific publishing (response + cascade) happens after processing.
+    """
     print(f"""
 +-----------------------------------------------------------+
 |         Guide Shredder - Queue Consumer Mode              |
@@ -637,13 +705,8 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
 +-----------------------------------------------------------+
 """)
 
-    # Legacy queues disabled - cascade routing handles downstream workers
-    # Set to None to skip legacy publishing
-    legacy_channel = None
-
     # Setup DB connection
     db_conn = mysql.connector.connect(**DB_CONFIG)
-    cursor = db_conn.cursor()
     print("[OK] Database connected")
 
     # Setup Solscan session
@@ -651,26 +714,35 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
 
     while True:
         try:
-            # Setup gateway connection
+            # Setup gateway connection (for response/cascade publishing)
             gateway_conn, gateway_channel = setup_gateway_rabbitmq()
             gateway_channel.basic_qos(prefetch_count=prefetch)
+
+            # Instantiate consumer with proven processing logic
+            # Pass gateway_channel but set no_funding/no_detail to skip legacy queue publishing
+            consumer = GuideConsumerV2(
+                db_conn=db_conn,
+                channel=gateway_channel,  # Used for internal methods
+                solscan_session=solscan_session,
+                no_funding=True,   # Skip legacy funding queue (use cascade instead)
+                no_detail=True     # Skip legacy detail queue (use cascade instead)
+            )
 
             print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
             print("[INFO] Waiting for requests...")
 
             def callback(ch, method, properties, body):
-                nonlocal cursor
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
-                    correlation_id = message.get('correlation_id', request_id)  # Track original request
-                    batch = message.get('batch', {})
+                    correlation_id = message.get('correlation_id', request_id)
+                    batch_data = message.get('batch', {})
                     api_key = message.get('api_key', 'internal_cascade_key')
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (correlation: {correlation_id[:8]})")
 
                     # Extract signatures from batch
-                    signatures = batch.get('signatures', [])
+                    signatures = batch_data.get('signatures', [])
                     if not signatures:
                         print(f"  No signatures in batch, skipping")
                         publish_response(gateway_channel, request_id, 'completed',
@@ -680,116 +752,46 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
 
                     print(f"  Processing {len(signatures)} signatures...")
 
-                    # Pre-filter existing (returns tuple: new_sigs, need_detail_sigs)
-                    new_sigs, need_detail_sigs = filter_existing_signatures(cursor, signatures)
-                    print(f"  After filter: {len(new_sigs)} new, {len(need_detail_sigs)} need detail")
+                    # === USE PROVEN CLASS METHOD FOR CORE PROCESSING ===
+                    # skip_legacy_queues=True because we use gateway cascades instead
+                    result = consumer.process_signatures(signatures, skip_legacy_queues=True)
 
-                    if not new_sigs:
-                        print(f"  All {len(signatures)} signatures already exist")
-                        result = {
+                    # Build response from result
+                    if result.get('error'):
+                        status = 'failed'
+                        response_data = {'processed': 0, 'error': result['error']}
+                    elif result['processed'] == 0:
+                        status = 'completed'
+                        response_data = {
                             'processed': 0,
-                            'skipped': len(signatures),
+                            'skipped': result['skipped'],
                             'already_exist': True
                         }
-                        status = 'completed'
                     else:
-                        # Batch signatures (Solscan API has URL length limits)
-                        # Process in batches of 20
-                        BATCH_SIZE = 20
-                        all_tx_data = []
-                        all_addresses = set()
+                        status = 'completed'
+                        response_data = {
+                            'processed': result['processed'],
+                            'transactions': result['tx_count'],
+                            'addresses': len(result['addresses']),
+                            'funder_addresses': result['funder_addresses'],
+                            'cascade_to': ['detailer', 'funder', 'aggregator']
+                        }
 
-                        for i in range(0, len(new_sigs), BATCH_SIZE):
-                            batch = new_sigs[i:i + BATCH_SIZE]
-                            print(f"  Fetching batch {i//BATCH_SIZE + 1}/{(len(new_sigs) + BATCH_SIZE - 1)//BATCH_SIZE} ({len(batch)} sigs)...")
+                    # Publish response to gateway
+                    publish_response(gateway_channel, request_id, status, response_data)
 
-                            try:
-                                decoded = fetch_decoded_batch(solscan_session, batch)
-                                if decoded.get('success') and decoded.get('data'):
-                                    all_tx_data.extend(decoded['data'])
-                                    # Collect addresses
-                                    for tx in decoded['data']:
-                                        for activity in tx.get('activities', []):
-                                            if activity.get('from'):
-                                                all_addresses.add(activity['from'])
-                                            if activity.get('to'):
-                                                all_addresses.add(activity['to'])
-                                else:
-                                    print(f"    Batch {i//BATCH_SIZE + 1} returned no data")
-                            except Exception as batch_err:
-                                print(f"    Batch {i//BATCH_SIZE + 1} error: {batch_err}")
-
-                            # Small delay between batches
-                            if i + BATCH_SIZE < len(new_sigs):
-                                time.sleep(0.3)
-
-                        # Process batched data
-                        try:
-                            if all_tx_data:
-                                print(f"  Calling sp_tx_shred_batch with {len(all_tx_data)} transactions...")
-
-                                # Call stored procedure (1 IN + 6 OUT parameters)
-                                # OUT params: p_tx_count, p_edge_count, p_address_count, p_transfer_count, p_swap_count, p_activity_count
-                                # SP expects {"data": [...]} format
-                                args = [json.dumps({'data': all_tx_data}), 0, 0, 0, 0, 0, 0]
-                                result = cursor.callproc('sp_tx_shred_batch', args)
-
-                                # Get OUT parameter values (result contains the modified args)
-                                sp_tx_count = result[1]
-                                sp_edge_count = result[2]
-                                sp_address_count = result[3]
-                                sp_transfer_count = result[4]
-                                sp_swap_count = result[5]
-                                sp_activity_count = result[6]
-
-                                db_conn.commit()
-                                print(f"  SP complete: tx={sp_tx_count} edges={sp_edge_count} addrs={sp_address_count} "
-                                      f"xfers={sp_transfer_count} swaps={sp_swap_count} acts={sp_activity_count}")
-
-                                # Get addresses needing funding lookup (init_tx_fetched = 0 or NULL)
-                                # Pass full addresses so funder doesn't need DB lookup
-                                addresses_for_funder = []
-                                if all_addresses:
-                                    placeholders = ','.join(['%s'] * len(all_addresses))
-                                    cursor.execute(f"""
-                                        SELECT address FROM tx_address
-                                        WHERE address IN ({placeholders})
-                                        AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
-                                        AND address_type IN ('wallet', 'unknown')
-                                    """, list(all_addresses))
-                                    addresses_for_funder = [row[0] for row in cursor.fetchall()]
-                                    print(f"  Found {len(addresses_for_funder)} addresses needing funding lookup")
-
-                                result = {
-                                    'processed': len(new_sigs),
-                                    'transactions': len(all_tx_data),
-                                    'addresses': len(all_addresses),
-                                    'funder_addresses': addresses_for_funder,  # Full addresses for funder
-                                    'cascade_to': ['detailer', 'funder', 'aggregator']
-                                }
-                                status = 'completed'
-                            else:
-                                result = {'processed': 0, 'error': 'Solscan API returned no data for any batch'}
-                                status = 'failed'
-                        except Exception as e:
-                            print(f"  [ERROR] {e}")
-                            import traceback
-                            traceback.print_exc()
-                            result = {'processed': 0, 'error': str(e)}
-                            status = 'failed'
-
-                    # Publish response
-                    publish_response(gateway_channel, request_id, status, result)
-
-                    # Send cascade if we processed transactions
-                    if result.get('cascade_to') and result.get('processed', 0) > 0:
+                    # Send cascade if we processed transactions or have sigs needing detail
+                    sigs_for_detail = result['new_sigs'] + result['need_detail_sigs']
+                    if sigs_for_detail and (result['processed'] > 0 or result['need_detail_sigs']):
                         cascade_batch = {
+                            'signatures': sigs_for_detail,
                             'source_signatures': signatures[:5],  # Sample for reference
                             'processed_count': result['processed'],
-                            'address_count': result.get('addresses', 0),
-                            'funder_addresses': result.get('funder_addresses', [])  # Full addresses for funder
+                            'address_count': len(result['addresses']),
+                            'funder_addresses': result['funder_addresses']
                         }
-                        publish_cascade(gateway_channel, request_id, correlation_id, result['cascade_to'], cascade_batch, api_key)
+                        publish_cascade(gateway_channel, request_id, correlation_id,
+                                      ['detailer', 'funder', 'aggregator'], cascade_batch, api_key)
 
                     # Ack the message
                     ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -820,8 +822,6 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
             time.sleep(5)
 
     # Cleanup
-    if legacy_conn:
-        legacy_conn.close()
     if db_conn:
         db_conn.close()
     solscan_session.close()

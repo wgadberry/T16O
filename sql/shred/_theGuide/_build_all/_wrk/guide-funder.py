@@ -335,6 +335,9 @@ def run_queue_consumer(args):
     Run in gateway queue consumer mode.
     Consumes from mq.guide.funder.request, processes addresses,
     and publishes responses to mq.guide.funder.response.
+
+    Uses AddressHistoryWorker.process_addresses() for core processing logic.
+    Gateway-specific publishing (response) happens after processing.
     """
     import uuid
     from datetime import datetime
@@ -379,6 +382,16 @@ def run_queue_consumer(args):
     connection, channel = setup_gateway_rabbitmq()
     channel.basic_qos(prefetch_count=1)
 
+    # Instantiate worker with proven processing logic
+    worker = AddressHistoryWorker(
+        db_conn=db_conn,
+        channel=channel,
+        solscan=solscan,
+        tx_limit=args.tx_limit,
+        api_delay=args.api_delay,
+        dry_run=False
+    )
+
     print(f"Waiting for requests on '{RABBITMQ_REQUEST_QUEUE}'...")
     print("Press Ctrl+C to exit\n")
 
@@ -418,133 +431,27 @@ def run_queue_consumer(args):
 
             print(f"  Addresses: {len(addresses)}")
 
-            # Filter out known programs and system addresses
-            addresses = [a for a in addresses if not should_skip_address(a)]
-
-            # Ensure addresses exist in DB
-            for addr in addresses:
-                cursor.execute("""
-                    INSERT IGNORE INTO tx_address (address, address_type)
-                    VALUES (%s, 'unknown')
-                """, (addr,))
-            db_conn.commit()
-
-            # Get address info
-            addr_info = {}
-            if addresses:
-                placeholders = ','.join(['%s'] * len(addresses))
-                cursor.execute(f"""
-                    SELECT id, address, address_type, init_tx_fetched
-                    FROM tx_address WHERE address IN ({placeholders})
-                """, addresses)
-                addr_info = {row['address']: row for row in cursor.fetchall()}
-
-            # Filter to unprocessed addresses and claim them
-            candidates = [a for a in addresses
-                         if not addr_info.get(a, {}).get('init_tx_fetched')]
-
-            claimed = []
-            for addr in candidates:
-                cursor.execute("""
-                    UPDATE tx_address SET init_tx_fetched = 2
-                    WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
-                """, (addr,))
-                if cursor.rowcount > 0:
-                    claimed.append(addr)
-            db_conn.commit()
-
-            print(f"  Claimed: {len(claimed)} (skipped {len(addresses) - len(claimed)})")
-
-            # Process each address
-            funders_found = 0
-            funders_not_found = 0
-            initialized = []
-
-            for i, addr in enumerate(claimed):
-                print(f"  [{i+1}/{len(claimed)}] {addr[:20]}...", end='')
-
-                time.sleep(args.api_delay)
-                data = solscan.get_account_transfers(addr, args.tx_limit)
-                funding_info = solscan.find_funding_wallet(addr, data) if data else None
-
-                if funding_info:
-                    print(f" -> funded by {funding_info['funder'][:16]}...")
-                    # Save funding info (simplified version)
-                    funder = funding_info['funder']
-                    signature = funding_info['signature']
-                    amount = funding_info['amount']
-                    block_time = funding_info['block_time']
-
-                    cursor.execute("""
-                        INSERT IGNORE INTO tx_address (address, address_type)
-                        VALUES (%s, 'wallet')
-                    """, (funder,))
-                    cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
-                    funder_row = cursor.fetchone()
-                    funder_id = funder_row['id'] if funder_row else None
-
-                    cursor.execute("SELECT id FROM tx_address WHERE address = %s", (addr,))
-                    target_row = cursor.fetchone()
-                    target_id = target_row['id'] if target_row else None
-
-                    tx_id = None
-                    if signature:
-                        cursor.execute("""
-                            INSERT IGNORE INTO tx (signature, block_time, tx_state)
-                            VALUES (%s, %s, 1)
-                        """, (signature, block_time))
-                        cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
-                        tx_row = cursor.fetchone()
-                        tx_id = tx_row['id'] if tx_row else None
-
-                    cursor.execute("""
-                        UPDATE tx_address
-                        SET funded_by_address_id = %s, funding_tx_id = %s,
-                            funding_amount = %s, first_seen_block_time = %s
-                        WHERE address = %s AND funded_by_address_id IS NULL
-                    """, (funder_id, tx_id, amount, block_time, addr))
-
-                    # Create funding edge
-                    sol_amount = float(amount) / 1e9 if amount else 0
-                    if funder_id and target_id:
-                        cursor.execute("""
-                            INSERT INTO tx_funding_edge
-                            (from_address_id, to_address_id, total_sol, transfer_count,
-                             first_transfer_time, last_transfer_time)
-                            VALUES (%s, %s, %s, 1, %s, %s)
-                            ON DUPLICATE KEY UPDATE
-                                total_sol = VALUES(total_sol),
-                                transfer_count = transfer_count + 1,
-                                last_transfer_time = VALUES(last_transfer_time)
-                        """, (funder_id, target_id, sol_amount, block_time, block_time))
-
-                    funders_found += 1
-                else:
-                    print(f" -> no funder found")
-                    funders_not_found += 1
-
-                initialized.append(addr)
-
-            # Mark all as initialized
-            if initialized:
-                placeholders = ','.join(['%s'] * len(initialized))
-                cursor.execute(f"""
-                    UPDATE tx_address SET init_tx_fetched = 1
-                    WHERE address IN ({placeholders})
-                """, initialized)
-            db_conn.commit()
+            # === USE PROVEN CLASS METHOD FOR CORE PROCESSING ===
+            result = worker.process_addresses(addresses)
 
             elapsed = time.time() - start_time
 
-            # Publish response
-            publish_response(ch, request_id, 'completed', {
-                'processed': len(claimed),
-                'funders_found': funders_found,
-                'funders_not_found': funders_not_found,
-                'elapsed_seconds': round(elapsed, 2)
-            })
+            # Build response from result
+            if result.get('error'):
+                status = 'failed'
+                response_data = {'processed': 0, 'error': result['error']}
+            else:
+                status = 'completed'
+                response_data = {
+                    'processed': result['processed'],
+                    'funders_found': result['funders_found'],
+                    'funders_not_found': result['funders_not_found'],
+                    'elapsed_seconds': round(elapsed, 2)
+                }
 
-            print(f"  Completed in {elapsed:.1f}s: {funders_found} found, {funders_not_found} not found")
+            publish_response(ch, request_id, status, response_data)
+
+            print(f"  Completed in {elapsed:.1f}s: {result['funders_found']} found, {result['funders_not_found']} not found")
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
         except MySQLError as e:
@@ -812,6 +719,88 @@ class AddressHistoryWorker:
             return None
 
         return self.solscan.find_funding_wallet(address, data)
+
+    def process_addresses(self, addresses: List[str]) -> Dict:
+        """
+        Core processing logic for a list of addresses.
+        Returns dict with: processed, claimed, funders_found, funders_not_found
+
+        Used by both process_batch() and run_queue_consumer() to avoid code duplication.
+        """
+        result = {
+            'processed': 0,
+            'claimed': 0,
+            'skipped': 0,
+            'funders_found': 0,
+            'funders_not_found': 0,
+            'error': None
+        }
+
+        if not addresses:
+            return result
+
+        # Filter out known programs and system addresses
+        addresses = [a for a in addresses if not should_skip_address(a)]
+        if not addresses:
+            return result
+
+        # Step 1: Ensure all addresses exist in DB
+        self.ensure_addresses_exist(addresses)
+
+        # Step 2: Get address info from DB
+        address_info = self.get_address_info(addresses)
+
+        # Step 3: Filter to addresses that need funding lookup
+        candidates = []
+        for addr in addresses:
+            info = address_info.get(addr, {})
+            if not info.get('init_tx_fetched'):
+                candidates.append(addr)
+            else:
+                result['skipped'] += 1
+
+        print(f"  Candidates for lookup: {len(candidates)}")
+        print(f"  Already processed/claimed: {result['skipped']}")
+
+        # Step 4: Atomically claim addresses
+        claimed = self.claim_addresses(candidates)
+        result['claimed'] = len(claimed)
+        if len(claimed) < len(candidates):
+            skipped_by_claim = len(candidates) - len(claimed)
+            print(f"  Claimed: {len(claimed)} (skipped {skipped_by_claim} claimed by others)")
+            result['skipped'] += skipped_by_claim
+
+        if self.dry_run:
+            print(f"  DRY RUN - would lookup funding for {len(claimed)} addresses")
+            return result
+
+        # Step 5: Find funders for each address
+        initialized_addresses = []
+        for i, addr in enumerate(claimed):
+            print(f"  [{i+1}/{len(claimed)}] {addr[:20]}...", end='')
+
+            funding_info = self.find_funder_for_address(addr)
+
+            if funding_info:
+                print(f" -> funded by {funding_info['funder'][:16]}...")
+                self.save_funding_info(addr, funding_info)
+                result['funders_found'] += 1
+                self.funders_found += 1
+            else:
+                print(f" -> no funder found")
+                result['funders_not_found'] += 1
+                self.funders_not_found += 1
+
+            initialized_addresses.append(addr)
+            result['processed'] += 1
+            self.addresses_processed += 1
+
+        # Step 6: Mark addresses as processed
+        if initialized_addresses:
+            self.mark_addresses_initialized(initialized_addresses)
+            print(f"\n  Marked {len(initialized_addresses)} addresses as processed")
+
+        return result
 
     def fetch_address_history(self, address: str, address_type: Optional[str]) -> Set[str]:
         """

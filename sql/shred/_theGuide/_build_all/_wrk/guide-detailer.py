@@ -217,7 +217,7 @@ class GuideDetailerConsumer:
         """Call sp_tx_detail_batch with JSON, return (tx_count, detail_count)"""
         json_str = json.dumps(json_data)
 
-        # Call stored procedure
+        # Call stored procedure using session variables (callproc doesn't bind OUT params properly)
         self.cursor.execute("SET @p_tx = 0, @p_detail = 0")
         self.cursor.execute("CALL sp_tx_detail_batch(%s, @p_tx, @p_detail)", (json_str,))
         self.cursor.execute("SELECT @p_tx, @p_detail")
@@ -230,8 +230,70 @@ class GuideDetailerConsumer:
 
         return tx_count, detail_count
 
+    async def process_signatures(self, signatures: list) -> dict:
+        """
+        Core processing logic for a batch of signatures.
+        Returns dict with: processed, skipped, tx_count, detail_count, error
+
+        Used by both on_message() and run_queue_consumer() to avoid code duplication.
+        """
+        result = {
+            'processed': 0,
+            'skipped': 0,
+            'tx_count': 0,
+            'detail_count': 0,
+            'error': None
+        }
+
+        if not signatures:
+            return result
+
+        # Phase 0: Pre-filter to existing signatures
+        original_count = len(signatures)
+        valid_sigs = filter_to_existing_signatures(self.cursor, signatures)
+        result['skipped'] = original_count - len(valid_sigs)
+
+        if result['skipped'] > 0:
+            print(f"  [~] Skipped {result['skipped']}/{original_count} non-existing signatures")
+
+        if not valid_sigs:
+            print(f"  [=] No valid signatures found")
+            return result
+
+        # Phase 1: Fetch detail data from Solscan
+        start_time = time.time()
+        session = await self.get_api_session()
+        detail_response = await fetch_detail(session, valid_sigs)
+        fetch_time = time.time() - start_time
+
+        if not detail_response.get('success'):
+            result['error'] = 'Detail API returned unsuccessful response'
+            return result
+
+        # Phase 2: Wrap response for stored procedure
+        combined = wrap_detail_response(detail_response)
+
+        # Phase 3: Call stored procedure
+        sp_start = time.time()
+        tx_count, detail_count = self.call_detail_batch(combined)
+        sp_time = time.time() - sp_start
+
+        total_time = time.time() - start_time
+        print(f"  [+] tx={tx_count} details={detail_count} "
+              f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
+
+        result['processed'] = len(valid_sigs)
+        result['tx_count'] = tx_count
+        result['detail_count'] = detail_count
+
+        # Update totals
+        self.total_tx += tx_count
+        self.total_details += detail_count
+
+        return result
+
     def on_message(self, channel, method, properties, body):
-        """Handle incoming message"""
+        """Handle incoming message (legacy queue mode)"""
         try:
             data = json.loads(body)
             signatures = data.get('signatures', [])
@@ -253,54 +315,13 @@ class GuideDetailerConsumer:
                 self.message_count += 1
                 return
 
-            # === Phase 0: Pre-filter to existing signatures ===
-            original_count = len(signatures)
-            signatures = filter_to_existing_signatures(self.cursor, signatures)
-            skipped_count = original_count - len(signatures)
+            # Use shared processing logic
+            result = self.loop.run_until_complete(self.process_signatures(signatures))
 
-            if skipped_count > 0:
-                print(f"  [~] Skipped {skipped_count}/{original_count} non-existing signatures")
-
-            if not signatures:
-                print(f"  [=] No valid signatures found, ACK and skip")
-                channel.basic_ack(delivery_tag=method.delivery_tag)
-                self.message_count += 1
-                return
-
-            # === Phase 1: Fetch detail data from Solscan ===
-            start_time = time.time()
-
-            # Run async fetch in event loop with lazy session creation
-            async def fetch_with_session(sigs):
-                session = await self.get_api_session()
-                return await fetch_detail(session, sigs)
-
-            detail_response = self.loop.run_until_complete(
-                fetch_with_session(signatures)
-            )
-
-            fetch_time = time.time() - start_time
-
-            if not detail_response.get('success'):
-                print(f"  [!] Detail API returned unsuccessful response")
+            if result.get('error'):
+                print(f"  [!] Error: {result['error']}")
                 channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                 return
-
-            # === Phase 2: Wrap response for stored procedure ===
-            combined = wrap_detail_response(detail_response)
-
-            # === Phase 3: Call stored procedure to process JSON ===
-            sp_start = time.time()
-            tx_count, detail_count = self.call_detail_batch(combined)
-            sp_time = time.time() - sp_start
-
-            total_time = time.time() - start_time
-
-            print(f"  [+] tx={tx_count} details={detail_count} "
-                  f"(fetch={fetch_time:.2f}s, SP={sp_time:.2f}s, total={total_time:.2f}s)")
-
-            self.total_tx += tx_count
-            self.total_details += detail_count
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
             self.message_count += 1
@@ -388,7 +409,11 @@ def publish_response(channel, request_id: str, status: str, result: dict):
 
 
 def run_queue_consumer(prefetch: int = 1):
-    """Run as a queue consumer, listening for gateway requests"""
+    """Run as a queue consumer, listening for gateway requests.
+
+    Uses GuideDetailerConsumer.process_signatures() for core processing logic.
+    Gateway-specific publishing (response) happens after processing.
+    """
     print(f"""
 +-----------------------------------------------------------+
 |         Guide Detailer - Queue Consumer Mode              |
@@ -401,17 +426,18 @@ def run_queue_consumer(prefetch: int = 1):
 
     # Setup DB connection
     db_conn = mysql.connector.connect(**DB_CONFIG)
-    cursor = db_conn.cursor()
     print("[OK] Database connected")
-
-    # Setup event loop for async API calls
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     while True:
         try:
             gateway_conn, gateway_channel = setup_gateway_rabbitmq()
             gateway_channel.basic_qos(prefetch_count=prefetch)
+
+            # Instantiate consumer with proven processing logic
+            consumer = GuideDetailerConsumer(
+                db_conn=db_conn,
+                channel=gateway_channel
+            )
 
             print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
             print("[INFO] Waiting for requests...")
@@ -420,11 +446,11 @@ def run_queue_consumer(prefetch: int = 1):
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
-                    batch = message.get('batch', {})
+                    batch_data = message.get('batch', {})
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
 
-                    signatures = batch.get('signatures', [])
+                    signatures = batch_data.get('signatures', [])
                     if not signatures:
                         publish_response(gateway_channel, request_id, 'completed',
                                        {'processed': 0, 'message': 'No signatures provided'})
@@ -433,43 +459,31 @@ def run_queue_consumer(prefetch: int = 1):
 
                     print(f"  Processing {len(signatures)} signatures...")
 
-                    # Filter to only existing tx
-                    existing_sigs = filter_existing_signatures(cursor, signatures)
+                    # === USE PROVEN CLASS METHOD FOR CORE PROCESSING ===
+                    result = consumer.loop.run_until_complete(
+                        consumer.process_signatures(signatures)
+                    )
 
-                    if not existing_sigs:
-                        result = {'processed': 0, 'skipped': len(signatures), 'message': 'No matching tx found'}
+                    # Build response from result
+                    if result.get('error'):
+                        status = 'failed'
+                        response_data = {'processed': 0, 'error': result['error']}
+                    elif result['processed'] == 0:
                         status = 'completed'
+                        response_data = {
+                            'processed': 0,
+                            'skipped': result['skipped'],
+                            'message': 'No matching tx found'
+                        }
                     else:
-                        try:
-                            # Fetch detail data
-                            async def fetch_details():
-                                async with aiohttp.ClientSession(
-                                    headers={"token": SOLSCAN_API_TOKEN},
-                                    timeout=aiohttp.ClientTimeout(total=60)
-                                ) as session:
-                                    return await fetch_endpoint(session, 'transaction/detail/multi', existing_sigs)
+                        status = 'completed'
+                        response_data = {
+                            'processed': result['processed'],
+                            'tx_count': result['tx_count'],
+                            'detail_count': result['detail_count']
+                        }
 
-                            detail_data = loop.run_until_complete(fetch_details())
-
-                            if detail_data.get('success') and detail_data.get('data'):
-                                tx_data = detail_data['data']
-
-                                # Call stored procedure
-                                cursor.callproc('sp_tx_detail_batch', [json.dumps(tx_data)])
-                                for _ in cursor.stored_results():
-                                    pass
-                                db_conn.commit()
-
-                                result = {'processed': len(existing_sigs), 'transactions': len(tx_data)}
-                                status = 'completed'
-                            else:
-                                result = {'processed': 0, 'error': 'Solscan API returned no data'}
-                                status = 'failed'
-                        except Exception as e:
-                            result = {'processed': 0, 'error': str(e)}
-                            status = 'failed'
-
-                    publish_response(gateway_channel, request_id, status, result)
+                    publish_response(gateway_channel, request_id, status, response_data)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
                 except Exception as e:
@@ -486,12 +500,15 @@ def run_queue_consumer(prefetch: int = 1):
             time.sleep(5)
         except KeyboardInterrupt:
             print("\n[INFO] Shutting down...")
+            # Cleanup consumer resources
+            if 'consumer' in dir():
+                consumer.loop.run_until_complete(consumer.close_api_session())
+                consumer.loop.close()
             break
         except Exception as e:
             print(f"[ERROR] Unexpected error: {e}")
             time.sleep(5)
 
-    loop.close()
     db_conn.close()
 
 
