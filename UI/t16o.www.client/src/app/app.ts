@@ -1,5 +1,5 @@
 import { HttpClient } from '@angular/common/http';
-import { Component, OnInit, signal, ViewChild } from '@angular/core';
+import { Component, HostListener, OnInit, signal, ViewChild } from '@angular/core';
 import { MenuItem } from 'primeng/api';
 import { Menu } from 'primeng/menu';
 
@@ -8,6 +8,13 @@ interface WeatherForecast {
   temperatureC: number;
   temperatureF: number;
   summary: string;
+}
+
+interface SidebarMenuItem {
+  label: string;
+  icon: string;
+  route?: string;
+  badge?: string;
 }
 
 @Component({
@@ -21,6 +28,22 @@ export class App implements OnInit {
   public darkMode = false;
   public profileMenuItems: MenuItem[] = [];
 
+  // Sidebar state
+  public sidebarVisible = true;
+  public sidebarPinned = true;
+  public sidebarHovered = false;
+  public isMobile = false;
+  public mobileDrawerVisible = false;
+
+  // Sidebar menu items
+  public sidebarMenuItems: SidebarMenuItem[] = [
+    { label: 'Dashboard', icon: 'pi pi-home', route: '/dashboard' },
+    { label: 'Weather', icon: 'pi pi-cloud', route: '/weather' },
+    { label: 'Analytics', icon: 'pi pi-chart-bar', route: '/analytics' },
+    { label: 'Reports', icon: 'pi pi-file', route: '/reports' },
+    { label: 'Settings', icon: 'pi pi-cog', route: '/settings' }
+  ];
+
   @ViewChild('profileMenu') profileMenu!: Menu;
 
   constructor(private http: HttpClient) {}
@@ -28,13 +51,34 @@ export class App implements OnInit {
   ngOnInit() {
     this.getForecasts();
     this.initializeDarkMode();
+    this.initializeSidebar();
     this.buildProfileMenu();
+    this.checkScreenSize();
+  }
+
+  @HostListener('window:resize')
+  onResize() {
+    this.checkScreenSize();
+  }
+
+  private checkScreenSize() {
+    this.isMobile = window.innerWidth < 768;
+    if (this.isMobile) {
+      this.sidebarVisible = false;
+      this.sidebarPinned = false;
+    }
   }
 
   private initializeDarkMode() {
     const savedTheme = localStorage.getItem('darkMode');
     this.darkMode = savedTheme === 'true';
     this.applyTheme();
+  }
+
+  private initializeSidebar() {
+    const savedPinned = localStorage.getItem('sidebarPinned');
+    this.sidebarPinned = savedPinned !== 'false';
+    this.sidebarVisible = this.sidebarPinned;
   }
 
   private buildProfileMenu() {
@@ -61,6 +105,40 @@ export class App implements OnInit {
         command: () => this.logout()
       }
     ];
+  }
+
+  // Sidebar methods
+  toggleSidebarPin() {
+    this.sidebarPinned = !this.sidebarPinned;
+    localStorage.setItem('sidebarPinned', String(this.sidebarPinned));
+    if (!this.sidebarPinned && !this.sidebarHovered) {
+      this.sidebarVisible = false;
+    }
+  }
+
+  onSidebarMouseEnter() {
+    this.sidebarHovered = true;
+    if (!this.sidebarPinned && !this.isMobile) {
+      this.sidebarVisible = true;
+    }
+  }
+
+  onSidebarMouseLeave() {
+    this.sidebarHovered = false;
+    if (!this.sidebarPinned && !this.isMobile) {
+      this.sidebarVisible = false;
+    }
+  }
+
+  toggleMobileDrawer() {
+    this.mobileDrawerVisible = !this.mobileDrawerVisible;
+  }
+
+  onMenuItemClick(item: SidebarMenuItem) {
+    console.log('Navigate to:', item.route);
+    if (this.isMobile) {
+      this.mobileDrawerVisible = false;
+    }
   }
 
   onDarkModeChange() {

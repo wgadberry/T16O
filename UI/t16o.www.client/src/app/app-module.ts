@@ -14,7 +14,10 @@ import { AvatarModule } from 'primeng/avatar';
 import { MenuModule } from 'primeng/menu';
 import { ToggleSwitchModule } from 'primeng/toggleswitch';
 import { RippleModule } from 'primeng/ripple';
+import { TooltipModule } from 'primeng/tooltip';
+import { DrawerModule } from 'primeng/drawer';
 import { FormsModule } from '@angular/forms';
+import { CommonModule } from '@angular/common';
 
 import { AppRoutingModule } from './app-routing-module';
 import { App } from './app';
@@ -28,6 +31,7 @@ import { App } from './app';
     BrowserAnimationsModule,
     HttpClientModule,
     FormsModule,
+    CommonModule,
     AppRoutingModule,
     TableModule,
     CardModule,
@@ -37,7 +41,9 @@ import { App } from './app';
     AvatarModule,
     MenuModule,
     ToggleSwitchModule,
-    RippleModule
+    RippleModule,
+    TooltipModule,
+    DrawerModule
   ],
   providers: [
     provideBrowserGlobalErrorListeners(),
