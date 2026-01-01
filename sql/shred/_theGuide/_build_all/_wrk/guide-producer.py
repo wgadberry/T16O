@@ -429,33 +429,64 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     estimated_batches = (max_signatures + batch_size - 1) // batch_size  # Ceiling division
 
     try:
-        # Use smart sync if we have DB - find last known signature for this address
-        last_sig = None
+        # Smart sync: determine if we need NEW signatures or MORE historical ones
+        until_sig = None  # For fetching new signatures (stop at this one)
+        before_sig = None  # For fetching older signatures (start from this one going back)
+        existing_count = 0
+
         if db_cursor:
-            # First get address_id
+            # Get address_id and count existing signatures
             db_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (address,))
             addr_row = db_cursor.fetchone()
             if addr_row:
                 addr_id = addr_row[0]
-                # Look for most recent tx involving this address (as signer or in guide edges)
+
+                # Count existing signatures for this address
                 db_cursor.execute("""
-                    SELECT t.signature FROM tx t
+                    SELECT COUNT(DISTINCT t.id) FROM tx t
                     LEFT JOIN tx_guide g ON g.tx_id = t.id
                     WHERE t.signer_address_id = %s
                        OR g.from_address_id = %s
                        OR g.to_address_id = %s
-                    ORDER BY t.block_time DESC LIMIT 1
                 """, (addr_id, addr_id, addr_id))
-                row = db_cursor.fetchone()
-                if row:
-                    last_sig = row[0]
-                    print(f"  Smart sync: starting after {last_sig[:20]}...")
+                existing_count = db_cursor.fetchone()[0] or 0
+
+                if existing_count > 0:
+                    if max_signatures > existing_count:
+                        # User wants MORE historical data - use 'before' with oldest sig
+                        db_cursor.execute("""
+                            SELECT t.signature FROM tx t
+                            LEFT JOIN tx_guide g ON g.tx_id = t.id
+                            WHERE t.signer_address_id = %s
+                               OR g.from_address_id = %s
+                               OR g.to_address_id = %s
+                            ORDER BY t.block_time ASC LIMIT 1
+                        """, (addr_id, addr_id, addr_id))
+                        row = db_cursor.fetchone()
+                        if row:
+                            before_sig = row[0]
+                            print(f"  Fetching {max_signatures - existing_count} MORE historical sigs (have {existing_count}, want {max_signatures})")
+                            print(f"  Starting before: {before_sig[:20]}...")
+                    else:
+                        # Only fetch NEW signatures - use 'until' with newest sig
+                        db_cursor.execute("""
+                            SELECT t.signature FROM tx t
+                            LEFT JOIN tx_guide g ON g.tx_id = t.id
+                            WHERE t.signer_address_id = %s
+                               OR g.from_address_id = %s
+                               OR g.to_address_id = %s
+                            ORDER BY t.block_time DESC LIMIT 1
+                        """, (addr_id, addr_id, addr_id))
+                        row = db_cursor.fetchone()
+                        if row:
+                            until_sig = row[0]
+                            print(f"  Smart sync: fetching new sigs after {until_sig[:20]}...")
 
         signatures = []
         all_signatures = []  # Track all signatures for final response
         for sig_obj in fetch_all_signatures(
             rpc_session, address, CHAINSTACK_RPC_URL,
-            max_signatures=max_signatures, until=last_sig
+            max_signatures=max_signatures, until=until_sig, before=before_sig
         ):
             # Extract signature string from the RPC response object
             sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
