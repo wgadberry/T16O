@@ -1,0 +1,31 @@
+<p-toolbar styleClass="top-bar">
+  <ng-template #start>
+    <div class="logo-section">
+      <button *ngIf="isMobile"
+              class="mobile-menu-btn"
+              (click)="onMenuToggle()"
+              pRipple>
+        <i class="pi pi-bars"></i>
+      </button>
+      <i class="pi pi-box logo-icon"></i>
+      <span class="site-name">{{ title }}</span>
+    </div>
+  </ng-template>
+
+  <ng-template #end>
+    <div class="user-section">
+      <div class="theme-toggle">
+        <i class="pi" [ngClass]="darkMode ? 'pi-moon' : 'pi-sun'"></i>
+        <p-toggleswitch [(ngModel)]="darkMode" (onChange)="onDarkModeChange()"></p-toggleswitch>
+      </div>
+
+      <p-avatar icon="pi pi-user"
+                styleClass="user-avatar"
+                shape="circle"
+                (click)="toggleProfileMenu($event)"
+                pRipple>
+      </p-avatar>
+      <p-menu #profileMenu [model]="profileMenuItems" [popup]="true"></p-menu>
+    </div>
+  </ng-template>
+</p-toolbar>

@@ -1,21 +1,6 @@
-import { HttpClient } from '@angular/common/http';
-import { Component, HostListener, OnInit, signal, ViewChild } from '@angular/core';
-import { MenuItem } from 'primeng/api';
-import { Menu } from 'primeng/menu';
-
-interface WeatherForecast {
-  date: string;
-  temperatureC: number;
-  temperatureF: number;
-  summary: string;
-}
-
-interface SidebarMenuItem {
-  label: string;
-  icon: string;
-  route?: string;
-  badge?: string;
-}
+import { Component, HostListener, OnInit, ViewChild } from '@angular/core';
+import { SidebarMenuItem } from './components/sidebar/sidebar.component';
+import { SidebarComponent } from './components/sidebar/sidebar.component';
 
 @Component({
   selector: 'app-root',
@@ -24,18 +9,13 @@ interface SidebarMenuItem {
   styleUrl: './app.css'
 })
 export class App implements OnInit {
-  public forecasts: WeatherForecast[] = [];
+  public title = 'T16O';
   public darkMode = false;
-  public profileMenuItems: MenuItem[] = [];
-
-  // Sidebar state
-  public sidebarVisible = true;
-  public sidebarPinned = true;
-  public sidebarHovered = false;
   public isMobile = false;
   public mobileDrawerVisible = false;
 
-  // Sidebar menu items
+  @ViewChild(SidebarComponent) sidebar!: SidebarComponent;
+
   public sidebarMenuItems: SidebarMenuItem[] = [
     { label: 'Dashboard', icon: 'pi pi-home', route: '/dashboard' },
     { label: 'Weather', icon: 'pi pi-cloud', route: '/weather' },
@@ -44,15 +24,8 @@ export class App implements OnInit {
     { label: 'Settings', icon: 'pi pi-cog', route: '/settings' }
   ];
 
-  @ViewChild('profileMenu') profileMenu!: Menu;
-
-  constructor(private http: HttpClient) {}
-
   ngOnInit() {
-    this.getForecasts();
     this.initializeDarkMode();
-    this.initializeSidebar();
-    this.buildProfileMenu();
     this.checkScreenSize();
   }
 
@@ -64,8 +37,7 @@ export class App implements OnInit {
   private checkScreenSize() {
     this.isMobile = window.innerWidth < 768;
     if (this.isMobile) {
-      this.sidebarVisible = false;
-      this.sidebarPinned = false;
+      this.mobileDrawerVisible = false;
     }
   }
 
@@ -75,73 +47,8 @@ export class App implements OnInit {
     this.applyTheme();
   }
 
-  private initializeSidebar() {
-    const savedPinned = localStorage.getItem('sidebarPinned');
-    this.sidebarPinned = savedPinned !== 'false';
-    this.sidebarVisible = this.sidebarPinned;
-  }
-
-  private buildProfileMenu() {
-    this.profileMenuItems = [
-      {
-        label: 'Profile',
-        items: [
-          {
-            label: 'My Account',
-            icon: 'pi pi-user'
-          },
-          {
-            label: 'Settings',
-            icon: 'pi pi-cog'
-          }
-        ]
-      },
-      {
-        separator: true
-      },
-      {
-        label: 'Logout',
-        icon: 'pi pi-sign-out',
-        command: () => this.logout()
-      }
-    ];
-  }
-
-  // Sidebar methods
-  toggleSidebarPin() {
-    this.sidebarPinned = !this.sidebarPinned;
-    localStorage.setItem('sidebarPinned', String(this.sidebarPinned));
-    if (!this.sidebarPinned && !this.sidebarHovered) {
-      this.sidebarVisible = false;
-    }
-  }
-
-  onSidebarMouseEnter() {
-    this.sidebarHovered = true;
-    if (!this.sidebarPinned && !this.isMobile) {
-      this.sidebarVisible = true;
-    }
-  }
-
-  onSidebarMouseLeave() {
-    this.sidebarHovered = false;
-    if (!this.sidebarPinned && !this.isMobile) {
-      this.sidebarVisible = false;
-    }
-  }
-
-  toggleMobileDrawer() {
-    this.mobileDrawerVisible = !this.mobileDrawerVisible;
-  }
-
-  onMenuItemClick(item: SidebarMenuItem) {
-    console.log('Navigate to:', item.route);
-    if (this.isMobile) {
-      this.mobileDrawerVisible = false;
-    }
-  }
-
-  onDarkModeChange() {
+  onDarkModeChange(darkMode: boolean) {
+    this.darkMode = darkMode;
     localStorage.setItem('darkMode', String(this.darkMode));
     this.applyTheme();
   }
@@ -155,32 +62,19 @@ export class App implements OnInit {
     }
   }
 
-  toggleProfileMenu(event: Event) {
-    this.profileMenu.toggle(event);
+  onMenuToggle() {
+    this.mobileDrawerVisible = !this.mobileDrawerVisible;
   }
 
-  logout() {
+  onLogout() {
     console.log('Logout clicked');
   }
 
-  getForecasts() {
-    this.http.get<WeatherForecast[]>('/weatherforecast').subscribe({
-      next: (result) => {
-        this.forecasts = result;
-      },
-      error: (error) => {
-        console.error(error);
-      }
-    });
+  get sidebarVisible(): boolean {
+    return this.sidebar?.sidebarVisible ?? true;
   }
 
-  getTemperatureSeverity(tempC: number): 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast' {
-    if (tempC <= 0) return 'info';
-    if (tempC <= 15) return 'secondary';
-    if (tempC <= 25) return 'success';
-    if (tempC <= 35) return 'warn';
-    return 'danger';
+  get sidebarPinned(): boolean {
+    return this.sidebar?.sidebarPinned ?? true;
   }
-
-  protected readonly title = signal('T16O');
 }

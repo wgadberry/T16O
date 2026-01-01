@@ -22,9 +22,25 @@ import { CommonModule } from '@angular/common';
 import { AppRoutingModule } from './app-routing-module';
 import { App } from './app';
 
+// Components
+import { TopBarComponent } from './components/top-bar/top-bar.component';
+import { SidebarComponent } from './components/sidebar/sidebar.component';
+import { WeatherForecastComponent } from './components/weather-forecast/weather-forecast.component';
+
+// Pages
+import { DashboardPage } from './pages/dashboard/dashboard.page';
+import { WeatherPage } from './pages/weather/weather.page';
+
 @NgModule({
   declarations: [
-    App
+    App,
+    // Components
+    TopBarComponent,
+    SidebarComponent,
+    WeatherForecastComponent,
+    // Pages
+    DashboardPage,
+    WeatherPage
   ],
   imports: [
     BrowserModule,

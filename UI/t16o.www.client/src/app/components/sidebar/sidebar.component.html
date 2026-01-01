@@ -1,0 +1,59 @@
+<!-- Desktop Sidebar -->
+<aside *ngIf="!isMobile"
+       class="sidebar"
+       [class.sidebar-visible]="sidebarVisible"
+       [class.sidebar-pinned]="sidebarPinned"
+       (mouseenter)="onSidebarMouseEnter()"
+       (mouseleave)="onSidebarMouseLeave()">
+
+  <div class="sidebar-trigger" *ngIf="!sidebarVisible && !sidebarPinned">
+    <i class="pi pi-angle-right"></i>
+  </div>
+
+  <div class="sidebar-content" *ngIf="sidebarVisible">
+    <div class="sidebar-header">
+      <span class="sidebar-title">Menu</span>
+      <button class="pin-btn"
+              (click)="toggleSidebarPin()"
+              [pTooltip]="sidebarPinned ? 'Unpin menu' : 'Pin menu'"
+              tooltipPosition="right"
+              pRipple>
+        <i class="pi" [ngClass]="sidebarPinned ? 'pi-lock' : 'pi-lock-open'"></i>
+      </button>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a *ngFor="let item of menuItems"
+         class="sidebar-item"
+         [routerLink]="item.route"
+         routerLinkActive="active"
+         (click)="onMenuItemClick(item)"
+         pRipple>
+        <i [class]="item.icon"></i>
+        <span class="sidebar-item-label">{{ item.label }}</span>
+      </a>
+    </nav>
+  </div>
+</aside>
+
+<!-- Mobile Drawer -->
+<p-drawer *ngIf="isMobile"
+          [visible]="mobileDrawerVisible"
+          (visibleChange)="onMobileDrawerHide()"
+          [modal]="true"
+          [showCloseIcon]="true"
+          header="Menu"
+          position="left"
+          styleClass="mobile-drawer">
+  <nav class="sidebar-nav">
+    <a *ngFor="let item of menuItems"
+       class="sidebar-item"
+       [routerLink]="item.route"
+       routerLinkActive="active"
+       (click)="onMenuItemClick(item)"
+       pRipple>
+      <i [class]="item.icon"></i>
+      <span class="sidebar-item-label">{{ item.label }}</span>
+    </a>
+  </nav>
+</p-drawer>
