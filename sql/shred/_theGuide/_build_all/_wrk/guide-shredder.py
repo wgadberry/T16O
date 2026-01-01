@@ -200,39 +200,28 @@ def extract_signers_from_json(data: dict) -> dict:
 
 def extract_addresses_from_json(data: dict) -> set:
     """
-    Extract distinct wallet/mint addresses from Solscan response.
-    These go to the funding queue.
+    Extract only wallet addresses (source/destination owners) from transfers.
+
+    These are the actual wallets that need funding lookup.
+    We no longer extract:
+    - Token mint addresses (they're programs, not fundable wallets)
+    - Activity account addresses (ATAs, vaults, pools - not fundable)
+    - Swap token_1/token_2 (mint addresses, not wallets)
+
+    This reduces addresses by ~60-80% per batch.
     """
     addresses = set()
-    sol_mint = "So11111111111111111111111111111111111111111"
 
     if not data.get('success') or not data.get('data'):
         return addresses
 
     for tx in data['data']:
-        # From transfers
+        # Only extract wallet owners from transfers
         for transfer in tx.get('transfers', []):
             if so := transfer.get('source_owner'):
                 addresses.add(so)
             if do := transfer.get('destination_owner'):
                 addresses.add(do)
-            # Token mints (exclude SOL)
-            if ta := transfer.get('token_address'):
-                if ta != sol_mint:
-                    addresses.add(ta)
-
-        # From activities
-        for activity in tx.get('activities', []):
-            act_data = activity.get('data', {})
-            if acct := act_data.get('account'):
-                addresses.add(acct)
-            # Token mints from swaps (exclude SOL)
-            if t1 := act_data.get('token_1'):
-                if t1 != sol_mint:
-                    addresses.add(t1)
-            if t2 := act_data.get('token_2'):
-                if t2 != sol_mint:
-                    addresses.add(t2)
 
     return addresses
 
