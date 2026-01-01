@@ -359,11 +359,13 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
         return False
 
 
-def publish_cascade_to_shredder(channel, request_id: str, signatures: list, batch_num: int,
+def publish_cascade_to_shredder(channel, request_id: str, correlation_id: str,
+                                 signatures: list, batch_num: int,
                                  total_batches: int, priority: int = 5) -> bool:
     """Publish a batch of signatures directly to shredder request queue (incremental cascade)"""
     cascade_msg = {
         'request_id': f"{request_id}-batch{batch_num}",
+        'correlation_id': correlation_id,  # Track original REST request
         'parent_request_id': request_id,
         'action': 'cascade',
         'source_worker': 'producer',
@@ -406,6 +408,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
         Result dict with processed/errors counts
     """
     request_id = message.get('request_id', 'unknown')
+    correlation_id = message.get('correlation_id', request_id)  # Track original request
     batch = message.get('batch', {})
     priority = message.get('priority', 5)
 
@@ -417,7 +420,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     if not address:
         return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
 
-    print(f"[{request_id[:8]}] Processing request for {address[:20]}...")
+    print(f"[{request_id[:8]}] Processing request for {address[:20]}... (correlation: {correlation_id[:8]})")
 
     # Fetch signatures
     total_fetched = 0
@@ -467,15 +470,15 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 signatures = signatures[batch_size:]
                 total_batched += 1
 
-                if publish_cascade_to_shredder(gateway_channel, request_id, batch_to_send,
-                                                total_batched, estimated_batches, priority):
+                if publish_cascade_to_shredder(gateway_channel, request_id, correlation_id,
+                                                batch_to_send, total_batched, estimated_batches, priority):
                     print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} → shredder ({len(batch_to_send)} sigs)")
 
         # Publish remaining signatures
         if signatures:
             total_batched += 1
-            if publish_cascade_to_shredder(gateway_channel, request_id, signatures,
-                                            total_batched, total_batched, priority):
+            if publish_cascade_to_shredder(gateway_channel, request_id, correlation_id,
+                                            signatures, total_batched, total_batched, priority):
                 print(f"  [CASCADE] Batch {total_batched}/{total_batched} → shredder ({len(signatures)} sigs)")
 
         print(f"  Fetched {total_fetched} signatures, cascaded {total_batched} batches to shredder")

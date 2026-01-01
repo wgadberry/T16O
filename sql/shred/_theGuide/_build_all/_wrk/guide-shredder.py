@@ -593,10 +593,12 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
         return False
 
 
-def publish_cascade(channel, request_id: str, targets: list, batch: dict, api_key: str = 'internal_cascade_key'):
+def publish_cascade(channel, request_id: str, correlation_id: str, targets: list,
+                    batch: dict, api_key: str = 'internal_cascade_key'):
     """Publish cascade message to gateway for downstream workers"""
     message = {
         'request_id': f"cascade-{request_id[:8]}-{datetime.now().strftime('%H%M%S')}",
+        'correlation_id': correlation_id,  # Track original REST request
         'source_worker': 'shredder',
         'source_request_id': request_id,
         'api_key': api_key,
@@ -661,10 +663,11 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
+                    correlation_id = message.get('correlation_id', request_id)  # Track original request
                     batch = message.get('batch', {})
                     api_key = message.get('api_key', 'internal_cascade_key')
 
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (correlation: {correlation_id[:8]})")
 
                     # Extract signatures from batch
                     signatures = batch.get('signatures', [])
@@ -743,13 +746,25 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
                                 print(f"  SP complete: tx={sp_tx_count} edges={sp_edge_count} addrs={sp_address_count} "
                                       f"xfers={sp_transfer_count} swaps={sp_swap_count} acts={sp_activity_count}")
 
-                                # Legacy queue publishing disabled - cascade routing handles downstream
-                                # (legacy_channel is None in queue-consumer mode)
+                                # Get addresses needing funding lookup (init_tx_fetched = 0)
+                                # Pass full addresses so funder doesn't need DB lookup
+                                addresses_for_funder = []
+                                if all_addresses:
+                                    placeholders = ','.join(['%s'] * len(all_addresses))
+                                    cursor.execute(f"""
+                                        SELECT address FROM tx_address
+                                        WHERE address IN ({placeholders})
+                                        AND init_tx_fetched = 0
+                                        AND address_type IN ('wallet', 'unknown')
+                                    """, list(all_addresses))
+                                    addresses_for_funder = [row[0] for row in cursor.fetchall()]
+                                    print(f"  Found {len(addresses_for_funder)} addresses needing funding lookup")
 
                                 result = {
                                     'processed': len(new_sigs),
                                     'transactions': len(all_tx_data),
                                     'addresses': len(all_addresses),
+                                    'funder_addresses': addresses_for_funder,  # Full addresses for funder
                                     'cascade_to': ['detailer', 'funder', 'aggregator']
                                 }
                                 status = 'completed'
@@ -771,9 +786,10 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
                         cascade_batch = {
                             'source_signatures': signatures[:5],  # Sample for reference
                             'processed_count': result['processed'],
-                            'address_count': result.get('addresses', 0)
+                            'address_count': result.get('addresses', 0),
+                            'funder_addresses': result.get('funder_addresses', [])  # Full addresses for funder
                         }
-                        publish_cascade(gateway_channel, request_id, result['cascade_to'], cascade_batch, api_key)
+                        publish_cascade(gateway_channel, request_id, correlation_id, result['cascade_to'], cascade_batch, api_key)
 
                     # Ack the message
                     ch.basic_ack(delivery_tag=method.delivery_tag)

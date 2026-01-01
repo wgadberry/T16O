@@ -774,10 +774,12 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
     )
 
 
-def publish_cascade_to_enricher(channel, request_id: str, result: dict, priority: int = 5) -> bool:
+def publish_cascade_to_enricher(channel, request_id: str, correlation_id: str,
+                                 result: dict, priority: int = 5) -> bool:
     """Publish cascade directly to enricher request queue (incremental cascade)"""
     cascade_msg = {
         'request_id': f"{request_id}-enricher",
+        'correlation_id': correlation_id,  # Track original REST request
         'parent_request_id': request_id,
         'action': 'cascade',
         'source_worker': 'aggregator',
@@ -840,10 +842,11 @@ def run_queue_consumer(prefetch: int = 1):
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
+                    correlation_id = message.get('correlation_id', request_id)  # Track original request
                     batch = message.get('batch', {})
                     priority = message.get('priority', 5)
 
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (correlation: {correlation_id[:8]})")
 
                     # Get operations from batch or default to guide,funding,tokens
                     operations = batch.get('operations', ['guide', 'funding', 'tokens'])
@@ -885,7 +888,7 @@ def run_queue_consumer(prefetch: int = 1):
 
                     # Cascade to enricher if we processed data
                     if status == 'completed' and result.get('processed', 0) > 0:
-                        publish_cascade_to_enricher(gateway_channel, request_id, result, priority)
+                        publish_cascade_to_enricher(gateway_channel, request_id, correlation_id, result, priority)
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 

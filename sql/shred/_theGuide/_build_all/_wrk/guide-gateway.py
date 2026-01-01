@@ -203,9 +203,16 @@ def log_request(
     target_worker: str,
     action: str,
     priority: int = 5,
-    payload: Optional[Dict] = None
+    payload: Optional[Dict] = None,
+    correlation_id: Optional[str] = None
 ) -> bool:
-    """Log a request to tx_request_log"""
+    """Log a request to tx_request_log
+
+    Args:
+        correlation_id: Original REST request ID that flows through entire cascade chain.
+                       For REST requests, this equals request_id.
+                       For cascades, this is the original parent's request_id.
+    """
     if not HAS_MYSQL:
         return True
 
@@ -227,10 +234,11 @@ def log_request(
 
         cursor.execute("""
             INSERT INTO tx_request_log
-            (request_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued')
+            (request_id, correlation_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')
         """, (
             request_id,
+            correlation_id or request_id,  # Default to request_id if not provided
             api_key_id,
             source,
             target_worker,
@@ -296,7 +304,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT request_id, source, target_worker, action, priority,
+            SELECT request_id, correlation_id, source, target_worker, action, priority,
                    status, error_message, created_at, started_at, completed_at,
                    duration_ms, result
             FROM tx_request_log
@@ -317,6 +325,87 @@ def get_request_status(request_id: str) -> Optional[Dict]:
         return result
     except Exception as e:
         print(f"[ERROR] Failed to get request status: {e}")
+        return None
+
+
+def get_correlation_status(correlation_id: str) -> Optional[Dict]:
+    """Get aggregated status for all requests in a correlation chain"""
+    if not HAS_MYSQL:
+        return None
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        # Get all requests for this correlation
+        cursor.execute("""
+            SELECT target_worker, status, COUNT(*) as count,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                   SUM(CASE WHEN status IN ('queued', 'processing') THEN 1 ELSE 0 END) as pending
+            FROM tx_request_log
+            WHERE correlation_id = %s
+            GROUP BY target_worker
+        """, (correlation_id,))
+        worker_stats = cursor.fetchall()
+
+        # Get overall progress
+        cursor.execute("""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                   SUM(CASE WHEN status IN ('queued', 'processing') THEN 1 ELSE 0 END) as pending,
+                   MIN(created_at) as started_at,
+                   MAX(completed_at) as last_completed_at
+            FROM tx_request_log
+            WHERE correlation_id = %s
+        """, (correlation_id,))
+        overall = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        if not overall or overall['total'] == 0:
+            return None
+
+        # Determine overall status
+        if overall['pending'] > 0:
+            overall_status = 'processing'
+        elif overall['failed'] > 0:
+            overall_status = 'partial'
+        else:
+            overall_status = 'completed'
+
+        # Build progress dict by worker
+        progress = {}
+        for stat in worker_stats:
+            worker = stat['target_worker']
+            progress[worker] = {
+                'total': stat['count'],
+                'completed': stat['completed'],
+                'failed': stat['failed'],
+                'pending': stat['pending']
+            }
+
+        # Convert datetime
+        if overall.get('started_at'):
+            overall['started_at'] = overall['started_at'].isoformat()
+        if overall.get('last_completed_at'):
+            overall['last_completed_at'] = overall['last_completed_at'].isoformat()
+
+        return {
+            'correlation_id': correlation_id,
+            'overall_status': overall_status,
+            'total_requests': overall['total'],
+            'completed': overall['completed'],
+            'failed': overall['failed'],
+            'pending': overall['pending'],
+            'started_at': overall.get('started_at'),
+            'last_completed_at': overall.get('last_completed_at'),
+            'progress': progress
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to get correlation status: {e}")
         return None
 
 
@@ -423,11 +512,21 @@ def process_request(
     action: str,
     payload: Dict,
     api_key: str,
-    source: str = 'rest'
+    source: str = 'rest',
+    correlation_id: Optional[str] = None
 ) -> Dict:
-    """Process a request: validate, log, and route to worker"""
+    """Process a request: validate, log, and route to worker
+
+    Args:
+        correlation_id: For REST requests, this is None and will be set to request_id.
+                       For cascades, this is passed from parent to track the original request.
+    """
     request_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat() + 'Z'
+
+    # For REST requests, correlation_id = request_id (start of chain)
+    # For cascades, correlation_id is passed from parent
+    effective_correlation_id = correlation_id or request_id
 
     # Validate API key
     key_info = validate_api_key(api_key)
@@ -435,7 +534,8 @@ def process_request(
         return {
             'success': False,
             'error': 'Invalid or inactive API key',
-            'request_id': request_id
+            'request_id': request_id,
+            'correlation_id': effective_correlation_id
         }
 
     # Check permissions
@@ -443,13 +543,15 @@ def process_request(
         return {
             'success': False,
             'error': f'Permission denied for worker={worker}, action={action}',
-            'request_id': request_id
+            'request_id': request_id,
+            'correlation_id': effective_correlation_id
         }
 
     # Build request message
     priority = payload.get('priority', 5)
     message = {
         'request_id': request_id,
+        'correlation_id': effective_correlation_id,  # Pass through cascade chain
         'api_key': api_key,
         'priority': priority,
         'timestamp': timestamp,
@@ -465,7 +567,8 @@ def process_request(
         target_worker=worker,
         action=action,
         priority=priority,
-        payload=message
+        payload=message,
+        correlation_id=effective_correlation_id
     )
 
     # Route to worker
@@ -473,6 +576,7 @@ def process_request(
         return {
             'success': True,
             'request_id': request_id,
+            'correlation_id': effective_correlation_id,
             'worker': worker,
             'action': action,
             'queued_at': timestamp
@@ -482,7 +586,8 @@ def process_request(
         return {
             'success': False,
             'error': 'Failed to queue request',
-            'request_id': request_id
+            'request_id': request_id,
+            'correlation_id': effective_correlation_id
         }
 
 
@@ -491,6 +596,7 @@ def process_cascade(message: Dict) -> List[Dict]:
     results = []
     source_worker = message.get('source_worker')
     source_request_id = message.get('source_request_id')
+    correlation_id = message.get('correlation_id')  # Preserve original request chain
     targets = message.get('targets', [])
     batch = message.get('batch', {})
     api_key = message.get('api_key', 'internal_cascade_key')
@@ -515,7 +621,8 @@ def process_cascade(message: Dict) -> List[Dict]:
                 'source_request_id': source_request_id
             },
             api_key=api_key,
-            source='cascade'
+            source='cascade',
+            correlation_id=correlation_id  # Pass through cascade chain
         )
         results.append({
             'worker': target,
@@ -613,12 +720,39 @@ def create_app():
 
     @app.route('/api/status/<request_id>', methods=['GET'])
     def get_status(request_id):
-        """Get status of a request"""
+        """Get status of a single request"""
         status = get_request_status(request_id)
         if status:
             return jsonify(status)
         else:
             return jsonify({'error': 'Request not found'}), 404
+
+    @app.route('/api/pipeline/<correlation_id>', methods=['GET'])
+    def get_pipeline_status(correlation_id):
+        """Get aggregated status of entire pipeline by correlation_id
+
+        Returns progress across all workers for the original REST request.
+        Example response:
+        {
+            "correlation_id": "abc123",
+            "overall_status": "processing",
+            "total_requests": 25,
+            "completed": 20,
+            "failed": 0,
+            "pending": 5,
+            "progress": {
+                "producer": {"total": 1, "completed": 1, "failed": 0, "pending": 0},
+                "shredder": {"total": 10, "completed": 10, "failed": 0, "pending": 0},
+                "funder": {"total": 8, "completed": 5, "failed": 0, "pending": 3},
+                ...
+            }
+        }
+        """
+        status = get_correlation_status(correlation_id)
+        if status:
+            return jsonify(status)
+        else:
+            return jsonify({'error': 'Correlation not found'}), 404
 
     @app.route('/api/cascade', methods=['POST'])
     def cascade():

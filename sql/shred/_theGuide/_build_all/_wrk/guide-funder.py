@@ -396,7 +396,8 @@ def run_queue_consumer(args):
             print(f"  Action: {action}")
 
             # Extract addresses from batch
-            addresses = batch.get('addresses', [])
+            # Check multiple keys: 'addresses', 'funder_addresses' (from shredder cascade), or 'address_ids'
+            addresses = batch.get('addresses', []) or batch.get('funder_addresses', [])
             address_ids = batch.get('address_ids', [])
 
             # If we got address_ids, look them up

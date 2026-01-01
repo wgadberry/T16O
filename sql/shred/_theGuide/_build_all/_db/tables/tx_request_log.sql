@@ -10,6 +10,7 @@ DROP TABLE IF EXISTS tx_request_log;
 CREATE TABLE tx_request_log (
     id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     request_id      VARCHAR(36) NOT NULL UNIQUE,  -- UUID v4
+    correlation_id  VARCHAR(36),  -- Original REST request ID (flows through entire cascade chain)
     api_key_id      INT UNSIGNED,
     source          ENUM('rest', 'queue', 'cascade', 'scheduler') NOT NULL,
     target_worker   VARCHAR(50) NOT NULL,
@@ -33,6 +34,7 @@ CREATE TABLE tx_request_log (
     cascade_request_ids JSON,  -- Array of child request_ids if this spawned cascades
     FOREIGN KEY (api_key_id) REFERENCES tx_api_key(id),
     INDEX idx_request_id (request_id),
+    INDEX idx_correlation_id (correlation_id),
     INDEX idx_status (status),
     INDEX idx_target_worker (target_worker),
     INDEX idx_created_at (created_at),
