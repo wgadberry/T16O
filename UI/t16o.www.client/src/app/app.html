@@ -1,43 +1,75 @@
-<p-card>
-  <ng-template #header>
-    <div style="padding: 1rem 1.5rem 0;">
-      <h2 style="margin: 0;"><i class="pi pi-cloud" style="margin-right: 0.5rem;"></i>Weather Forecast</h2>
-      <p style="margin: 0.5rem 0 0; color: var(--text-color-secondary);">5-day weather forecast from the server</p>
+<!-- Top Bar -->
+<p-toolbar styleClass="top-bar">
+  <ng-template #start>
+    <div class="logo-section">
+      <i class="pi pi-box logo-icon"></i>
+      <span class="site-name">{{ title() }}</span>
     </div>
   </ng-template>
 
-  <p *ngIf="forecasts.length === 0">
-    <i class="pi pi-spin pi-spinner" style="margin-right: 0.5rem;"></i>
-    Loading... Please refresh once the ASP.NET backend has started.
-  </p>
+  <ng-template #end>
+    <div class="user-section">
+      <!-- Dark Mode Toggle -->
+      <div class="theme-toggle">
+        <i class="pi" [ngClass]="darkMode ? 'pi-moon' : 'pi-sun'"></i>
+        <p-toggleswitch [(ngModel)]="darkMode" (onChange)="onDarkModeChange()"></p-toggleswitch>
+      </div>
 
-  <p-table [value]="forecasts" *ngIf="forecasts.length > 0"
-           [tableStyle]="{'min-width': '50rem'}"
-           styleClass="p-datatable-striped"
-           [paginator]="false">
+      <!-- User Profile -->
+      <p-avatar icon="pi pi-user"
+                styleClass="user-avatar"
+                shape="circle"
+                (click)="toggleProfileMenu($event)"
+                pRipple>
+      </p-avatar>
+      <p-menu #profileMenu [model]="profileMenuItems" [popup]="true"></p-menu>
+    </div>
+  </ng-template>
+</p-toolbar>
+
+<!-- Main Content -->
+<div class="main-content">
+  <p-card>
     <ng-template #header>
-      <tr>
-        <th>Date</th>
-        <th>Temperature (C)</th>
-        <th>Temperature (F)</th>
-        <th>Summary</th>
-      </tr>
+      <div style="padding: 1rem 1.5rem 0;">
+        <h2 style="margin: 0;"><i class="pi pi-cloud" style="margin-right: 0.5rem;"></i>Weather Forecast</h2>
+        <p style="margin: 0.5rem 0 0; color: var(--text-color-secondary);">5-day weather forecast from the server</p>
+      </div>
     </ng-template>
-    <ng-template #body let-forecast>
-      <tr>
-        <td><i class="pi pi-calendar" style="margin-right: 0.5rem;"></i>{{ forecast.date }}</td>
-        <td>{{ forecast.temperatureC }}°C</td>
-        <td>{{ forecast.temperatureF }}°F</td>
-        <td>
-          <p-tag [value]="forecast.summary" [severity]="getTemperatureSeverity(forecast.temperatureC)"></p-tag>
-        </td>
-      </tr>
-    </ng-template>
-  </p-table>
 
-  <ng-template #footer>
-    <div style="display: flex; justify-content: flex-end;">
-      <p-button label="Refresh" icon="pi pi-refresh" (click)="getForecasts()"></p-button>
-    </div>
-  </ng-template>
-</p-card>
+    <p *ngIf="forecasts.length === 0">
+      <i class="pi pi-spin pi-spinner" style="margin-right: 0.5rem;"></i>
+      Loading... Please refresh once the ASP.NET backend has started.
+    </p>
+
+    <p-table [value]="forecasts" *ngIf="forecasts.length > 0"
+             [tableStyle]="{'min-width': '50rem'}"
+             styleClass="p-datatable-striped"
+             [paginator]="false">
+      <ng-template #header>
+        <tr>
+          <th>Date</th>
+          <th>Temperature (C)</th>
+          <th>Temperature (F)</th>
+          <th>Summary</th>
+        </tr>
+      </ng-template>
+      <ng-template #body let-forecast>
+        <tr>
+          <td><i class="pi pi-calendar" style="margin-right: 0.5rem;"></i>{{ forecast.date }}</td>
+          <td>{{ forecast.temperatureC }}°C</td>
+          <td>{{ forecast.temperatureF }}°F</td>
+          <td>
+            <p-tag [value]="forecast.summary" [severity]="getTemperatureSeverity(forecast.temperatureC)"></p-tag>
+          </td>
+        </tr>
+      </ng-template>
+    </p-table>
+
+    <ng-template #footer>
+      <div style="display: flex; justify-content: flex-end;">
+        <p-button label="Refresh" icon="pi pi-refresh" (click)="getForecasts()"></p-button>
+      </div>
+    </ng-template>
+  </p-card>
+</div>

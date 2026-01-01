@@ -1,5 +1,7 @@
 import { HttpClient } from '@angular/common/http';
-import { Component, OnInit, signal } from '@angular/core';
+import { Component, OnInit, signal, ViewChild } from '@angular/core';
+import { MenuItem } from 'primeng/api';
+import { Menu } from 'primeng/menu';
 
 interface WeatherForecast {
   date: string;
@@ -16,11 +18,71 @@ interface WeatherForecast {
 })
 export class App implements OnInit {
   public forecasts: WeatherForecast[] = [];
+  public darkMode = false;
+  public profileMenuItems: MenuItem[] = [];
+
+  @ViewChild('profileMenu') profileMenu!: Menu;
 
   constructor(private http: HttpClient) {}
 
   ngOnInit() {
     this.getForecasts();
+    this.initializeDarkMode();
+    this.buildProfileMenu();
+  }
+
+  private initializeDarkMode() {
+    const savedTheme = localStorage.getItem('darkMode');
+    this.darkMode = savedTheme === 'true';
+    this.applyTheme();
+  }
+
+  private buildProfileMenu() {
+    this.profileMenuItems = [
+      {
+        label: 'Profile',
+        items: [
+          {
+            label: 'My Account',
+            icon: 'pi pi-user'
+          },
+          {
+            label: 'Settings',
+            icon: 'pi pi-cog'
+          }
+        ]
+      },
+      {
+        separator: true
+      },
+      {
+        label: 'Logout',
+        icon: 'pi pi-sign-out',
+        command: () => this.logout()
+      }
+    ];
+  }
+
+  onDarkModeChange() {
+    localStorage.setItem('darkMode', String(this.darkMode));
+    this.applyTheme();
+  }
+
+  private applyTheme() {
+    const element = document.documentElement;
+    if (this.darkMode) {
+      element.classList.add('dark-mode');
+    } else {
+      element.classList.remove('dark-mode');
+    }
+  }
+
+  toggleProfileMenu(event: Event) {
+    this.profileMenu.toggle(event);
+  }
+
+  logout() {
+    console.log('Logout clicked');
   }
 
   getForecasts() {
@@ -42,5 +104,5 @@ export class App implements OnInit {
     return 'danger';
   }
 
-  protected readonly title = signal('t16o.www.client');
+  protected readonly title = signal('T16O');
 }

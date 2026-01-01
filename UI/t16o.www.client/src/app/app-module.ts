@@ -9,6 +9,12 @@ import { TableModule } from 'primeng/table';
 import { CardModule } from 'primeng/card';
 import { TagModule } from 'primeng/tag';
 import { ButtonModule } from 'primeng/button';
+import { ToolbarModule } from 'primeng/toolbar';
+import { AvatarModule } from 'primeng/avatar';
+import { MenuModule } from 'primeng/menu';
+import { ToggleSwitchModule } from 'primeng/toggleswitch';
+import { RippleModule } from 'primeng/ripple';
+import { FormsModule } from '@angular/forms';
 
 import { AppRoutingModule } from './app-routing-module';
 import { App } from './app';
@@ -21,18 +27,28 @@ import { App } from './app';
     BrowserModule,
     BrowserAnimationsModule,
     HttpClientModule,
+    FormsModule,
     AppRoutingModule,
     TableModule,
     CardModule,
     TagModule,
-    ButtonModule
+    ButtonModule,
+    ToolbarModule,
+    AvatarModule,
+    MenuModule,
+    ToggleSwitchModule,
+    RippleModule
   ],
   providers: [
     provideBrowserGlobalErrorListeners(),
     providePrimeNG({
       theme: {
-        preset: Aura
-      }
+        preset: Aura,
+        options: {
+          darkModeSelector: '.dark-mode'
+        }
+      },
+      ripple: true
     })
   ],
   bootstrap: [App]

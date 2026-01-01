@@ -1,14 +1,72 @@
-﻿:host {
-    max-width: 1280px;
-    padding: 2rem;
-    text-align: center;
+:host {
+  display: block;
+  min-height: 100vh;
+}
+
+/* Top Bar Styles */
+:host ::ng-deep .top-bar {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo-icon {
+  font-size: 1.75rem;
+  color: var(--primary-color);
+}
+
+.site-name {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-color);
+}
+
+.user-section {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.theme-toggle i {
+  font-size: 1.1rem;
+  color: var(--text-color-secondary);
+}
+
+:host ::ng-deep .user-avatar {
+  cursor: pointer;
+  background-color: var(--primary-color);
+  color: var(--primary-color-text);
+}
+
+:host ::ng-deep .user-avatar:hover {
+  opacity: 0.9;
+}
+
+/* Main Content */
+.main-content {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
 }
 
 th, td {
-    padding-left: 1rem;
-    padding-right: 1rem;
+  padding-left: 1rem;
+  padding-right: 1rem;
 }
 
 table {
-    margin: 0 auto;
+  margin: 0 auto;
 }
