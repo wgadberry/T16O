@@ -746,7 +746,7 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
                                 print(f"  SP complete: tx={sp_tx_count} edges={sp_edge_count} addrs={sp_address_count} "
                                       f"xfers={sp_transfer_count} swaps={sp_swap_count} acts={sp_activity_count}")
 
-                                # Get addresses needing funding lookup (init_tx_fetched = 0)
+                                # Get addresses needing funding lookup (init_tx_fetched = 0 or NULL)
                                 # Pass full addresses so funder doesn't need DB lookup
                                 addresses_for_funder = []
                                 if all_addresses:
@@ -754,7 +754,7 @@ def run_queue_consumer(prefetch: int = 1, no_funding: bool = False, no_detail: b
                                     cursor.execute(f"""
                                         SELECT address FROM tx_address
                                         WHERE address IN ({placeholders})
-                                        AND init_tx_fetched = 0
+                                        AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
                                         AND address_type IN ('wallet', 'unknown')
                                     """, list(all_addresses))
                                     addresses_for_funder = [row[0] for row in cursor.fetchall()]
