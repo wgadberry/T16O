@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="t16o.www.client/t16o.www.client.esproj">
+    <Build />
+    <Deploy />
+  </Project>
+  <Project Path="T16O.www.Server/T16O.www.Server.csproj" />
+</Solution>
