@@ -1,5 +1,5 @@
 import { HttpClientModule } from '@angular/common/http';
-import { NgModule, provideBrowserGlobalErrorListeners } from '@angular/core';
+import { NgModule } from '@angular/core';
 import { BrowserModule } from '@angular/platform-browser';
 import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { providePrimeNG } from 'primeng/config';
@@ -62,7 +62,6 @@ import { WeatherPage } from './pages/weather/weather.page';
     DrawerModule
   ],
   providers: [
-    provideBrowserGlobalErrorListeners(),
     providePrimeNG({
       theme: {
         preset: Aura,
