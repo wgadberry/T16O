@@ -10,6 +10,16 @@ const PROXY_CONFIG = [
     ],
     target,
     secure: false
+  },
+  {
+    context: [
+      "/api/bmap",
+      "/api/timerange",
+      "/api/fetch-wallet"
+    ],
+    target: "http://localhost:5050",
+    secure: false,
+    changeOrigin: true
   }
 ]
 

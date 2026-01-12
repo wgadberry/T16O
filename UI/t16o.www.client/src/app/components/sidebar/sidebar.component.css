@@ -126,3 +126,38 @@
 :host ::ng-deep .mobile-drawer .sidebar-item {
   padding: 1rem 1.5rem;
 }
+
+/* Submenu styles */
+.sidebar-item-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-item.has-children {
+  position: relative;
+}
+
+.sidebar-item .expand-icon {
+  margin-left: auto;
+  font-size: 0.75rem;
+  transition: transform 0.2s ease;
+}
+
+.sidebar-submenu {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.sidebar-submenu.expanded {
+  max-height: 500px;
+}
+
+.sidebar-subitem {
+  padding-left: 2.5rem !important;
+  font-size: 0.9rem;
+}
+
+.sidebar-subitem i {
+  font-size: 0.9rem;
+}

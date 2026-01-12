@@ -16,6 +16,10 @@ import { ToggleSwitchModule } from 'primeng/toggleswitch';
 import { RippleModule } from 'primeng/ripple';
 import { TooltipModule } from 'primeng/tooltip';
 import { DrawerModule } from 'primeng/drawer';
+import { InputTextModule } from 'primeng/inputtext';
+import { SelectModule } from 'primeng/select';
+import { MessageModule } from 'primeng/message';
+import { ProgressSpinnerModule } from 'primeng/progressspinner';
 import { FormsModule } from '@angular/forms';
 import { CommonModule } from '@angular/common';
 
@@ -30,6 +34,11 @@ import { WeatherForecastComponent } from './components/weather-forecast/weather-
 // Pages
 import { DashboardPage } from './pages/dashboard/dashboard.page';
 import { WeatherPage } from './pages/weather/weather.page';
+import { ClusterMapsPage } from './pages/analytics/cluster-maps/cluster-maps.page';
+import { WalletTrailsPage } from './pages/analytics/wallet-trails/wallet-trails.page';
+
+// Services
+import { BubbleMapService } from './services/bubble-map.service';
 
 @NgModule({
   declarations: [
@@ -40,7 +49,9 @@ import { WeatherPage } from './pages/weather/weather.page';
     WeatherForecastComponent,
     // Pages
     DashboardPage,
-    WeatherPage
+    WeatherPage,
+    ClusterMapsPage,
+    WalletTrailsPage
   ],
   imports: [
     BrowserModule,
@@ -59,9 +70,14 @@ import { WeatherPage } from './pages/weather/weather.page';
     ToggleSwitchModule,
     RippleModule,
     TooltipModule,
-    DrawerModule
+    DrawerModule,
+    InputTextModule,
+    SelectModule,
+    MessageModule,
+    ProgressSpinnerModule
   ],
   providers: [
+    BubbleMapService,
     providePrimeNG({
       theme: {
         preset: Aura,

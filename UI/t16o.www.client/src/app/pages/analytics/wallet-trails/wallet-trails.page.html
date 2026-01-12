@@ -1,0 +1,96 @@
+<div class="page-container">
+  <p-card>
+    <ng-template #header>
+      <div class="card-header">
+        <h2><i class="pi pi-map"></i> Wallet Trails</h2>
+        <p>Trace wallet funding relationships and transaction trails</p>
+      </div>
+    </ng-template>
+
+    <!-- Search Form -->
+    <div class="search-section">
+      <div class="search-form">
+        <div class="search-input-group">
+          <span class="p-input-icon-left w-full">
+            <i class="pi pi-wallet"></i>
+            <input type="text"
+                   pInputText
+                   [(ngModel)]="walletAddress"
+                   placeholder="Enter wallet address..."
+                   class="w-full">
+          </span>
+        </div>
+        <div class="search-buttons">
+          <button pButton
+                  label="Search Trails"
+                  icon="pi pi-search"
+                  (click)="searchWallet()"
+                  [loading]="loading">
+          </button>
+          <button pButton
+                  label="Fetch Wallet"
+                  icon="pi pi-download"
+                  class="p-button-secondary"
+                  (click)="fetchWalletTransactions()"
+                  [loading]="fetchingWallet"
+                  pTooltip="Fetch wallet transactions from the blockchain">
+          </button>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <p-message *ngIf="errorMessage" severity="error" [text]="errorMessage" styleClass="w-full mt-3"></p-message>
+      <p-message *ngIf="fetchMessage" severity="success" [text]="fetchMessage" styleClass="w-full mt-3"></p-message>
+    </div>
+
+    <!-- Loading -->
+    <div *ngIf="loading" class="loading-container">
+      <p-progressSpinner></p-progressSpinner>
+      <span>Searching wallet trails...</span>
+    </div>
+
+    <!-- Results -->
+    <div *ngIf="!loading && trails.length > 0" class="trails-results">
+      <h3>Funding Relationships</h3>
+
+      <div class="trails-list">
+        <div *ngFor="let trail of trails" class="trail-item" [style.margin-left.rem]="trail.depth * 1.5">
+          <div class="trail-connector" *ngIf="trail.depth > 0"></div>
+          <div class="trail-content">
+            <div class="trail-header">
+              <div class="trail-address" (click)="copyAddress(trail.address)" pTooltip="Click to copy">
+                {{ formatAddress(trail.address) }}
+              </div>
+              <span *ngIf="trail.label" class="trail-label">{{ trail.label }}</span>
+            </div>
+
+            <div *ngIf="trail.fundedBy && trail.fundedBy.length > 0" class="funded-by">
+              <span class="funded-label">Funded by:</span>
+              <div class="funder-list">
+                <span *ngFor="let funder of trail.fundedBy"
+                      class="funder-address"
+                      (click)="copyAddress(funder)"
+                      pTooltip="Click to copy">
+                  {{ formatAddress(funder) }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Empty State -->
+    <div *ngIf="!loading && trails.length === 0 && walletAddress" class="empty-state">
+      <i class="pi pi-inbox"></i>
+      <p>No funding trails found for this wallet.</p>
+      <p class="hint">Try fetching the wallet data first using the "Fetch Wallet" button.</p>
+    </div>
+
+    <!-- Initial State -->
+    <div *ngIf="!loading && !walletAddress" class="initial-state">
+      <i class="pi pi-map"></i>
+      <p>Enter a wallet address to trace funding relationships</p>
+    </div>
+  </p-card>
+</div>
