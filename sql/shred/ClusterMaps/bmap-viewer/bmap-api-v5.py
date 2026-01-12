@@ -22,7 +22,7 @@ BASE_BACKOFF = 0.3
 
 GUIDE_PRODUCER_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__),
-    '..', '..', '_wrk', 'guide-producer.py'
+    '..', '..', '_theGuide', '_build_all', '_wrk', 'guide-producer.py'
 ))
 
 app = Flask(__name__)
