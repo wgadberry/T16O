@@ -50,6 +50,10 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   currentData: BubbleMapResponse | null = null;
   showLabels = true;
 
+  // Mascot image for larger bubbles
+  private readonly mascotImagePath = 'images/cfuck_mascot.jpg';
+  private readonly minRadiusForMascot = 20; // Minimum radius to show mascot
+
   // D3 elements
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
   private simulation: d3.Simulation<D3Node, D3Link> | null = null;
@@ -102,7 +106,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
     const container = this.containerRef.nativeElement;
     const width = container.clientWidth || 800;
-    const height = 600;
+    const height = 850;
 
     // Clear existing SVG
     d3.select(container).selectAll('svg').remove();
@@ -268,7 +272,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
     const container = this.containerRef.nativeElement;
     const width = container.clientWidth || 800;
-    const height = 600;
+    const height = 850;
 
     // Transform data to D3 format
     this.nodes = this.transformNodes(data.result.nodes);
@@ -311,6 +315,32 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .style('cursor', 'pointer')
       .on('mouseover', (event, d) => this.onNodeHover(event, d, true))
       .on('mouseout', (event, d) => this.onNodeHover(event, d, false));
+
+    // Add mascot images to larger bubbles
+    const defs = this.svg.select('defs');
+
+    // Create clip paths for nodes that will have mascot images
+    node.filter(d => d.radius >= this.minRadiusForMascot)
+      .each((d, i, nodes) => {
+        const clipId = `clip-${d.id.slice(0, 8)}`;
+        defs.append('clipPath')
+          .attr('id', clipId)
+          .append('circle')
+          .attr('r', d.radius - 2); // Full circle radius (minus stroke width)
+      });
+
+    // Add mascot images to larger bubbles - full circle coverage
+    node.filter(d => d.radius >= this.minRadiusForMascot)
+      .append('image')
+      .attr('xlink:href', this.mascotImagePath)
+      .attr('x', d => -d.radius)
+      .attr('y', d => -d.radius)
+      .attr('width', d => d.radius * 2)
+      .attr('height', d => d.radius * 2)
+      .attr('clip-path', d => `url(#clip-${d.id.slice(0, 8)})`)
+      .attr('opacity', 0.4)
+      .attr('preserveAspectRatio', 'xMidYMid slice')
+      .style('pointer-events', 'none');
 
     // Node labels
     node.append('text')
