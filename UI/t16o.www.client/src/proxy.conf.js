@@ -7,19 +7,10 @@ const PROXY_CONFIG = [
   {
     context: [
       "/weatherforecast",
+      "/api/bubblemap"
     ],
     target,
     secure: false
-  },
-  {
-    context: [
-      "/api/bmap",
-      "/api/timerange",
-      "/api/fetch-wallet"
-    ],
-    target: "http://localhost:5050",
-    secure: false,
-    changeOrigin: true
   }
 ]
 

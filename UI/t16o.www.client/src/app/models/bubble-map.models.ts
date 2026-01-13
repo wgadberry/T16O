@@ -5,18 +5,37 @@ export interface BubbleMapNode {
   balance_usd?: number;
   is_pool?: boolean;
   is_program?: boolean;
-  funded_by?: string[];
+  funded_by?: string | string[];
   token_mint?: string;
   token_symbol?: string;
+  // Additional properties from stored procedure
+  pool_label?: string | null;
+  token_name?: string | null;
+  sol_balance?: number;
+  address_type?: string;
 }
 
 export interface BubbleMapEdge {
   source: string;
   target: string;
-  edge_type: string;
+  edge_type?: string;
+  type?: string; // actual property name from stored procedure
   amount?: number;
   amount_usd?: number;
   signatures?: string[];
+  // Additional properties from stored procedure
+  dex?: string;
+  pool?: string | null;
+  program?: string;
+  category?: string;
+  ins_index?: number;
+  signature?: string;
+  block_time?: number;
+  pool_label?: string | null;
+  source_label?: string;
+  target_label?: string;
+  token_symbol?: string;
+  block_time_utc?: string;
 }
 
 export interface BubbleMapToken {

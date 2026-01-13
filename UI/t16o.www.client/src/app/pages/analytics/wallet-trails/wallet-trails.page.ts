@@ -45,13 +45,21 @@ export class WalletTrailsPage implements OnInit {
         this.loading = false;
         if (data.result && data.result.nodes) {
           this.trails = data.result.nodes
-            .filter(node => node.funded_by && node.funded_by.length > 0)
-            .map((node, index) => ({
-              address: node.address,
-              label: node.label,
-              fundedBy: node.funded_by,
-              depth: index
-            }));
+            .filter(node => node.funded_by)
+            .map((node, index) => {
+              // Handle funded_by which can be string or array
+              const fundedBy = Array.isArray(node.funded_by)
+                ? node.funded_by
+                : node.funded_by
+                  ? [node.funded_by]
+                  : [];
+              return {
+                address: node.address,
+                label: node.label,
+                fundedBy: fundedBy,
+                depth: index
+              };
+            });
         }
       },
       error: (error) => {

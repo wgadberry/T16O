@@ -115,7 +115,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('viewBox', `0 0 ${width} ${height}`)
       .style('background', 'radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d1a 100%)');
 
-    // Add defs for glow filter
+    // Add defs for filters and gradients
     const defs = this.svg.append('defs');
 
     // Glow filter
@@ -134,6 +134,32 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     feMerge.append('feMergeNode').attr('in', 'coloredBlur');
     feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
 
+    // Inner glow filter for borders
+    const innerGlow = defs.append('filter')
+      .attr('id', 'innerGlow')
+      .attr('x', '-50%')
+      .attr('y', '-50%')
+      .attr('width', '200%')
+      .attr('height', '200%');
+
+    innerGlow.append('feGaussianBlur')
+      .attr('stdDeviation', '2')
+      .attr('result', 'blur');
+
+    innerGlow.append('feComposite')
+      .attr('in', 'SourceGraphic')
+      .attr('in2', 'blur')
+      .attr('operator', 'over');
+
+    // Create radial gradients for each node color
+    this.createNodeGradient(defs, 'gradient-teal', '#14b8a6');
+    this.createNodeGradient(defs, 'gradient-amber', '#f59e0b');
+    this.createNodeGradient(defs, 'gradient-purple', '#8b5cf6');
+    this.createNodeGradient(defs, 'gradient-red', '#e94560');
+    this.createNodeGradient(defs, 'gradient-blue', '#3b82f6');
+    this.createNodeGradient(defs, 'gradient-green', '#22c55e');
+    this.createNodeGradient(defs, 'gradient-gray', '#666666');
+
     // Arrow marker
     defs.append('marker')
       .attr('id', 'arrowhead')
@@ -145,7 +171,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('markerHeight', 6)
       .append('path')
       .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
-      .attr('fill', '#666');
+      .attr('fill', '#444');
 
     // Create main group for zoom
     this.svg.append('g').attr('class', 'main-group');
@@ -158,6 +184,50 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       });
 
     this.svg.call(this.zoom);
+  }
+
+  private createNodeGradient(defs: d3.Selection<SVGDefsElement, unknown, null, undefined>, id: string, color: string): void {
+    const gradient = defs.append('radialGradient')
+      .attr('id', id)
+      .attr('cx', '30%')
+      .attr('cy', '30%')
+      .attr('r', '70%');
+
+    // Inner highlight (lighter)
+    gradient.append('stop')
+      .attr('offset', '0%')
+      .attr('stop-color', this.lightenColor(color, 40))
+      .attr('stop-opacity', '0.8');
+
+    // Mid color
+    gradient.append('stop')
+      .attr('offset', '50%')
+      .attr('stop-color', color)
+      .attr('stop-opacity', '0.4');
+
+    // Outer edge (darker)
+    gradient.append('stop')
+      .attr('offset', '100%')
+      .attr('stop-color', this.darkenColor(color, 30))
+      .attr('stop-opacity', '0.6');
+  }
+
+  private lightenColor(color: string, percent: number): string {
+    const num = parseInt(color.replace('#', ''), 16);
+    const amt = Math.round(2.55 * percent);
+    const R = Math.min(255, (num >> 16) + amt);
+    const G = Math.min(255, ((num >> 8) & 0x00FF) + amt);
+    const B = Math.min(255, (num & 0x0000FF) + amt);
+    return `#${(0x1000000 + R * 0x10000 + G * 0x100 + B).toString(16).slice(1)}`;
+  }
+
+  private darkenColor(color: string, percent: number): string {
+    const num = parseInt(color.replace('#', ''), 16);
+    const amt = Math.round(2.55 * percent);
+    const R = Math.max(0, (num >> 16) - amt);
+    const G = Math.max(0, ((num >> 8) & 0x00FF) - amt);
+    const B = Math.max(0, (num & 0x0000FF) - amt);
+    return `#${(0x1000000 + R * 0x10000 + G * 0x100 + B).toString(16).slice(1)}`;
   }
 
   loadData(): void {
@@ -208,15 +278,15 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     const mainGroup = this.svg.select('.main-group');
     mainGroup.selectAll('*').remove();
 
-    // Create links
+    // Create links with dark outline effect
     const linkGroup = mainGroup.append('g').attr('class', 'links');
     const link = linkGroup.selectAll('line')
       .data(this.links)
       .enter()
       .append('line')
-      .attr('stroke', d => d.color)
-      .attr('stroke-opacity', 0.6)
-      .attr('stroke-width', 1.5)
+      .attr('stroke', d => this.darkenColor(d.color, 40))
+      .attr('stroke-opacity', 0.8)
+      .attr('stroke-width', 2)
       .attr('marker-end', 'url(#arrowhead)');
 
     // Create nodes
@@ -231,12 +301,12 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
         .on('drag', (event, d) => this.dragged(event, d))
         .on('end', (event, d) => this.dragEnded(event, d)));
 
-    // Node circles
+    // Node circles - transparent with gradient inner border
     node.append('circle')
       .attr('r', d => d.radius)
-      .attr('fill', d => d.color)
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 1.5)
+      .attr('fill', d => `url(#${this.getGradientId(d.color)})`)
+      .attr('stroke', d => this.darkenColor(d.color, 30))
+      .attr('stroke-width', 2.5)
       .attr('filter', 'url(#glow)')
       .style('cursor', 'pointer')
       .on('mouseover', (event, d) => this.onNodeHover(event, d, true))
@@ -274,32 +344,49 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
   private transformNodes(nodes: BubbleMapNode[]): D3Node[] {
     return nodes.map(node => {
-      const balance = node.balance || 0;
+      const balance = Math.abs(node.balance || 0);
       const balanceUsd = node.balance_usd || 0;
+      // Use address_type to determine if pool/program, or fall back to is_pool/is_program
+      const isPool = node.address_type === 'pool' || node.is_pool || false;
+      const isProgram = node.address_type === 'program' || node.is_program || false;
+      const isMint = node.address_type === 'mint' || node.label === 'mint';
 
-      // Determine color based on balance
+      // Determine color based on node type and balance
       let color: string;
-      if (node.is_pool || balance === 0) {
-        color = '#666666';
+      if (isPool) {
+        color = '#14b8a6'; // Teal for pools
+      } else if (isMint) {
+        color = '#f59e0b'; // Amber for mints
+      } else if (isProgram) {
+        color = '#8b5cf6'; // Purple for programs
       } else if (balanceUsd > 10000) {
         color = '#e94560';
       } else if (balanceUsd > 1000) {
         color = '#3b82f6';
-      } else {
+      } else if (balance > 0) {
         color = '#22c55e';
+      } else {
+        color = '#666666';
       }
 
       // Calculate radius based on balance
-      const radius = Math.max(8, Math.min(40, Math.sqrt(balanceUsd) / 2 + 8));
+      const radius = Math.max(8, Math.min(40, Math.sqrt(Math.abs(balance)) / 100 + 8));
+
+      // Handle funded_by which can be string or array
+      const fundedBy = Array.isArray(node.funded_by)
+        ? node.funded_by
+        : node.funded_by
+          ? [node.funded_by]
+          : [];
 
       return {
         id: node.address,
-        label: node.label || `${node.address.slice(0, 4)}...${node.address.slice(-4)}`,
+        label: node.pool_label || node.token_name || node.label || `${node.address.slice(0, 4)}...${node.address.slice(-4)}`,
         balance: balance,
         balanceUsd: balanceUsd,
-        isPool: node.is_pool || false,
-        isProgram: node.is_program || false,
-        fundedBy: node.funded_by || [],
+        isPool: isPool,
+        isProgram: isProgram,
+        fundedBy: fundedBy,
         color: color,
         radius: radius
       };
@@ -311,13 +398,17 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
     return edges
       .filter(edge => nodeMap.has(edge.source) && nodeMap.has(edge.target))
-      .map(edge => ({
-        source: edge.source,
-        target: edge.target,
-        edgeType: edge.edge_type,
-        amount: edge.amount || 0,
-        color: this.getEdgeColor(edge.edge_type)
-      }));
+      .map(edge => {
+        // Use 'type' (from stored procedure) or fallback to 'edge_type'
+        const edgeType = edge.type || edge.edge_type || 'unknown';
+        return {
+          source: edge.source,
+          target: edge.target,
+          edgeType: edgeType,
+          amount: edge.amount || 0,
+          color: this.getEdgeColor(edgeType)
+        };
+      });
   }
 
   private dragStarted(event: d3.D3DragEvent<SVGGElement, D3Node, D3Node>, d: D3Node): void {
@@ -346,8 +437,9 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     circle
       .transition()
       .duration(200)
-      .attr('r', isHover ? d.radius * 1.2 : d.radius)
-      .attr('stroke-width', isHover ? 3 : 1.5);
+      .attr('r', isHover ? d.radius * 1.15 : d.radius)
+      .attr('stroke-width', isHover ? 4 : 2.5)
+      .attr('stroke', isHover ? this.lightenColor(d.color, 20) : this.darkenColor(d.color, 30));
   }
 
   resetZoom(): void {
@@ -394,6 +486,19 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
   private getEdgeColor(edgeType: string): string {
     return this.edgeTypeColors[edgeType] || '#475569';
+  }
+
+  private getGradientId(color: string): string {
+    const colorMap: { [key: string]: string } = {
+      '#14b8a6': 'gradient-teal',
+      '#f59e0b': 'gradient-amber',
+      '#8b5cf6': 'gradient-purple',
+      '#e94560': 'gradient-red',
+      '#3b82f6': 'gradient-blue',
+      '#22c55e': 'gradient-green',
+      '#666666': 'gradient-gray'
+    };
+    return colorMap[color] || 'gradient-gray';
   }
 
   // Helper methods for template

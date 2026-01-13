@@ -16,7 +16,7 @@ export interface BubbleMapQueryParams {
   providedIn: 'root'
 })
 export class BubbleMapService {
-  private apiUrl = '/api/bmap';
+  private apiUrl = '/api/bubblemap';
 
   constructor(private http: HttpClient) {}
 
@@ -55,12 +55,12 @@ export class BubbleMapService {
       httpParams = httpParams.set('mint_address', params.mint_address);
     }
 
-    return this.http.get<TimeRangeResponse>(`${this.apiUrl.replace('/bmap', '/timerange')}`, { params: httpParams });
+    return this.http.get<TimeRangeResponse>(`${this.apiUrl}/timerange`, { params: httpParams });
   }
 
   fetchWallet(address: string): Observable<{ success: boolean; message?: string; error?: string }> {
     return this.http.post<{ success: boolean; message?: string; error?: string }>(
-      `${this.apiUrl.replace('/bmap', '/fetch-wallet')}`,
+      `${this.apiUrl}/fetch-wallet`,
       { address }
     );
   }
