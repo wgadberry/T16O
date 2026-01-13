@@ -4,7 +4,7 @@ Guide Shredder - Staging table consumer for forward-only transaction processing
 
 Consumes staged transactions from t16o_db_staging.txs and calls the appropriate
 stored procedure based on tx_state:
-  - tx_state=8 (decoded): CALL sp_tx_parse_staging_row()
+  - tx_state=8 (decoded): CALL sp_tx_parse_staging_decode()
   - tx_state=16 (detailed): CALL sp_tx_parse_staging_detail()
 
 After processing, tx_state is set to 4 (shredded).
@@ -199,83 +199,117 @@ class ShredderProcessor:
         Claim and fetch staging rows that need processing.
         Uses atomic UPDATE to claim rows, avoiding locks that block INSERTs.
 
-        IMPORTANT: Only claims detailed rows when their corresponding decoded rows
-        (same correlation_id) have been processed. This prevents detailed from failing
-        because tx records don't exist yet.
+        Priority order:
+        1. Complete pairs (decoded + detailed ready, SUM=24) - prevents starvation
+        2. Standalone decoded rows
+        3. Standalone detailed rows (where tx exists)
+
+        Within each category, ordered by priority DESC.
+        Decoded is always processed before detailed for the same sig_hash.
         """
-        shredded_state = self.get_tx_state('shredded')
         decoded_state = self.get_tx_state('decoded')
         detailed_state = self.get_tx_state('detailed')
 
-        # Step 1a: Claim decoded rows first (always eligible)
-        self.cursor.execute(f"""
-            UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-            SET priority = priority * 10 + 1,
-                tx_state = {TX_STATE_PROCESSING}
-            WHERE tx_state = %s
-            ORDER BY priority DESC, created_utc ASC, sig_hash
-            LIMIT %s
-        """, (decoded_state, limit))
-        decoded_claimed = self.cursor.rowcount
-        self.db_conn.commit()
-
-        # Step 1b: Claim detailed rows only if no pending decoded for same sig_hash
-        # sig_hash pairs decoder and detailer batches for the SAME signatures
-        # NOTE: MySQL doesn't allow UPDATE with subquery on same table, so use two-step approach
-        remaining_slots = limit - decoded_claimed
-        detailed_claimed = 0
-        if remaining_slots > 0:
-            # Find sig_hashes that still have pending decoded rows
+        # In dry-run mode, just SELECT what would be processed without claiming
+        if self.dry_run:
             self.cursor.execute(f"""
-                SELECT DISTINCT sig_hash
+                SELECT id, tx_state, priority, created_utc, correlation_id, sig_hash
                 FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-                WHERE tx_state IN (%s, {TX_STATE_PROCESSING})
-                  AND sig_hash IS NOT NULL
-            """, (decoded_state,))
-            blocked_hashes = {row['sig_hash'] for row in self.cursor.fetchall() if row['sig_hash']}
+                WHERE tx_state IN (%s, %s)
+                ORDER BY priority DESC, created_utc ASC
+                LIMIT %s
+            """, (decoded_state, detailed_state, limit))
+            return self.cursor.fetchall()
 
-            # Claim detailed rows whose sig_hash is NOT blocked and haven't exceeded retry limit
-            if blocked_hashes:
-                placeholders = ','.join(['%s'] * len(blocked_hashes))
-                self.cursor.execute(f"""
-                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                    SET priority = priority * 10 + 2,
-                        tx_state = {TX_STATE_PROCESSING}
-                    WHERE tx_state = %s
-                      AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
-                      AND (sig_hash IS NULL OR sig_hash NOT IN ({placeholders}))
-                    ORDER BY priority DESC, created_utc ASC, sig_hash
-                    LIMIT %s
-                """, (detailed_state, *blocked_hashes, remaining_slots))
-            else:
-                # No blocked hashes, claim any detailed rows under retry limit
-                self.cursor.execute(f"""
-                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                    SET priority = priority * 10 + 2,
-                        tx_state = {TX_STATE_PROCESSING}
-                    WHERE tx_state = %s
-                      AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
-                    ORDER BY priority DESC, created_utc ASC, sig_hash
-                    LIMIT %s
-                """, (detailed_state, remaining_slots))
-            detailed_claimed = self.cursor.rowcount
+        claimed_count = 0
+
+        # Step 1: Find complete pairs (SUM(tx_state) = 24) ordered by priority
+        # These are sig_hashes with BOTH decoded(8) and detailed(16) ready
+        self.cursor.execute(f"""
+            SELECT sig_hash, MAX(priority) as max_priority
+            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+            WHERE tx_state IN (%s, %s)
+              AND sig_hash IS NOT NULL
+            GROUP BY sig_hash
+            HAVING SUM(tx_state) = 24
+            ORDER BY max_priority DESC
+            LIMIT %s
+        """, (decoded_state, detailed_state, limit // 2))
+
+        complete_pairs = [row['sig_hash'] for row in self.cursor.fetchall()]
+
+        # Step 2: Claim both decoded and detailed for complete pairs
+        if complete_pairs:
+            placeholders = ','.join(['%s'] * len(complete_pairs))
+
+            # Claim decoded rows from complete pairs
+            self.cursor.execute(f"""
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 1,
+                    tx_state = {TX_STATE_PROCESSING}
+                WHERE tx_state = %s
+                  AND sig_hash IN ({placeholders})
+            """, (decoded_state, *complete_pairs))
+            decoded_from_pairs = self.cursor.rowcount
+
+            # Claim detailed rows from complete pairs
+            self.cursor.execute(f"""
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 2,
+                    tx_state = {TX_STATE_PROCESSING}
+                WHERE tx_state = %s
+                  AND sig_hash IN ({placeholders})
+                  AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
+            """, (detailed_state, *complete_pairs))
+            detailed_from_pairs = self.cursor.rowcount
+
+            claimed_count = decoded_from_pairs + detailed_from_pairs
             self.db_conn.commit()
 
-        claimed_count = decoded_claimed + detailed_claimed
+        # Step 3: Claim standalone decoded rows (remaining slots)
+        remaining_slots = limit - claimed_count
+        if remaining_slots > 0:
+            self.cursor.execute(f"""
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 1,
+                    tx_state = {TX_STATE_PROCESSING}
+                WHERE tx_state = %s
+                ORDER BY priority DESC, created_utc ASC
+                LIMIT %s
+            """, (decoded_state, remaining_slots))
+            claimed_count += self.cursor.rowcount
+            self.db_conn.commit()
+
+        # Step 4: Claim standalone detailed rows (remaining slots)
+        remaining_slots = limit - claimed_count
+        if remaining_slots > 0:
+            self.cursor.execute(f"""
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 2,
+                    tx_state = {TX_STATE_PROCESSING}
+                WHERE tx_state = %s
+                  AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
+                ORDER BY priority DESC, created_utc ASC
+                LIMIT %s
+            """, (detailed_state, remaining_slots))
+            claimed_count += self.cursor.rowcount
+            self.db_conn.commit()
 
         if claimed_count == 0:
             return []
 
-        # Step 2: Fetch the claimed rows (no locks needed, we own them)
-        # Decode: priority/10 = original priority, priority%10: 1=decoded(8), 2=detailed(16)
+        # Step 5: Fetch claimed rows, ordered so decoded comes before detailed per sig_hash
+        # priority MOD 10: 1=decoded, 2=detailed
         self.cursor.execute(f"""
             SELECT id,
                    IF(priority MOD 10 = 1, %s, %s) as tx_state,
                    (priority DIV 10) as priority,
                    created_utc,
-                   correlation_id
+                   correlation_id,
+                   sig_hash
             FROM {STAGING_SCHEMA}.{STAGING_TABLE}
             WHERE tx_state = {TX_STATE_PROCESSING}
+            ORDER BY sig_hash, (priority MOD 10) ASC
         """, (decoded_state, detailed_state))
 
         return self.cursor.fetchall()
@@ -305,12 +339,12 @@ class ShredderProcessor:
 
         try:
             if tx_state == decoded_state:
-                # Call sp_tx_parse_staging_row for decoded data
+                # Call sp_tx_parse_staging_decode for decoded data
                 self.cursor.execute(
                     "SET @tx=0, @xfer=0, @swap=0, @act=0, @skip=0"
                 )
                 self.cursor.execute(
-                    "CALL sp_tx_parse_staging_row(%s, @tx, @xfer, @swap, @act, @skip)",
+                    "CALL sp_tx_parse_staging_decode(%s, @tx, @xfer, @swap, @act, @skip)",
                     (staging_id,)
                 )
                 self.cursor.execute("SELECT @tx, @xfer, @swap, @act, @skip")

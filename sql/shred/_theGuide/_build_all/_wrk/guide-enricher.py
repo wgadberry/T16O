@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Guide Enricher - Consolidated enrichment worker for token and pool metadata
+Guide Enricher - Consolidated enrichment worker for token, pool, and program metadata
 
 Merges functionality from:
 - guide-backfill-tokens.py: Token metadata from /v2.0/token/meta
@@ -9,13 +9,15 @@ Merges functionality from:
 Enriches:
 - tx_token: name, symbol, icon, decimals
 - tx_pool: program, tokens, token accounts, LP token, label
+- tx_program: name, program_type (via /v2.0/account/metadata)
 
 Usage:
     python guide-enricher.py                           # All enrichment, single run
     python guide-enricher.py --daemon --interval 60   # Continuous mode
     python guide-enricher.py --enrich tokens          # Only token metadata
     python guide-enricher.py --enrich pools           # Only pool data
-    python guide-enricher.py --enrich tokens,pools    # Both (default)
+    python guide-enricher.py --enrich programs        # Only program metadata
+    python guide-enricher.py --enrich tokens,pools,programs  # All (default)
     python guide-enricher.py --pool <address>         # Enrich single pool
     python guide-enricher.py --status                 # Show enrichment status
 """
@@ -210,18 +212,39 @@ def get_tokens_needing_metadata(cursor, limit: int, max_attempts: int = 3) -> Li
 
 def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
                           icon: str, decimals: int) -> bool:
-    """Update token with fetched metadata, reset attempt_cnt on success"""
-    cursor.execute("""
-        UPDATE tx_token
-        SET token_name = COALESCE(%s, token_name),
-            token_symbol = COALESCE(%s, token_symbol),
-            token_icon = COALESCE(%s, token_icon),
-            decimals = COALESCE(%s, decimals),
-            attempt_cnt = 0
-        WHERE id = %s
-    """, (name, symbol, icon, decimals, token_id))
+    """Update token with fetched metadata.
+
+    Only resets attempt_cnt if we got meaningful data (non-empty name or symbol).
+    Otherwise increments attempt_cnt to prevent infinite retry loops.
+    """
+    # Check if we got meaningful metadata (not just decimals)
+    has_meaningful_data = bool(name and name.strip()) or bool(symbol and symbol.strip())
+
+    if has_meaningful_data:
+        # Got real data - update and reset attempt counter
+        cursor.execute("""
+            UPDATE tx_token
+            SET token_name = COALESCE(%s, token_name),
+                token_symbol = COALESCE(%s, token_symbol),
+                token_icon = COALESCE(%s, token_icon),
+                decimals = COALESCE(%s, decimals),
+                attempt_cnt = 0
+            WHERE id = %s
+        """, (name, symbol, icon, decimals, token_id))
+    else:
+        # No meaningful data - update what we have but increment attempt counter
+        cursor.execute("""
+            UPDATE tx_token
+            SET token_name = COALESCE(%s, token_name),
+                token_symbol = COALESCE(%s, token_symbol),
+                token_icon = COALESCE(%s, token_icon),
+                decimals = COALESCE(%s, decimals),
+                attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+            WHERE id = %s
+        """, (name, symbol, icon, decimals, token_id))
+
     conn.commit()
-    return cursor.rowcount > 0
+    return has_meaningful_data
 
 
 def increment_token_attempt(cursor, conn, token_id: int):
@@ -609,6 +632,184 @@ def enrich_single_pool(session, cursor, conn, address: str):
 
 
 # =============================================================================
+# Program Enrichment (uses existing fetch_account_metadata)
+# =============================================================================
+
+# Known program type mappings based on address or label keywords
+PROGRAM_TYPE_KEYWORDS = {
+    'dex': ['swap', 'amm', 'dex', 'raydium', 'orca', 'jupiter', 'serum', 'openbook'],
+    'lending': ['lend', 'borrow', 'solend', 'mango', 'port', 'jet', 'marginfi'],
+    'nft': ['nft', 'metaplex', 'candy', 'auction'],
+    'token': ['token', 'spl-token', 'mint'],
+    'system': ['system', 'vote', 'stake', 'config'],
+    'compute': ['compute', 'budget'],
+    'router': ['router', 'aggregator', 'jupiter'],
+}
+
+KNOWN_PROGRAMS = {
+    '11111111111111111111111111111111': ('System Program', 'system'),
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA': ('Token Program', 'token'),
+    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL': ('Associated Token Program', 'token'),
+    'ComputeBudget111111111111111111111111111111': ('Compute Budget', 'compute'),
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': ('Raydium CPMM', 'dex'),
+    'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C': ('Raydium CPMM', 'dex'),
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': ('Raydium AMM V4', 'dex'),
+    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc': ('Orca Whirlpool', 'dex'),
+    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': ('Jupiter V6', 'router'),
+    'LBUZKhRxPF3XUpBCjp4YzTKgLXWjvfY2LnPkDsHEVBo': ('Meteora DLMM', 'dex'),
+    'Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB': ('Meteora Pools', 'dex'),
+    'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA': ('Pump.fun AMM', 'dex'),
+    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P': ('Pump.fun', 'dex'),
+}
+
+
+def infer_program_type(name: str, label: str) -> str:
+    """Infer program type from name or label"""
+    text = f"{name or ''} {label or ''}".lower()
+
+    for prog_type, keywords in PROGRAM_TYPE_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in text:
+                return prog_type
+
+    return 'other'
+
+
+def get_programs_needing_enrichment(cursor, limit: int, max_attempts: int = 3) -> List[Dict]:
+    """Get programs missing name metadata"""
+    cursor.execute("""
+        SELECT p.id, a.address
+        FROM tx_program p
+        JOIN tx_address a ON a.id = p.program_address_id
+        WHERE p.name IS NULL
+          AND COALESCE(p.attempt_cnt, 0) < %s
+        LIMIT %s
+    """, (max_attempts, limit))
+    return [{'id': row[0], 'address': row[1]} for row in cursor.fetchall()]
+
+
+def update_program_metadata(cursor, conn, program_id: int, name: str,
+                            program_type: str) -> bool:
+    """Update program with fetched metadata.
+
+    Only resets attempt_cnt if we got meaningful data (non-empty name).
+    Otherwise increments attempt_cnt to prevent infinite retry loops.
+    """
+    has_meaningful_data = bool(name and name.strip())
+
+    if has_meaningful_data:
+        cursor.execute("""
+            UPDATE tx_program
+            SET name = %s,
+                program_type = %s,
+                attempt_cnt = 0
+            WHERE id = %s
+        """, (name, program_type, program_id))
+    else:
+        cursor.execute("""
+            UPDATE tx_program
+            SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+            WHERE id = %s
+        """, (program_id,))
+
+    conn.commit()
+    return has_meaningful_data
+
+
+def enrich_programs(session, cursor, conn, limit: int, max_attempts: int,
+                    delay: float, verbose: bool = True) -> Dict[str, int]:
+    """Enrich programs with metadata from Solscan. Returns stats.
+
+    Uses /v2.0/account/metadata endpoint (same as pool label fetching).
+    """
+    stats = {'processed': 0, 'updated': 0, 'known': 0, 'failed': 0}
+
+    programs = get_programs_needing_enrichment(cursor, limit, max_attempts)
+    if not programs:
+        if verbose:
+            print("  [programs] No programs need enrichment")
+        return stats
+
+    if verbose:
+        print(f"  [programs] Found {len(programs)} programs needing metadata")
+
+    for i, program in enumerate(programs):
+        program_id = program['id']
+        address = program['address']
+
+        if verbose:
+            print(f"    [{i+1}/{len(programs)}] {address[:20]}...", end=" ")
+
+        # Check if it's a known program first (no API call needed)
+        if address in KNOWN_PROGRAMS:
+            name, prog_type = KNOWN_PROGRAMS[address]
+            if update_program_metadata(cursor, conn, program_id, name, prog_type):
+                if verbose:
+                    print(f"{name} (known)")
+                stats['known'] += 1
+                stats['updated'] += 1
+            stats['processed'] += 1
+            continue
+
+        # Fetch from Solscan API (reuse existing function)
+        try:
+            metadata = fetch_account_metadata(session, address)
+
+            if metadata:
+                label = metadata.get('account_label') or metadata.get('label')
+
+                if label:
+                    prog_type = infer_program_type(label, label)
+                    if update_program_metadata(cursor, conn, program_id, label, prog_type):
+                        if verbose:
+                            print(f"{label} ({prog_type})")
+                        stats['updated'] += 1
+                    else:
+                        if verbose:
+                            print("no change")
+                        stats['failed'] += 1
+                else:
+                    if verbose:
+                        print("no label")
+                    # Increment attempt count for programs with no label
+                    cursor.execute("""
+                        UPDATE tx_program
+                        SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+                        WHERE id = %s
+                    """, (program_id,))
+                    conn.commit()
+                    stats['failed'] += 1
+            else:
+                if verbose:
+                    print("not found")
+                cursor.execute("""
+                    UPDATE tx_program
+                    SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+                    WHERE id = %s
+                """, (program_id,))
+                conn.commit()
+                stats['failed'] += 1
+
+        except Exception as e:
+            if verbose:
+                print(f"error: {e}")
+            cursor.execute("""
+                UPDATE tx_program
+                SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+                WHERE id = %s
+            """, (program_id,))
+            conn.commit()
+            stats['failed'] += 1
+
+        stats['processed'] += 1
+
+        if delay > 0 and i < len(programs) - 1:
+            time.sleep(delay)
+
+    return stats
+
+
+# =============================================================================
 # Status Functions
 # =============================================================================
 
@@ -638,9 +839,21 @@ def get_enrichment_status(cursor) -> Dict[str, Any]:
     cursor.execute("SELECT COUNT(*) FROM tx_pool WHERE token_account1_id IS NOT NULL")
     pools_enriched = cursor.fetchone()[0]
 
+    # Programs needing enrichment
+    cursor.execute("""
+        SELECT COUNT(*) FROM tx_program
+        WHERE name IS NULL
+          AND COALESCE(attempt_cnt, 0) < 3
+    """)
+    programs_pending = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM tx_program WHERE name IS NOT NULL")
+    programs_enriched = cursor.fetchone()[0]
+
     return {
         'tokens': {'pending': tokens_pending, 'enriched': tokens_enriched},
         'pools': {'pending': pools_pending, 'enriched': pools_enriched},
+        'programs': {'pending': programs_pending, 'enriched': programs_enriched},
     }
 
 
@@ -653,6 +866,8 @@ def print_status(status: Dict):
     print(f"  Tokens enriched:  {status['tokens']['enriched']:,}")
     print(f"  Pools pending:    {status['pools']['pending']:,}")
     print(f"  Pools enriched:   {status['pools']['enriched']:,}")
+    print(f"  Programs pending: {status['programs']['pending']:,}")
+    print(f"  Programs enriched:{status['programs']['enriched']:,}")
     print(f"{'='*60}\n")
 
 
@@ -773,8 +988,8 @@ def run_queue_consumer(prefetch: int = 1):
                     if not cursor:
                         raise Exception("Database connection unavailable")
 
-                    # Get operations from batch or default to tokens,pools
-                    operations = batch.get('operations', ['tokens', 'pools'])
+                    # Get operations from batch or default to tokens,pools,programs
+                    operations = batch.get('operations', ['tokens', 'pools', 'programs'])
                     if isinstance(operations, str):
                         operations = [op.strip() for op in operations.split(',')]
 
@@ -793,6 +1008,10 @@ def run_queue_consumer(prefetch: int = 1):
 
                         if 'pools' in operations:
                             stats = enrich_pools(session, cursor, conn, limit, max_attempts, delay, verbose=True)
+                            total_enriched += stats.get('updated', 0)
+
+                        if 'programs' in operations:
+                            stats = enrich_programs(session, cursor, conn, limit, max_attempts, delay, verbose=True)
                             total_enriched += stats.get('updated', 0)
 
                         result = {'processed': total_enriched}
@@ -909,13 +1128,13 @@ Examples:
 
     # Parse operations
     if args.enrich.lower() == 'all':
-        operations = ['tokens', 'pools']
+        operations = ['tokens', 'pools', 'programs']
     else:
         operations = [op.strip().lower() for op in args.enrich.split(',')]
-        valid_ops = {'tokens', 'pools'}
+        valid_ops = {'tokens', 'pools', 'programs'}
         invalid = set(operations) - valid_ops
         if invalid:
-            print(f"Error: Invalid operations: {invalid}. Valid: tokens, pools, all")
+            print(f"Error: Invalid operations: {invalid}. Valid: tokens, pools, programs, all")
             return 1
 
     conn = get_db_connection()
@@ -977,6 +1196,11 @@ Examples:
                                             args.max_attempts, args.delay, not args.quiet)
                         total_updated += stats['updated']
 
+                    if 'programs' in operations:
+                        stats = enrich_programs(session, cursor, conn, args.limit,
+                                               args.max_attempts, args.delay, not args.quiet)
+                        total_updated += stats['updated']
+
                     if not args.quiet:
                         if total_updated > 0:
                             print(f"[{timestamp}] Complete: {total_updated} items enriched\n")
@@ -1016,7 +1240,7 @@ Examples:
 
         else:
             # Single run
-            total_stats = {'tokens': {}, 'pools': {}}
+            total_stats = {'tokens': {}, 'pools': {}, 'programs': {}}
 
             if 'tokens' in operations:
                 total_stats['tokens'] = enrich_tokens(session, cursor, conn, args.limit,
@@ -1026,6 +1250,10 @@ Examples:
                 total_stats['pools'] = enrich_pools(session, cursor, conn, args.limit,
                                                      args.max_attempts, args.delay, not args.quiet)
 
+            if 'programs' in operations:
+                total_stats['programs'] = enrich_programs(session, cursor, conn, args.limit,
+                                                          args.max_attempts, args.delay, not args.quiet)
+
             if args.json:
                 print(json.dumps(total_stats, indent=2))
             elif not args.quiet:
@@ -1034,10 +1262,13 @@ Examples:
                 print(f"{'='*60}")
                 if 'tokens' in operations:
                     ts = total_stats['tokens']
-                    print(f"  Tokens: {ts.get('updated', 0)} updated, {ts.get('failed', 0)} failed")
+                    print(f"  Tokens:   {ts.get('updated', 0)} updated, {ts.get('failed', 0)} failed")
                 if 'pools' in operations:
                     ps = total_stats['pools']
-                    print(f"  Pools:  {ps.get('updated', 0)} updated, {ps.get('not_found', 0)} not found")
+                    print(f"  Pools:    {ps.get('updated', 0)} updated, {ps.get('not_found', 0)} not found")
+                if 'programs' in operations:
+                    prs = total_stats['programs']
+                    print(f"  Programs: {prs.get('updated', 0)} updated ({prs.get('known', 0)} known), {prs.get('failed', 0)} failed")
                 print(f"{'='*60}\n")
 
     finally:

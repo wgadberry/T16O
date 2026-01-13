@@ -82,10 +82,10 @@ BEGIN
             tx_id,
             address_id,
             delta,
-            SUM(delta) OVER (
+            ROUND(SUM(delta) OVER (
                 PARTITION BY token_id, address_id
                 ORDER BY block_time, tx_id
-            ) AS balance,
+            ), 9) AS balance,
             block_time
         FROM (
             -- Aggregate deltas per (token, tx, address)
@@ -94,7 +94,7 @@ BEGIN
                 g.token_id,
                 g.tx_id,
                 g.address_id,
-                SUM(g.delta) AS delta,
+                ROUND(SUM(g.delta), 9) AS delta,
                 t.block_time
             FROM (
                 -- Inflows (to_address receives)
@@ -102,7 +102,7 @@ BEGIN
                     token_id,
                     tx_id,
                     to_address_id AS address_id,
-                    (amount / POW(10, COALESCE(decimals, 9))) AS delta
+                    ROUND(amount / POW(10, COALESCE(decimals, 9)), 9) AS delta
                 FROM tx_guide
                 WHERE token_id = v_token_id
                   AND to_address_id IS NOT NULL
@@ -114,7 +114,7 @@ BEGIN
                     token_id,
                     tx_id,
                     from_address_id AS address_id,
-                    -(amount / POW(10, COALESCE(decimals, 9))) AS delta
+                    -ROUND(amount / POW(10, COALESCE(decimals, 9)), 9) AS delta
                 FROM tx_guide
                 WHERE token_id = v_token_id
                   AND from_address_id IS NOT NULL

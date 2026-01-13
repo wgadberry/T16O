@@ -6,30 +6,31 @@ DELIMITER ;;
 DROP FUNCTION IF EXISTS `fn_tx_ensure_token`;;
 
 CREATE DEFINER=`root`@`%` FUNCTION `fn_tx_ensure_token`(
-    p_address VARCHAR(44),
-    p_token_name VARCHAR(256),
-    p_token_symbol VARCHAR(256),
-    p_token_icon text,
-    p_decimals TINYINT UNSIGNED
+    p_mint_address VARCHAR(44)
 ) RETURNS bigint
     DETERMINISTIC
 BEGIN
     DECLARE v_address_id INT UNSIGNED;
-    
-    
-    SET v_address_id = fn_tx_ensure_address(p_address, 'mint');
-    
-    
-    INSERT INTO tx_token (mint_address_id, token_name, token_symbol, token_icon, decimals)
-    VALUES (v_address_id, p_token_name, p_token_symbol, p_token_icon, p_decimals)
-    ON DUPLICATE KEY UPDATE 
-        id = LAST_INSERT_ID(id),
-        token_name = COALESCE(token_name, VALUES(token_name)),
-        token_symbol = COALESCE(token_symbol, VALUES(token_symbol)),
-        token_icon = COALESCE(token_icon, VALUES(token_icon)),
-        decimals = COALESCE(decimals, VALUES(decimals));
-    
-    RETURN LAST_INSERT_ID();
+    DECLARE v_token_id BIGINT;
+
+    -- NULL/empty check
+    IF p_mint_address IS NULL OR p_mint_address = '' THEN
+        RETURN NULL;
+    END IF;
+
+    -- Get/create address
+    SET v_address_id = fn_tx_ensure_address(p_mint_address, 'mint');
+
+    -- Try insert first
+    INSERT IGNORE INTO tx_token (mint_address_id)
+    VALUES (v_address_id);
+
+    IF ROW_COUNT() > 0 THEN
+        RETURN LAST_INSERT_ID();
+    END IF;
+
+    SELECT id INTO v_token_id FROM tx_token WHERE mint_address_id = v_address_id LIMIT 1;
+    RETURN v_token_id;
 END;;
 
 DELIMITER ;

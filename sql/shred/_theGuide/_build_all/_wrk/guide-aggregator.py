@@ -498,17 +498,17 @@ def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
             tx_id,
             address_id,
             delta,
-            SUM(delta) OVER (
+            ROUND(SUM(delta) OVER (
                 PARTITION BY token_id, address_id
                 ORDER BY block_time, tx_id
-            ) AS balance,
+            ), 9) AS balance,
             block_time
         FROM (
             SELECT
                 g.token_id,
                 g.tx_id,
                 g.address_id,
-                SUM(g.delta) AS delta,
+                ROUND(SUM(g.delta), 9) AS delta,
                 t.block_time
             FROM (
                 -- Inflows (to_address receives) - wallets only
@@ -516,7 +516,7 @@ def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
                     gu.token_id,
                     gu.tx_id,
                     gu.to_address_id AS address_id,
-                    (gu.amount / POW(10, COALESCE(gu.decimals, 9))) AS delta
+                    ROUND(gu.amount / POW(10, COALESCE(gu.decimals, 9)), 9) AS delta
                 FROM tx_guide gu
                 JOIN tx_address a ON a.id = gu.to_address_id
                 WHERE gu.token_id = %s
@@ -530,7 +530,7 @@ def recalc_token_bmap_state(cursor, conn, token_id: int) -> int:
                     gu.token_id,
                     gu.tx_id,
                     gu.from_address_id AS address_id,
-                    -(gu.amount / POW(10, COALESCE(gu.decimals, 9))) AS delta
+                    -ROUND(gu.amount / POW(10, COALESCE(gu.decimals, 9)), 9) AS delta
                 FROM tx_guide gu
                 JOIN tx_address a ON a.id = gu.from_address_id
                 WHERE gu.token_id = %s

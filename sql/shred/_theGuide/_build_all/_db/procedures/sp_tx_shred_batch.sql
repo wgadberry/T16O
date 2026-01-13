@@ -67,15 +67,28 @@ BEGIN
     SELECT COUNT(*) INTO p_address_count FROM (SELECT 1 FROM tx_address LIMIT 1) t;
 
     -- =========================================================================
+    -- 2b. FIX: Update address_type to 'pool' for amm_id addresses
+    -- (INSERT IGNORE may have set them as 'wallet' if they appeared in account field first)
+    -- =========================================================================
+    UPDATE tx_address a
+    JOIN (
+        SELECT DISTINCT amm_addr FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
+            amm_addr VARCHAR(44) PATH '$.data.amm_id',
+            act_type VARCHAR(50) PATH '$.activity_type'
+        )) AS jt WHERE jt.amm_addr IS NOT NULL AND jt.act_type LIKE 'ACTIVITY_%SWAP'
+    ) pools ON a.address = pools.amm_addr
+    SET a.address_type = 'pool';
+
+    -- =========================================================================
     -- 3. ENSURE: Programs, Pools, Tokens exist
     -- =========================================================================
     INSERT IGNORE INTO tx_program (program_address_id)
     SELECT DISTINCT id FROM tx_address WHERE address_type = 'program';
 
     INSERT IGNORE INTO tx_pool (pool_address_id)
-    SELECT DISTINCT a.id FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
-        amm_addr VARCHAR(44) PATH '$.data.amm_id', act_type VARCHAR(50) PATH '$.activity_type'
-    )) AS jt JOIN tx_address a ON a.address = jt.amm_addr WHERE jt.act_type LIKE 'ACTIVITY_%SWAP';
+    SELECT DISTINCT a.id FROM tx_address a
+    WHERE a.address_type = 'pool'
+      AND NOT EXISTS (SELECT 1 FROM tx_pool p WHERE p.pool_address_id = a.id);
 
     INSERT INTO tx_token (mint_address_id, decimals)
     SELECT a.id, jt.decimal_val FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
