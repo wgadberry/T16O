@@ -1,11 +1,16 @@
 .sidebar {
   width: 16px;
   min-height: calc(100vh - 60px);
-  background-color: var(--surface-card);
+  background-color: #f8f9fa;
   border-right: 1px solid var(--surface-border);
   transition: width 0.3s ease;
   position: relative;
   z-index: 100;
+}
+
+/* Dark mode solid background */
+:host-context(.dark-mode) .sidebar {
+  background-color: #1e1e2e;
 }
 
 .sidebar.sidebar-visible {
