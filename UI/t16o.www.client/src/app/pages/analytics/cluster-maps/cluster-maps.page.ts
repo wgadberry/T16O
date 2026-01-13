@@ -58,6 +58,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
   private simulation: d3.Simulation<D3Node, D3Link> | null = null;
   private zoom: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
+  private tooltip: d3.Selection<HTMLDivElement, unknown, null, undefined> | null = null;
   private nodes: D3Node[] = [];
   private links: D3Link[] = [];
 
@@ -188,6 +189,49 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       });
 
     this.svg.call(this.zoom);
+
+    // Create tooltip div with pointer arrow
+    d3.select(container).selectAll('.node-tooltip').remove();
+    this.tooltip = d3.select(container)
+      .append('div')
+      .attr('class', 'node-tooltip')
+      .style('position', 'absolute')
+      .style('visibility', 'hidden')
+      .style('background', 'rgba(15, 15, 25, 0.95)')
+      .style('border', '1px solid rgba(100, 100, 150, 0.5)')
+      .style('border-radius', '8px')
+      .style('padding', '12px 16px')
+      .style('font-size', '12px')
+      .style('color', '#e0e0e0')
+      .style('pointer-events', 'none')
+      .style('z-index', '1000')
+      .style('box-shadow', '0 4px 20px rgba(0, 0, 0, 0.5)')
+      .style('backdrop-filter', 'blur(10px)')
+      .style('max-width', '300px');
+
+    // Add pointer arrow border (outer)
+    this.tooltip.append('div')
+      .attr('class', 'tooltip-pointer-border')
+      .style('position', 'absolute')
+      .style('left', '-10px')
+      .style('top', '10px')
+      .style('width', '0')
+      .style('height', '0')
+      .style('border-top', '10px solid transparent')
+      .style('border-bottom', '10px solid transparent')
+      .style('border-right', '10px solid rgba(100, 100, 150, 0.5)');
+
+    // Add pointer arrow fill (inner)
+    this.tooltip.append('div')
+      .attr('class', 'tooltip-pointer')
+      .style('position', 'absolute')
+      .style('left', '-8px')
+      .style('top', '12px')
+      .style('width', '0')
+      .style('height', '0')
+      .style('border-top', '8px solid transparent')
+      .style('border-bottom', '8px solid transparent')
+      .style('border-right', '8px solid rgba(15, 15, 25, 0.95)');
   }
 
   private createNodeGradient(defs: d3.Selection<SVGDefsElement, unknown, null, undefined>, id: string, color: string): void {
@@ -470,6 +514,57 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('r', isHover ? d.radius * 1.15 : d.radius)
       .attr('stroke-width', isHover ? 4 : 2.5)
       .attr('stroke', isHover ? this.lightenColor(d.color, 20) : this.darkenColor(d.color, 30));
+
+    // Show/hide tooltip
+    if (this.tooltip) {
+      if (isHover) {
+        const nodeType = d.isPool ? 'Pool' : d.isProgram ? 'Program' : 'Wallet';
+        const fundedByText = d.fundedBy.length > 0
+          ? d.fundedBy.map(f => `${f.slice(0, 4)}...${f.slice(-4)}`).join(', ')
+          : 'Unknown';
+
+        this.tooltip
+          .style('visibility', 'visible')
+          .html(`
+            <div style="margin-bottom: 8px; font-weight: 600; color: ${d.color}; font-size: 14px;">
+              ${d.label}
+            </div>
+            <div style="margin-bottom: 6px;">
+              <span style="color: #888;">Type:</span>
+              <span style="color: #fff;">${nodeType}</span>
+            </div>
+            <div style="margin-bottom: 6px;">
+              <span style="color: #888;">Address:</span>
+              <span style="color: #aaa; font-family: monospace; font-size: 11px;">${d.id.slice(0, 8)}...${d.id.slice(-6)}</span>
+            </div>
+            <div style="margin-bottom: 6px;">
+              <span style="color: #888;">Balance:</span>
+              <span style="color: #22c55e;">${d.balance.toLocaleString()}</span>
+            </div>
+            ${d.balanceUsd > 0 ? `
+            <div style="margin-bottom: 6px;">
+              <span style="color: #888;">USD Value:</span>
+              <span style="color: #f59e0b;">$${d.balanceUsd.toLocaleString()}</span>
+            </div>
+            ` : ''}
+            <div>
+              <span style="color: #888;">Funded By:</span>
+              <span style="color: #a855f7;">${fundedByText}</span>
+            </div>
+          `);
+
+        // Position tooltip right at the cursor
+        const containerRect = this.containerRef.nativeElement.getBoundingClientRect();
+        const tooltipX = event.clientX - containerRect.left + 0;
+        const tooltipY = event.clientY - containerRect.top + 0;
+
+        this.tooltip
+          .style('left', `${tooltipX}px`)
+          .style('top', `${tooltipY}px`);
+      } else {
+        this.tooltip.style('visibility', 'hidden');
+      }
+    }
   }
 
   resetZoom(): void {
