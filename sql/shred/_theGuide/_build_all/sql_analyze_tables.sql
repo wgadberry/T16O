@@ -1,0 +1,26 @@
+use t16o_db;
+
+ANALYZE TABLE config;
+ANALYZE TABLE tx;
+ANALYZE TABLE tx_account;
+ANALYZE TABLE tx_activity;
+ANALYZE TABLE tx_address;
+ANALYZE TABLE tx_funding_edge;
+ANALYZE TABLE tx_guide;
+ANALYZE TABLE tx_guide_source;
+ANALYZE TABLE tx_guide_type;
+ANALYZE TABLE tx_instruction;
+ANALYZE TABLE tx_party;
+ANALYZE TABLE tx_pool;
+ANALYZE TABLE tx_program;
+ANALYZE TABLE tx_signer;
+ANALYZE TABLE tx_sol_balance_change;
+ANALYZE TABLE tx_swap;
+ANALYZE TABLE tx_token;
+ANALYZE TABLE tx_token_balance_change;
+ANALYZE TABLE tx_token_holder;
+ANALYZE TABLE tx_token_market;
+ANALYZE TABLE tx_token_participant;
+ANALYZE TABLE tx_token_price;
+ANALYZE TABLE tx_transfer;
+ANALYZE TABLE tx_bmap_state;
