@@ -9,10 +9,12 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_clear_tables`()
 BEGIN
     SET FOREIGN_KEY_CHECKS = 0;
     
+	TRUNCATE TABLE tx_request_log;
     TRUNCATE TABLE tx_funding_edge;
     TRUNCATE TABLE tx_token_participant;    
     TRUNCATE TABLE tx_guide;
     TRUNCATE TABLE tx_activity;
+	TRUNCATE TABLE tx_bmap_state;
     -- TRUNCATE TABLE tx_party;
     TRUNCATE TABLE tx_transfer;
     TRUNCATE TABLE tx_swap;
@@ -30,6 +32,8 @@ BEGIN
    -- TRUNCATE TABLE tx_program;
     -- TRUNCATE TABLE tx_account;
     TRUNCATE TABLE tx_address;
+    
+    TRUNCATE TABLE t16o_db_staging.txs;
 
     -- Re-insert synthetic addresses required by sp_tx_guide_batch
     -- These are placeholder addresses for BURN/MINT/CLOSE/CREATE operations

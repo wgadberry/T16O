@@ -61,23 +61,49 @@ except ImportError:
 
 
 # =============================================================================
-# Configuration
+# Configuration (from guide-config.json)
 # =============================================================================
 
-SOLSCAN_API_BASE = "https://pro-api.solscan.io/v2.0"
-SOLSCAN_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk"
+import os
+
+def load_config():
+    config_path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+_cfg = load_config()
+
+SOLSCAN_API_BASE = _cfg.get('SOLSCAN_API', "https://pro-api.solscan.io/v2.0")
+SOLSCAN_API_TOKEN = _cfg.get('SOLSCAN_TOKEN', "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk")
 
 # RabbitMQ (legacy queue)
-RABBITMQ_HOST = 'localhost'
-RABBITMQ_PORT = 5692
-RABBITMQ_USER = 'admin'
-RABBITMQ_PASS = 'admin123'
+RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
+RABBITMQ_USER = _cfg.get('RABBITMQ_USER', 'admin')
+RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
 RABBITMQ_QUEUE_IN = 'tx.guide.addresses'
 
 # Gateway RabbitMQ (t16o_mq vhost)
-RABBITMQ_VHOST = 't16o_mq'
+RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
 RABBITMQ_REQUEST_QUEUE = 'mq.guide.funder.request'
 RABBITMQ_RESPONSE_QUEUE = 'mq.guide.funder.response'
+
+# Database configuration (standardized across all workers)
+DB_CONFIG = {
+    'host': _cfg.get('DB_HOST', '127.0.0.1'),
+    'port': _cfg.get('DB_PORT', 3396),
+    'user': _cfg.get('DB_USER', 'root'),
+    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
+    'database': _cfg.get('DB_NAME', 't16o_db'),
+    'ssl_disabled': True,
+    'use_pure': True,
+    'ssl_verify_cert': False,
+    'ssl_verify_identity': False,
+    'autocommit': True,  # Prevent table locks when idle
+}
 
 # SOL token addresses for funding detection
 SOL_TOKEN = 'So11111111111111111111111111111111111111111'
@@ -345,6 +371,7 @@ def run_queue_consumer(args):
     print(f"\n{'='*60}")
     print(f"  FUNDER - Gateway Queue Consumer Mode")
     print(f"{'='*60}")
+    print(f"  Database: {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
     print(f"  Request queue: {RABBITMQ_REQUEST_QUEUE}")
     print(f"  Response queue: {RABBITMQ_RESPONSE_QUEUE}")
     print(f"  VHost: {RABBITMQ_VHOST}")
@@ -352,15 +379,6 @@ def run_queue_consumer(args):
 
     # Create Solscan client
     solscan = SolscanClient()
-
-    # DB connection config for reconnection
-    db_config = {
-        'host': args.db_host,
-        'port': args.db_port,
-        'user': args.db_user,
-        'password': args.db_pass,
-        'database': args.db_name
-    }
 
     # Setup DB connection with reconnect capability
     db_state = {'conn': None, 'cursor': None, 'worker': None}
@@ -381,7 +399,7 @@ def run_queue_consumer(args):
                         db_state['conn'].close()
                     except:
                         pass
-                db_state['conn'] = mysql.connector.connect(**db_config)
+                db_state['conn'] = mysql.connector.connect(**DB_CONFIG)
                 db_state['cursor'] = db_state['conn'].cursor(dictionary=True)
                 db_state['worker'] = AddressHistoryWorker(
                     db_conn=db_state['conn'],
@@ -637,7 +655,6 @@ class AddressHistoryWorker:
             return
 
         funder = funding_info['funder']
-        signature = funding_info['signature']
         amount = funding_info['amount']
         block_time = funding_info['block_time']
 
@@ -657,27 +674,14 @@ class AddressHistoryWorker:
         target_row = self.cursor.fetchone()
         target_id = target_row['id'] if target_row else None
 
-        # Ensure transaction exists and get ID
-        # tx_state = 1 (SHREDDED bit only, minimal state for funding tx)
-        tx_id = None
-        if signature:
-            self.cursor.execute("""
-                INSERT IGNORE INTO tx (signature, block_time, tx_state)
-                VALUES (%s, %s, 1)
-            """, (signature, block_time))
-            self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
-            tx_row = self.cursor.fetchone()
-            tx_id = tx_row['id'] if tx_row else None
-
-        # Update target address with funding info
+        # Update target address with funding info (no tx record creation)
         self.cursor.execute("""
             UPDATE tx_address
             SET funded_by_address_id = %s,
-                funding_tx_id = %s,
                 funding_amount = %s,
                 first_seen_block_time = %s
             WHERE address = %s AND funded_by_address_id IS NULL
-        """, (funder_id, tx_id, amount, block_time, target_address))
+        """, (funder_id, amount, block_time, target_address))
 
         # Create tx_funding_edge record with full details
         # Amount from Solscan is in lamports, convert to SOL
@@ -1049,11 +1053,7 @@ def main():
                         help=f'Delay between API calls in seconds (default: {API_DELAY})')
     parser.add_argument('--batch-delay', type=float, default=1.0,
                         help='Delay between batches in seconds to reduce deadlocks (default: 1.0)')
-    parser.add_argument('--db-host', default='localhost', help='MySQL host')
-    parser.add_argument('--db-port', type=int, default=3396, help='MySQL port')
-    parser.add_argument('--db-user', default='root', help='MySQL user')
-    parser.add_argument('--db-pass', default='rootpassword', help='MySQL password')
-    parser.add_argument('--db-name', default='t16o_db', help='MySQL database')
+    # DB config now loaded from guide-config.json (standardized across all workers)
     parser.add_argument('--rabbitmq-host', default=RABBITMQ_HOST, help='RabbitMQ host')
     parser.add_argument('--rabbitmq-port', type=int, default=RABBITMQ_PORT, help='RabbitMQ port')
     parser.add_argument('--dry-run', action='store_true',
@@ -1104,14 +1104,8 @@ def main():
     print()
 
     # Connect to MySQL
-    print(f"Connecting to MySQL {args.db_host}:{args.db_port}/{args.db_name}...")
-    db_conn = mysql.connector.connect(
-        host=args.db_host,
-        port=args.db_port,
-        user=args.db_user,
-        password=args.db_pass,
-        database=args.db_name
-    )
+    print(f"Connecting to MySQL {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}...")
+    db_conn = mysql.connector.connect(**DB_CONFIG)
 
     # Verify init_tx_fetched column exists
     cursor = db_conn.cursor()
@@ -1235,7 +1229,6 @@ def main():
                 if self.dry_run:
                     return
                 funder = funding_info['funder']
-                signature = funding_info['signature']
                 amount = funding_info['amount']
                 block_time = funding_info['block_time']
 
@@ -1250,21 +1243,12 @@ def main():
                 target_row = self.cursor.fetchone()
                 target_id = target_row['id'] if target_row else None
 
-                # tx_state = 1 (SHREDDED bit only, minimal state for funding tx)
-                tx_id = None
-                if signature:
-                    self.cursor.execute("""
-                        INSERT IGNORE INTO tx (signature, block_time, tx_state) VALUES (%s, %s, 1)
-                    """, (signature, block_time))
-                    self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (signature,))
-                    tx_row = self.cursor.fetchone()
-                    tx_id = tx_row['id'] if tx_row else None
-
+                # Update target address with funding info (no tx record creation)
                 self.cursor.execute("""
                     UPDATE tx_address
-                    SET funded_by_address_id = %s, funding_tx_id = %s, funding_amount = %s, first_seen_block_time = %s
+                    SET funded_by_address_id = %s, funding_amount = %s, first_seen_block_time = %s
                     WHERE address = %s AND funded_by_address_id IS NULL
-                """, (funder_id, tx_id, amount, block_time, target_address))
+                """, (funder_id, amount, block_time, target_address))
 
                 sol_amount = float(amount) / 1e9 if amount else 0
                 if funder_id and target_id:
@@ -1282,11 +1266,13 @@ def main():
                 """
                 Fetch addresses from DB where funded_by_address_id IS NULL
                 and init_tx_fetched = 0 (or NULL).
+                Orders by id ASC to process oldest addresses first (backfill mode).
                 """
                 query = """
                     SELECT address FROM tx_address
                     WHERE funded_by_address_id IS NULL
                       AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+                    ORDER BY id ASC
                     LIMIT %s
                 """
                 self.cursor.execute(query, (limit,))

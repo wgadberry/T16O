@@ -1,0 +1,70 @@
+MapBind.IO Information: 0 : Trace file created on 12/28/2025 3:09:19 AM
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 1 : Worker started
+MapBind.IO Error: 1 : Unhandled exception : Format of the initialization string does not conform to specification starting at index 0.
+MapBind.IO Error: 1 : Format of the initialization string does not conform to specification starting at index 0.
+MapBind.IO Information: 1 : Worker completed
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 1 : Worker started
+MapBind.IO Information: 1 : Writing 0 records
+MapBind.IO Information: 1 : Creating table t_us_state
+MapBind.Shape2SqlServer.exe Warning: 0 : Invalid geometry. Must call make valid : 24414: Not valid because an edge of curve (1) overlaps an edge of curve (2).
+MapBind.IO Information: 1 : Creating spatial index...
+MapBind.IO Information: 1 : Commit transaction
+MapBind.IO Verbose: 1 : SqlBulkCopy.Close()
+MapBind.IO Verbose: 1 : db.Close()
+MapBind.IO Information: 1 : Worker completed
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 1 : Worker started
+MapBind.IO Information: 1 : Writing 0 records
+MapBind.IO Information: 1 : Creating table t_us_state
+MapBind.IO Error: 1 : Error : There is already an object named 't_us_state' in the database.
+MapBind.IO Warning: 1 : Rolling back transaction
+MapBind.IO Error: 1 : There is already an object named 't_us_state' in the database.
+MapBind.IO Verbose: 1 : SqlBulkCopy.Close()
+MapBind.IO Verbose: 1 : db.Close()
+MapBind.IO Information: 1 : Worker completed
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 1 : Worker started
+MapBind.IO Information: 1 : Writing 0 records
+MapBind.IO Information: 1 : Creating table t_us_state
+MapBind.IO Error: 1 : Error : There is already an object named 't_us_state' in the database.
+MapBind.IO Warning: 1 : Rolling back transaction
+MapBind.IO Error: 1 : There is already an object named 't_us_state' in the database.
+MapBind.IO Verbose: 1 : SqlBulkCopy.Close()
+MapBind.IO Verbose: 1 : db.Close()
+MapBind.IO Information: 1 : Worker completed
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 1 : Worker started
+MapBind.IO Information: 1 : Writing 0 records
+MapBind.IO Information: 1 : Creating table tl_2021_us_state
+MapBind.Shape2SqlServer.exe Warning: 0 : Invalid geometry. Must call make valid : 24414: Not valid because an edge of curve (3) overlaps an edge of curve (1).
+MapBind.IO Information: 1 : Creating spatial index...
+MapBind.IO Information: 1 : Commit transaction
+MapBind.IO Verbose: 1 : SqlBulkCopy.Close()
+MapBind.IO Verbose: 1 : db.Close()
+MapBind.IO Information: 1 : Worker completed
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 0 : Trace started
+MapBind.IO Information: 0 : Checking shape files
+MapBind.IO Information: 1 : Worker started
+MapBind.IO Information: 1 : Writing 0 records
+MapBind.IO Information: 1 : Creating table tl_2022_us_state
+MapBind.Shape2SqlServer.exe Warning: 0 : Invalid geometry. Must call make valid : 24414: Not valid because an edge of curve (3) overlaps an edge of curve (1).
+MapBind.IO Information: 1 : Creating spatial index...
+MapBind.IO Information: 1 : Commit transaction
+MapBind.IO Verbose: 1 : SqlBulkCopy.Close()
+MapBind.IO Verbose: 1 : db.Close()
+MapBind.IO Information: 1 : Worker completed

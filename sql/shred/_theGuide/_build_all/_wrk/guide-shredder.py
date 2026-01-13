@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """
-Guide Shredder - Core transaction shredding daemon
+Guide Shredder - Staging table consumer for forward-only transaction processing
 
-Consumes signature batches from gateway, fetches decoded data from Solscan,
-and calls sp_tx_shred_batch for DB processing.
+Consumes staged transactions from t16o_db_staging.txs and calls the appropriate
+stored procedure based on tx_state:
+  - tx_state=8 (decoded): CALL sp_tx_parse_staging_row()
+  - tx_state=16 (detailed): CALL sp_tx_parse_staging_detail()
+
+After processing, tx_state is set to 4 (shredded).
 
 Usage:
-    python guide-shredder.py --queue-consumer          # Gateway mode (primary)
-    python guide-shredder.py --queue-consumer --dry-run
+    python guide-shredder.py --daemon                 # Continuous polling mode
+    python guide-shredder.py --once                   # Process once and exit
+    python guide-shredder.py --daemon --dry-run      # Preview only
 """
 
 import argparse
 import json
 import os
 import time
-import requests
 from datetime import datetime
 
 try:
     import mysql.connector
+    from mysql.connector import Error as MySQLError
     HAS_MYSQL = True
 except ImportError:
     HAS_MYSQL = False
@@ -43,18 +48,6 @@ def load_config():
 
 _cfg = load_config()
 
-SOLSCAN_API_BASE = _cfg.get('SOLSCAN_API', "https://pro-api.solscan.io/v2.0")
-SOLSCAN_API_TOKEN = _cfg.get('SOLSCAN_TOKEN', "")
-
-RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
-RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
-RABBITMQ_USER = _cfg.get('RABBITMQ_USER', 'admin')
-RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
-RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
-RABBITMQ_REQUEST_QUEUE = 'mq.guide.shredder.request'
-RABBITMQ_RESPONSE_QUEUE = 'mq.guide.shredder.response'
-RABBITMQ_GATEWAY_QUEUE = 'mq.guide.gateway.request'
-
 DB_CONFIG = {
     'host': _cfg.get('DB_HOST', '127.0.0.1'),
     'port': _cfg.get('DB_PORT', 3396),
@@ -64,90 +57,116 @@ DB_CONFIG = {
     'ssl_disabled': True,
     'use_pure': True,
     'ssl_verify_cert': False,
-    'ssl_verify_identity': False
+    'ssl_verify_identity': False,
+    'autocommit': True,  # Prevent table locks when idle
 }
 
+# Staging table config
+STAGING_SCHEMA = 't16o_db_staging'
+STAGING_TABLE = 'txs'
+
+# RabbitMQ config for gateway responses
+RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
+RABBITMQ_USER = _cfg.get('RABBITMQ_USER', 'admin')
+RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
+RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
+RABBITMQ_RESPONSE_QUEUE = 'mq.guide.shredder.response'
+
+# Default tx_state values (will be fetched from config table)
+TX_STATE_SHREDDED = 4
+TX_STATE_DECODED = 8
+TX_STATE_DETAILED = 16
+TX_STATE_PROCESSING = 1  # Claimed by shredder, in progress
+
+# Max retry attempts for detailed rows before giving up
+MAX_DETAILED_ATTEMPTS = 3
+
+# Track completed correlations to avoid duplicate responses
+_completed_correlations = set()
+
 
 # =============================================================================
-# Solscan API
+# Gateway Response Publishing
 # =============================================================================
 
-def create_solscan_session() -> requests.Session:
-    """Create requests session with Solscan auth"""
-    session = requests.Session()
-    session.headers.update({"token": SOLSCAN_API_TOKEN})
-    return session
+def get_rabbitmq_channel():
+    """Create RabbitMQ connection and channel for responses"""
+    if not HAS_PIKA:
+        return None, None
+    try:
+        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+        parameters = pika.ConnectionParameters(
+            host=RABBITMQ_HOST, port=RABBITMQ_PORT, virtual_host=RABBITMQ_VHOST,
+            credentials=credentials, heartbeat=600
+        )
+        connection = pika.BlockingConnection(parameters)
+        channel = connection.channel()
+        channel.queue_declare(queue=RABBITMQ_RESPONSE_QUEUE, durable=True, arguments={'x-max-priority': 10})
+        return connection, channel
+    except Exception as e:
+        print(f"[WARN] RabbitMQ connection failed: {e}")
+        return None, None
 
 
-def fetch_decoded_batch(session: requests.Session, signatures: list) -> dict:
-    """Fetch decoded data for batch of signatures"""
-    tx_params = '&'.join([f'tx[]={sig}' for sig in signatures])
-    url = f"{SOLSCAN_API_BASE}/transaction/actions/multi?{tx_params}"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-# =============================================================================
-# Pre-filter: Check for existing signatures
-# =============================================================================
-
-def filter_existing_signatures(cursor, signatures: list) -> tuple:
+def check_correlation_complete(cursor, correlation_id: str) -> dict:
     """
-    Filter signatures based on existence and detail status.
-    Returns tuple: (new_signatures, need_detail_signatures)
+    Check if all staging rows for a correlation_id are shredded.
+    Returns stats dict if complete, None if not.
     """
-    if not signatures:
-        return [], []
+    if not correlation_id or correlation_id in _completed_correlations:
+        return None
 
-    DETAILED_BIT = 64
-    placeholders = ','.join(['%s'] * len(signatures))
-    cursor.execute(f"SELECT signature, tx_state FROM tx WHERE signature IN ({placeholders})", signatures)
+    # Count pending (not shredded) rows for this correlation
+    cursor.execute(f"""
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN tx_state = %s THEN 1 ELSE 0 END) as shredded,
+            SUM(CASE WHEN tx_state != %s THEN 1 ELSE 0 END) as pending
+        FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+        WHERE correlation_id = %s
+    """, (TX_STATE_SHREDDED, TX_STATE_SHREDDED, correlation_id))
 
-    existing = {}
-    for row in cursor.fetchall():
-        state_val = row[1]
-        if state_val is None:
-            existing[row[0]] = 0
-        elif isinstance(state_val, int):
-            existing[row[0]] = state_val
-        elif state_val == 'detailed':
-            existing[row[0]] = 64 | 63
-        elif state_val == 'shredded':
-            existing[row[0]] = 63
-        elif state_val.isdigit():
-            existing[row[0]] = int(state_val)
-        else:
-            existing[row[0]] = 0
+    row = cursor.fetchone()
+    if not row or row['total'] == 0:
+        return None
 
-    if not existing:
-        return signatures, []
+    if row['pending'] == 0:
+        # All rows shredded - mark as completed to avoid duplicate responses
+        _completed_correlations.add(correlation_id)
+        return {
+            'total_staging_rows': row['total'],
+            'shredded': row['shredded']
+        }
 
-    new_sigs = [sig for sig in signatures if sig not in existing]
-    need_detail = [sig for sig, state in existing.items() if (state & DETAILED_BIT) == 0]
-
-    return new_sigs, need_detail
+    return None
 
 
-# =============================================================================
-# Address Extraction
-# =============================================================================
+def publish_shredder_response(channel, correlation_id: str, stats: dict):
+    """Publish shredder completion response to gateway"""
+    if not channel:
+        return
 
-def extract_addresses_from_json(data: dict) -> set:
-    """Extract only wallet addresses (source/destination owners) from transfers."""
-    addresses = set()
+    response = {
+        'correlation_id': correlation_id,
+        'worker': 'shredder',
+        'status': 'completed',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'result': {
+            'staging_rows_processed': stats['total_staging_rows'],
+            'batch_num': 1  # Shredder processes all batches as one
+        }
+    }
 
-    if not data.get('success') or not data.get('data'):
-        return addresses
-
-    for tx in data['data']:
-        for transfer in tx.get('transfers', []):
-            if so := transfer.get('source_owner'):
-                addresses.add(so)
-            if do := transfer.get('destination_owner'):
-                addresses.add(do)
-
-    return addresses
+    try:
+        channel.basic_publish(
+            exchange='', routing_key=RABBITMQ_RESPONSE_QUEUE,
+            body=json.dumps(response).encode('utf-8'),
+            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json')
+        )
+        print(f"  [→] Shredder response sent for correlation {correlation_id[:8]}")
+    except Exception as e:
+        print(f"[WARN] Failed to publish shredder response: {e}")
 
 
 # =============================================================================
@@ -155,218 +174,329 @@ def extract_addresses_from_json(data: dict) -> set:
 # =============================================================================
 
 class ShredderProcessor:
-    """Core shredder processing logic"""
+    """Processes staged transactions using forward-only stored procedures"""
 
-    def __init__(self, db_conn, solscan_session: requests.Session, dry_run: bool = False):
+    def __init__(self, db_conn, dry_run: bool = False):
         self.db_conn = db_conn
-        self.cursor = db_conn.cursor()
-        self.solscan_session = solscan_session
+        self.cursor = db_conn.cursor(dictionary=True)
         self.dry_run = dry_run
+        self._tx_states = {}
 
-    def call_shred_batch(self, json_data: dict) -> tuple:
-        """Call sp_tx_shred_batch with JSON, return counts"""
-        json_str = json.dumps(json_data)
-        self.cursor.execute("SET @p_tx = 0, @p_edge = 0, @p_addr = 0, @p_xfer = 0, @p_swap = 0, @p_act = 0")
-        self.cursor.execute("CALL sp_tx_shred_batch(%s, @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap, @p_act)", (json_str,))
-        self.cursor.execute("SELECT @p_tx, @p_edge, @p_addr, @p_xfer, @p_swap, @p_act")
-        result = self.cursor.fetchone()
+    def get_tx_state(self, key: str) -> int:
+        """Get tx_state value from config table (cached)"""
+        if key not in self._tx_states:
+            self.cursor.execute(
+                "SELECT CAST(config_value AS UNSIGNED) as val FROM config "
+                "WHERE config_type = 'tx_state' AND config_key = %s", (key,)
+            )
+            row = self.cursor.fetchone()
+            defaults = {'shredded': TX_STATE_SHREDDED, 'decoded': TX_STATE_DECODED, 'detailed': TX_STATE_DETAILED}
+            self._tx_states[key] = row['val'] if row else defaults.get(key, 0)
+        return self._tx_states[key]
+
+    def fetch_pending_staging_rows(self, limit: int = 10) -> list:
+        """
+        Claim and fetch staging rows that need processing.
+        Uses atomic UPDATE to claim rows, avoiding locks that block INSERTs.
+
+        IMPORTANT: Only claims detailed rows when their corresponding decoded rows
+        (same correlation_id) have been processed. This prevents detailed from failing
+        because tx records don't exist yet.
+        """
+        shredded_state = self.get_tx_state('shredded')
+        decoded_state = self.get_tx_state('decoded')
+        detailed_state = self.get_tx_state('detailed')
+
+        # Step 1a: Claim decoded rows first (always eligible)
+        self.cursor.execute(f"""
+            UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+            SET priority = priority * 10 + 1,
+                tx_state = {TX_STATE_PROCESSING}
+            WHERE tx_state = %s
+            ORDER BY priority DESC, created_utc ASC, sig_hash
+            LIMIT %s
+        """, (decoded_state, limit))
+        decoded_claimed = self.cursor.rowcount
         self.db_conn.commit()
-        return tuple(r or 0 for r in result)
 
-    def store_instruction_data(self, decoded_response: dict) -> int:
-        """Compress and store raw instruction data in tx.instruction_data"""
-        if not decoded_response.get('success') or not decoded_response.get('data'):
-            return 0
+        # Step 1b: Claim detailed rows only if no pending decoded for same sig_hash
+        # sig_hash pairs decoder and detailer batches for the SAME signatures
+        # NOTE: MySQL doesn't allow UPDATE with subquery on same table, so use two-step approach
+        remaining_slots = limit - decoded_claimed
+        detailed_claimed = 0
+        if remaining_slots > 0:
+            # Find sig_hashes that still have pending decoded rows
+            self.cursor.execute(f"""
+                SELECT DISTINCT sig_hash
+                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+                WHERE tx_state IN (%s, {TX_STATE_PROCESSING})
+                  AND sig_hash IS NOT NULL
+            """, (decoded_state,))
+            blocked_hashes = {row['sig_hash'] for row in self.cursor.fetchall() if row['sig_hash']}
 
-        stored = 0
-        for tx in decoded_response['data']:
-            sig = tx.get('tx_hash') or tx.get('signature')
-            if not sig:
-                continue
+            # Claim detailed rows whose sig_hash is NOT blocked and haven't exceeded retry limit
+            if blocked_hashes:
+                placeholders = ','.join(['%s'] * len(blocked_hashes))
+                self.cursor.execute(f"""
+                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                    SET priority = priority * 10 + 2,
+                        tx_state = {TX_STATE_PROCESSING}
+                    WHERE tx_state = %s
+                      AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
+                      AND (sig_hash IS NULL OR sig_hash NOT IN ({placeholders}))
+                    ORDER BY priority DESC, created_utc ASC, sig_hash
+                    LIMIT %s
+                """, (detailed_state, *blocked_hashes, remaining_slots))
+            else:
+                # No blocked hashes, claim any detailed rows under retry limit
+                self.cursor.execute(f"""
+                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                    SET priority = priority * 10 + 2,
+                        tx_state = {TX_STATE_PROCESSING}
+                    WHERE tx_state = %s
+                      AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
+                    ORDER BY priority DESC, created_utc ASC, sig_hash
+                    LIMIT %s
+                """, (detailed_state, remaining_slots))
+            detailed_claimed = self.cursor.rowcount
+            self.db_conn.commit()
 
-            instruction_payload = {
-                'activities': tx.get('activities', []),
-                'transfers': tx.get('transfers', []),
-                'block_time': tx.get('block_time'),
-            }
-            json_str = json.dumps(instruction_payload, separators=(',', ':'))
+        claimed_count = decoded_claimed + detailed_claimed
 
-            self.cursor.execute("""
-                UPDATE tx SET instruction_data = COMPRESS(%s)
-                WHERE signature = %s AND instruction_data IS NULL
-            """, (json_str, sig))
-            if self.cursor.rowcount > 0:
-                stored += 1
+        if claimed_count == 0:
+            return []
 
-        self.db_conn.commit()
-        return stored
+        # Step 2: Fetch the claimed rows (no locks needed, we own them)
+        # Decode: priority/10 = original priority, priority%10: 1=decoded(8), 2=detailed(16)
+        self.cursor.execute(f"""
+            SELECT id,
+                   IF(priority MOD 10 = 1, %s, %s) as tx_state,
+                   (priority DIV 10) as priority,
+                   created_utc,
+                   correlation_id
+            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+            WHERE tx_state = {TX_STATE_PROCESSING}
+        """, (decoded_state, detailed_state))
 
-    def process_signatures(self, signatures: list) -> dict:
-        """Core processing logic for a batch of signatures"""
+        return self.cursor.fetchall()
+
+    def process_staging_row(self, staging_id: int, tx_state: int, priority: int) -> dict:
+        """
+        Process a single staging row based on its tx_state.
+        Updates staging row to shredded (4) on success, restores original state on error.
+        """
         result = {
-            'processed': 0, 'skipped': 0, 'new_sigs': [], 'need_detail_sigs': [],
-            'addresses': set(), 'funder_addresses': [],
-            'tx_count': 0, 'edge_count': 0, 'transfer_count': 0,
-            'swap_count': 0, 'activity_count': 0, 'instructions_stored': 0,
+            'staging_id': staging_id,
+            'tx_state': tx_state,
+            'success': False,
+            'tx_count': 0,
+            'transfer_count': 0,
+            'swap_count': 0,
+            'activity_count': 0,
+            'sol_balance_count': 0,
+            'token_balance_count': 0,
+            'skipped_count': 0,
             'error': None
         }
 
-        if not signatures:
-            return result
+        decoded_state = self.get_tx_state('decoded')
+        detailed_state = self.get_tx_state('detailed')
+        shredded_state = self.get_tx_state('shredded')
 
-        # Phase 0: Pre-filter existing signatures
-        original_count = len(signatures)
-        new_sigs, need_detail_sigs = filter_existing_signatures(self.cursor, signatures)
-        result['skipped'] = original_count - len(new_sigs) - len(need_detail_sigs)
-        result['need_detail_sigs'] = need_detail_sigs
-        result['new_sigs'] = new_sigs
+        try:
+            if tx_state == decoded_state:
+                # Call sp_tx_parse_staging_row for decoded data
+                self.cursor.execute(
+                    "SET @tx=0, @xfer=0, @swap=0, @act=0, @skip=0"
+                )
+                self.cursor.execute(
+                    "CALL sp_tx_parse_staging_row(%s, @tx, @xfer, @swap, @act, @skip)",
+                    (staging_id,)
+                )
+                self.cursor.execute("SELECT @tx, @xfer, @swap, @act, @skip")
+                row = self.cursor.fetchone()
+                if row:
+                    result['tx_count'] = row['@tx'] or 0
+                    result['transfer_count'] = row['@xfer'] or 0
+                    result['swap_count'] = row['@swap'] or 0
+                    result['activity_count'] = row['@act'] or 0
+                    result['skipped_count'] = row['@skip'] or 0
+                result['success'] = True
 
-        if result['skipped'] > 0:
-            print(f"  [~] Skipped {result['skipped']}/{original_count} already detailed")
+            elif tx_state == detailed_state:
+                # Call sp_tx_parse_staging_detail for detailed data
+                self.cursor.execute(
+                    "SET @tx=0, @sol=0, @tok=0, @skip=0"
+                )
+                self.cursor.execute(
+                    "CALL sp_tx_parse_staging_detail(%s, @tx, @sol, @tok, @skip)",
+                    (staging_id,)
+                )
+                self.cursor.execute("SELECT @tx, @sol, @tok, @skip")
+                row = self.cursor.fetchone()
+                if row:
+                    result['tx_count'] = row['@tx'] or 0
+                    result['sol_balance_count'] = row['@sol'] or 0
+                    result['token_balance_count'] = row['@tok'] or 0
+                    result['skipped_count'] = row['@skip'] or 0
+                # Only mark success if we actually processed some tx records
+                # If all skipped (tx not found yet), leave for retry (up to MAX_DETAILED_ATTEMPTS)
+                if result['tx_count'] > 0 or result['sol_balance_count'] > 0 or result['token_balance_count'] > 0:
+                    result['success'] = True
+                else:
+                    # Get current attempt count
+                    self.cursor.execute(f"""
+                        SELECT attempt_cnt FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
+                    """, (staging_id,))
+                    attempt_row = self.cursor.fetchone()
+                    current_attempts = (attempt_row['attempt_cnt'] if attempt_row else 0) + 1
+                    if current_attempts >= MAX_DETAILED_ATTEMPTS:
+                        result['error'] = f'All txs skipped - giving up after {current_attempts} attempts'
+                    else:
+                        result['error'] = f'All txs skipped (attempt {current_attempts}/{MAX_DETAILED_ATTEMPTS})'
 
-        if not new_sigs:
-            print(f"  [=] No new signatures to shred")
-            return result
+            else:
+                # Unknown/invalid tx_state - mark as shredded to skip in future
+                result['error'] = f'Unknown tx_state: {tx_state}'
+                self.cursor.execute(f"""
+                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                    SET tx_state = %s, priority = %s
+                    WHERE id = %s
+                """, (self.get_tx_state('shredded'), priority, staging_id))
 
-        if self.dry_run:
-            print(f"  [DRY] Would shred {len(new_sigs)} signatures")
-            result['processed'] = len(new_sigs)
-            return result
+            # Finalize staging row
+            if result['success']:
+                # Success: mark as shredded
+                self.cursor.execute(f"""
+                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                    SET tx_state = %s, priority = %s
+                    WHERE id = %s
+                """, (shredded_state, priority, staging_id))
+            else:
+                # Failed/skipped: increment attempt counter and restore for retry
+                # If max attempts reached, mark as shredded to skip permanently
+                self.cursor.execute(f"""
+                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                    SET tx_state = IF(attempt_cnt + 1 >= {MAX_DETAILED_ATTEMPTS}, %s, %s),
+                        priority = %s,
+                        attempt_cnt = attempt_cnt + 1
+                    WHERE id = %s
+                """, (shredded_state, tx_state, priority, staging_id))
 
-        # Phase 1: Fetch decoded data from Solscan
-        start_time = time.time()
-        decoded_response = fetch_decoded_batch(self.solscan_session, new_sigs)
-        fetch_time = time.time() - start_time
+            self.db_conn.commit()
 
-        if not decoded_response.get('success') or not decoded_response.get('data'):
-            result['error'] = 'Solscan API returned no data'
-            return result
-
-        # Phase 2: Extract addresses and actual signatures returned by Solscan
-        addresses = extract_addresses_from_json(decoded_response)
-        result['addresses'] = addresses
-
-        # Get signatures Solscan actually returned (these are what the SP will insert)
-        actual_sigs = [tx.get('tx_hash') or tx.get('signature') for tx in decoded_response.get('data', []) if tx.get('tx_hash') or tx.get('signature')]
-        result['new_sigs'] = actual_sigs  # Use Solscan's signatures directly
-
-        if len(actual_sigs) < len(new_sigs):
-            print(f"  [~] Solscan returned {len(actual_sigs)}/{len(new_sigs)} signatures")
-
-        # Phase 3: Call stored procedure
-        sp_start = time.time()
-        tx_count, edge_count, address_count, transfer_count, swap_count, activity_count = self.call_shred_batch(decoded_response)
-        sp_time = time.time() - sp_start
-
-        result['tx_count'] = tx_count
-        result['edge_count'] = edge_count
-        result['transfer_count'] = transfer_count
-        result['swap_count'] = swap_count
-        result['activity_count'] = activity_count
-        result['processed'] = len(result['new_sigs'])
-
-        # Phase 4: Store instruction data
-        instructions_stored = self.store_instruction_data(decoded_response)
-        result['instructions_stored'] = instructions_stored
-
-        print(f"  [+] tx={tx_count} edges={edge_count} xfers={transfer_count} swaps={swap_count} "
-              f"acts={activity_count} instrs={instructions_stored} (fetch={fetch_time:.2f}s, SP={sp_time:.2f}s)")
-
-        # Phase 5: Get addresses needing funding lookup
-        if addresses:
-            placeholders = ','.join(['%s'] * len(addresses))
-            self.cursor.execute(f"""
-                SELECT address FROM tx_address
-                WHERE address IN ({placeholders})
-                AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
-                AND address_type IN ('wallet', 'unknown')
-            """, list(addresses))
-            result['funder_addresses'] = [row[0] for row in self.cursor.fetchall()]
-            if result['funder_addresses']:
-                print(f"  [>] Found {len(result['funder_addresses'])} addresses needing funding")
+        except MySQLError as e:
+            result['error'] = str(e)
+            self.db_conn.rollback()
+            # Restore original state so row can be retried
+            try:
+                self.cursor.execute(f"""
+                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                    SET tx_state = %s, priority = %s
+                    WHERE id = %s
+                """, (tx_state, priority, staging_id))
+                self.db_conn.commit()
+            except:
+                pass  # Best effort restore
 
         return result
 
+    def process_batch(self, limit: int = 10, mq_channel=None) -> dict:
+        """
+        Process a batch of staging rows.
+        Returns summary of processing.
+
+        If mq_channel is provided, sends completion responses to gateway when
+        all staging rows for a correlation_id are shredded.
+        """
+        summary = {
+            'processed': 0,
+            'decoded_count': 0,
+            'detailed_count': 0,
+            'errors': 0,
+            'results': [],
+            'correlations_completed': []
+        }
+
+        # Fetch pending rows
+        rows = self.fetch_pending_staging_rows(limit)
+
+        if not rows:
+            return summary
+
+        decoded_state = self.get_tx_state('decoded')
+        detailed_state = self.get_tx_state('detailed')
+
+        # Track unique correlations we process this batch
+        processed_correlations = set()
+
+        for row in rows:
+            staging_id = row['id']
+            tx_state = row['tx_state']
+            priority = row['priority']
+            correlation_id = row.get('correlation_id')
+
+            if correlation_id:
+                processed_correlations.add(correlation_id)
+
+            state_name = 'decoded' if tx_state == decoded_state else (
+                'detailed' if tx_state == detailed_state else f'unknown({tx_state})'
+            )
+
+            if self.dry_run:
+                print(f"  [DRY] Would process staging.id={staging_id} "
+                      f"(state={state_name}, priority={priority})")
+                summary['processed'] += 1
+                continue
+
+            result = self.process_staging_row(staging_id, tx_state, priority)
+            summary['results'].append(result)
+
+            if result['success']:
+                summary['processed'] += 1
+                if tx_state == decoded_state:
+                    summary['decoded_count'] += 1
+                    print(f"  [+] staging.id={staging_id} (decoded): "
+                          f"tx={result['tx_count']} xfer={result['transfer_count']} "
+                          f"swap={result['swap_count']} act={result['activity_count']} "
+                          f"skip={result['skipped_count']}")
+                elif tx_state == detailed_state:
+                    summary['detailed_count'] += 1
+                    print(f"  [+] staging.id={staging_id} (detailed): "
+                          f"tx={result['tx_count']} sol={result['sol_balance_count']} "
+                          f"tok={result['token_balance_count']} skip={result['skipped_count']}")
+            else:
+                summary['errors'] += 1
+                print(f"  [!] staging.id={staging_id}: ERROR - {result['error']}")
+
+        # Check if any correlations are now complete and send gateway responses
+        if not self.dry_run:
+            for corr_id in processed_correlations:
+                stats = check_correlation_complete(self.cursor, corr_id)
+                if stats:
+                    summary['correlations_completed'].append(corr_id)
+                    publish_shredder_response(mq_channel, corr_id, stats)
+
+        return summary
+
 
 # =============================================================================
-# Gateway Integration
+# Daemon Mode
 # =============================================================================
 
-def setup_gateway_rabbitmq():
-    """Setup RabbitMQ connection to t16o_mq vhost"""
-    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-    parameters = pika.ConnectionParameters(
-        host=RABBITMQ_HOST, port=RABBITMQ_PORT, virtual_host=RABBITMQ_VHOST,
-        credentials=credentials, heartbeat=600, blocked_connection_timeout=300
-    )
-    connection = pika.BlockingConnection(parameters)
-    channel = connection.channel()
-
-    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE, RABBITMQ_GATEWAY_QUEUE]:
-        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
-
-    return connection, channel
-
-
-def publish_response(channel, request_id: str, status: str, result: dict, error: str = None):
-    """Publish response to gateway response queue"""
-    response = {
-        'request_id': request_id,
-        'worker': 'shredder',
-        'status': status,
-        'timestamp': datetime.now().isoformat() + 'Z',
-        'result': result
-    }
-    if error:
-        response['error'] = error
-
-    channel.basic_publish(
-        exchange='', routing_key=RABBITMQ_RESPONSE_QUEUE,
-        body=json.dumps(response).encode('utf-8'),
-        properties=pika.BasicProperties(delivery_mode=2, content_type='application/json')
-    )
-
-
-def publish_cascade(channel, request_id: str, correlation_id: str, targets: list,
-                    batch: dict, api_key: str = 'internal_cascade_key'):
-    """Publish cascade message to gateway for downstream workers"""
-    message = {
-        'request_id': f"cascade-{request_id[:8]}-{datetime.now().strftime('%H%M%S')}",
-        'correlation_id': correlation_id,
-        'source_worker': 'shredder',
-        'source_request_id': request_id,
-        'api_key': api_key,
-        'action': 'cascade',
-        'targets': targets,
-        'batch': batch
-    }
-
-    try:
-        channel.basic_publish(
-            exchange='', routing_key=RABBITMQ_GATEWAY_QUEUE,
-            body=json.dumps(message).encode('utf-8'),
-            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json', priority=5)
-        )
-        print(f"  [CASCADE] Sent to gateway for {targets}")
-        return True
-    except Exception as e:
-        print(f"[ERROR] Failed to publish cascade: {e}")
-        return False
-
-
-def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
-    """Run as a queue consumer, listening for gateway requests"""
+def run_daemon(batch_size: int = 10, interval: int = 5, dry_run: bool = False):
+    """Run as a daemon, continuously polling the staging table"""
     print(f"""
 +-----------------------------------------------------------+
-|         Guide Shredder - Queue Consumer Mode              |
-|  vhost: {RABBITMQ_VHOST}  |  queue: {RABBITMQ_REQUEST_QUEUE}  |
+|         Guide Shredder - Staging Consumer Daemon          |
+|  batch_size: {batch_size}  |  interval: {interval}s                          |
 +-----------------------------------------------------------+
 """)
     if dry_run:
-        print("MODE: DRY RUN")
+        print("MODE: DRY RUN\n")
 
-    solscan_session = create_solscan_session()
     db_state = {'conn': None, 'processor': None}
+    mq_state = {'conn': None, 'channel': None}
 
     def ensure_db_connection():
         try:
@@ -384,98 +514,123 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                     except:
                         pass
                 db_state['conn'] = mysql.connector.connect(**DB_CONFIG)
-                db_state['processor'] = ShredderProcessor(db_state['conn'], solscan_session, dry_run)
+                db_state['processor'] = ShredderProcessor(db_state['conn'], dry_run)
                 print("[OK] Database (re)connected")
             return db_state['processor']
         except Exception as e:
             print(f"[WARN] Database connection failed: {e}")
             return None
 
+    def ensure_mq_connection():
+        """Ensure RabbitMQ connection for gateway responses"""
+        if not HAS_PIKA or dry_run:
+            return None
+        try:
+            if mq_state['conn'] is None or mq_state['conn'].is_closed:
+                mq_state['conn'], mq_state['channel'] = get_rabbitmq_channel()
+                if mq_state['channel']:
+                    print("[OK] RabbitMQ connected for gateway responses")
+            return mq_state['channel']
+        except Exception as e:
+            print(f"[WARN] RabbitMQ connection failed: {e}")
+            mq_state['conn'] = None
+            mq_state['channel'] = None
+            return None
+
     ensure_db_connection()
+    ensure_mq_connection()
+    print(f"[OK] Starting daemon, polling every {interval}s...")
+
+    consecutive_empty = 0
+    max_empty_before_slow = 10
 
     while True:
         try:
-            gateway_conn, gateway_channel = setup_gateway_rabbitmq()
-            gateway_channel.basic_qos(prefetch_count=prefetch)
-            print(f"[OK] Connected, waiting for requests...")
+            processor = ensure_db_connection()
+            if not processor:
+                print("[WARN] No DB connection, waiting...")
+                time.sleep(interval * 2)
+                continue
 
-            def callback(ch, method, properties, body):
-                try:
-                    message = json.loads(body.decode('utf-8'))
-                    request_id = message.get('request_id', 'unknown')
-                    correlation_id = message.get('correlation_id', request_id)
-                    batch_data = message.get('batch', {})
-                    api_key = message.get('api_key', 'internal_cascade_key')
+            mq_channel = ensure_mq_connection()
 
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]} (correlation: {correlation_id[:8]})")
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            summary = processor.process_batch(batch_size, mq_channel)
 
-                    processor = ensure_db_connection()
-                    if not processor:
-                        raise Exception("Database connection unavailable")
+            if summary['processed'] > 0:
+                corr_info = f", completed_correlations={len(summary['correlations_completed'])}" if summary['correlations_completed'] else ""
+                print(f"[{timestamp}] Processed {summary['processed']} "
+                      f"(decoded={summary['decoded_count']}, detailed={summary['detailed_count']}, "
+                      f"errors={summary['errors']}{corr_info})")
+                consecutive_empty = 0
+                # Process more immediately if we had a full batch
+                if summary['processed'] >= batch_size:
+                    continue
+            else:
+                consecutive_empty += 1
 
-                    signatures = batch_data.get('signatures', [])
-                    if not signatures:
-                        print(f"  No signatures in batch")
-                        publish_response(gateway_channel, request_id, 'completed',
-                                       {'processed': 0, 'message': 'No signatures provided'})
-                        ch.basic_ack(delivery_tag=method.delivery_tag)
-                        return
+            # Adaptive sleep: wait longer if queue is empty
+            sleep_time = interval if consecutive_empty < max_empty_before_slow else interval * 2
+            time.sleep(sleep_time)
 
-                    print(f"  Processing {len(signatures)} signatures...")
-                    result = processor.process_signatures(signatures)
-
-                    # Build response
-                    if result.get('error'):
-                        status = 'failed'
-                        response_data = {'processed': 0, 'error': result['error']}
-                    elif result['processed'] == 0:
-                        status = 'completed'
-                        response_data = {'processed': 0, 'skipped': result['skipped'], 'already_exist': True}
-                    else:
-                        status = 'completed'
-                        response_data = {
-                            'processed': result['processed'],
-                            'transactions': result['tx_count'],
-                            'addresses': len(result['addresses']),
-                            'funder_addresses': result['funder_addresses']
-                        }
-
-                    publish_response(gateway_channel, request_id, status, response_data)
-
-                    # Send cascade if we processed transactions
-                    # Use tx_count from SP (actual inserts) rather than processed (signature matching)
-                    sigs_for_detail = result['new_sigs'] + result['need_detail_sigs']
-                    if sigs_for_detail and (result['tx_count'] > 0 or result['need_detail_sigs']):
-                        cascade_batch = {
-                            'signatures': sigs_for_detail,
-                            'processed_count': result['tx_count'],
-                            'address_count': len(result['addresses']),
-                            'funder_addresses': result['funder_addresses']
-                        }
-                        publish_cascade(gateway_channel, request_id, correlation_id,
-                                      ['detailer', 'funder', 'aggregator'], cascade_batch, api_key)
-
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-
-                except Exception as e:
-                    print(f"[ERROR] Failed to process message: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-
-            gateway_channel.basic_consume(queue=RABBITMQ_REQUEST_QUEUE, on_message_callback=callback)
-            gateway_channel.start_consuming()
-
-        except pika.exceptions.AMQPConnectionError as e:
-            print(f"[ERROR] Connection lost: {e}, reconnecting in 5s...")
-            time.sleep(5)
+        except MySQLError as e:
+            print(f"[ERROR] MySQL error: {e}, reconnecting...")
+            db_state['conn'] = None
+            time.sleep(interval)
         except KeyboardInterrupt:
             print("\n[INFO] Shutting down...")
             break
+        except Exception as e:
+            print(f"[ERROR] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(interval)
 
     if db_state['conn']:
         db_state['conn'].close()
-    solscan_session.close()
+
+
+def run_once(batch_size: int = 100, dry_run: bool = False):
+    """Process all pending staging rows once and exit"""
+    print(f"""
++-----------------------------------------------------------+
+|         Guide Shredder - Single Run Mode                  |
++-----------------------------------------------------------+
+""")
+    if dry_run:
+        print("MODE: DRY RUN\n")
+
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        processor = ShredderProcessor(conn, dry_run)
+        print("[OK] Database connected")
+
+        total_processed = 0
+        total_decoded = 0
+        total_detailed = 0
+        total_errors = 0
+
+        while True:
+            summary = processor.process_batch(batch_size)
+
+            if summary['processed'] == 0:
+                break
+
+            total_processed += summary['processed']
+            total_decoded += summary['decoded_count']
+            total_detailed += summary['detailed_count']
+            total_errors += summary['errors']
+
+        print(f"\n[DONE] Total processed: {total_processed} "
+              f"(decoded={total_decoded}, detailed={total_detailed}, errors={total_errors})")
+
+        conn.close()
+
+    except MySQLError as e:
+        print(f"[ERROR] MySQL error: {e}")
+        return 1
+
+    return 0
 
 
 # =============================================================================
@@ -483,26 +638,44 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Guide Shredder - Transaction shredding')
-    parser.add_argument('--prefetch', type=int, default=5, help='RabbitMQ prefetch count')
-    parser.add_argument('--dry-run', action='store_true', help='Preview only, no DB changes')
-    parser.add_argument('--queue-consumer', action='store_true', help='Run as gateway queue consumer')
+    parser = argparse.ArgumentParser(
+        description='Guide Shredder - Forward-only staging table processor'
+    )
+    parser.add_argument('--daemon', action='store_true',
+                        help='Run as daemon, continuously polling staging table')
+    parser.add_argument('--once', action='store_true',
+                        help='Process all pending rows once and exit')
+    parser.add_argument('--batch-size', type=int, default=10,
+                        help='Number of staging rows to process per batch')
+    parser.add_argument('--interval', type=int, default=5,
+                        help='Polling interval in seconds (daemon mode)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Preview only, no DB changes')
 
     args = parser.parse_args()
 
     if not HAS_MYSQL:
         print("Error: mysql-connector-python not installed")
         return 1
-    if not HAS_PIKA:
-        print("Error: pika not installed")
+
+    if args.daemon:
+        return run_daemon(
+            batch_size=args.batch_size,
+            interval=args.interval,
+            dry_run=args.dry_run
+        )
+    elif args.once:
+        return run_once(
+            batch_size=args.batch_size,
+            dry_run=args.dry_run
+        )
+    else:
+        print("Error: Must specify --daemon or --once")
+        print("Usage:")
+        print("  python guide-shredder.py --daemon           # Continuous mode")
+        print("  python guide-shredder.py --once             # Process once")
+        print("  python guide-shredder.py --daemon --dry-run # Preview mode")
         return 1
-
-    if args.queue_consumer:
-        return run_queue_consumer(prefetch=args.prefetch, dry_run=args.dry_run)
-
-    print("Error: --queue-consumer is required")
-    print("Usage: python guide-shredder.py --queue-consumer")
-    return 1
 
 
 if __name__ == '__main__':

@@ -81,7 +81,8 @@ DB_CONFIG = {
     'port': 3396,
     'user': 'root',
     'password': 'rootpassword',
-    'database': 't16o_db'
+    'database': 't16o_db',
+    'autocommit': True,  # Prevent table locks when idle
 }
 
 # RabbitMQ
@@ -101,6 +102,131 @@ GATEWAY_HOST = '0.0.0.0'
 GATEWAY_REQUEST_QUEUE = 'mq.guide.gateway.request'
 GATEWAY_RESPONSE_QUEUE = 'mq.guide.gateway.response'
 
+# Correlation tracking for pipeline completion detection
+# Structure: {correlation_id: {
+#     'expected_batches': int,        # Total batches from producer (0 until producer responds)
+#     'expected_workers': ['decoder', 'detailer'],  # Workers that should respond per batch
+#     'received': {'decoder': set(), 'detailer': set()},  # batch_nums received per worker
+#     'started_at': datetime,
+#     'producer_done': bool
+# }}
+_correlation_tracker: Dict[str, Dict] = {}
+_tracker_lock = threading.Lock()
+
+# Default downstream workers for producer (decoder + detailer fetch, then shredder processes)
+# Shredder is the final stage - pipeline is complete when shredder finishes
+DEFAULT_DOWNSTREAM_WORKERS = ['decoder', 'detailer', 'shredder']
+
+def _get_or_create_tracker(correlation_id: str) -> Dict:
+    """Get existing tracker or create a new one (must be called with lock held)"""
+    if correlation_id not in _correlation_tracker:
+        _correlation_tracker[correlation_id] = {
+            'expected_batches': 0,  # Unknown until producer responds
+            'expected_workers': DEFAULT_DOWNSTREAM_WORKERS,
+            'received': {w: set() for w in DEFAULT_DOWNSTREAM_WORKERS},
+            'started_at': datetime.now(),
+            'producer_done': False
+        }
+    return _correlation_tracker[correlation_id]
+
+def record_batch_response(correlation_id: str, worker: str, batch_num: int) -> Optional[Dict]:
+    """Record a batch response and return completion status if pipeline is done"""
+    with _tracker_lock:
+        tracker = _get_or_create_tracker(correlation_id)
+
+        if worker in tracker['received']:
+            tracker['received'][worker].add(batch_num)
+
+        # Can only check completion if producer has reported expected batch count
+        if not tracker['producer_done'] or tracker['expected_batches'] == 0:
+            return None
+
+        # Check if all workers have completed
+        # - decoder/detailer: must have expected_batches responses (one per batch)
+        # - shredder: needs only 1 response (processes all staging as one unit)
+        expected = tracker['expected_batches']
+        all_complete = True
+        for w in tracker['expected_workers']:
+            received = len(tracker['received'].get(w, set()))
+            if w == 'shredder':
+                # Shredder sends ONE response when all staging rows are done
+                if received < 1:
+                    all_complete = False
+                    break
+            else:
+                # decoder/detailer send one response per batch
+                if received < expected:
+                    all_complete = False
+                    break
+
+        if all_complete:
+            # Pipeline complete - remove from tracker and return summary
+            elapsed = (datetime.now() - tracker['started_at']).total_seconds()
+            total_received = sum(len(tracker['received'].get(w, set())) for w in tracker['expected_workers'])
+            summary = {
+                'correlation_id': correlation_id,
+                'batches': expected,
+                'workers': tracker['expected_workers'],
+                'total_responses': total_received,
+                'elapsed_seconds': round(elapsed, 2)
+            }
+            del _correlation_tracker[correlation_id]
+            return summary
+
+        return None
+
+def mark_producer_done(correlation_id: str, total_batches: int) -> Optional[Dict]:
+    """Mark producer as done and check if pipeline is already complete"""
+    with _tracker_lock:
+        tracker = _get_or_create_tracker(correlation_id)
+        tracker['producer_done'] = True
+        tracker['expected_batches'] = total_batches
+
+        # Check if downstream workers already finished before producer response arrived
+        if total_batches == 0:
+            # No batches sent, pipeline is complete
+            del _correlation_tracker[correlation_id]
+            return {
+                'correlation_id': correlation_id,
+                'batches': 0,
+                'workers': tracker['expected_workers'],
+                'total_responses': 0,
+                'elapsed_seconds': 0
+            }
+
+        # Check if all workers have completed (same logic as record_batch_response)
+        expected = tracker['expected_batches']
+        all_complete = True
+        for w in tracker['expected_workers']:
+            received = len(tracker['received'].get(w, set()))
+            if w == 'shredder':
+                if received < 1:
+                    all_complete = False
+                    break
+            else:
+                if received < expected:
+                    all_complete = False
+                    break
+
+        if all_complete:
+            # Already complete! All workers finished before producer response
+            elapsed = (datetime.now() - tracker['started_at']).total_seconds()
+            total_received = sum(len(tracker['received'].get(w, set())) for w in tracker['expected_workers'])
+            summary = {
+                'correlation_id': correlation_id,
+                'batches': expected,
+                'workers': tracker['expected_workers'],
+                'total_responses': total_received,
+                'elapsed_seconds': round(elapsed, 2)
+            }
+            del _correlation_tracker[correlation_id]
+            return summary
+
+        # Not complete yet, log progress
+        received_counts = {w: len(tracker['received'].get(w, set())) for w in tracker['expected_workers']}
+        print(f"[TRACK] {correlation_id[:8]}: expecting {total_batches} batches, received so far: {received_counts}")
+        return None
+
 # Worker registry with queue mappings
 WORKER_REGISTRY = {
     'producer': {
@@ -108,14 +234,14 @@ WORKER_REGISTRY = {
         'response_queue': 'mq.guide.producer.response',
         'dlq': 'mq.guide.producer.dlq',
         'description': 'Fetches transaction signatures from RPC',
-        'cascade_to': ['shredder']
+        'cascade_to': ['decoder', 'detailer']  # Shredder polls staging table, not queue
     },
-    'shredder': {
-        'request_queue': 'mq.guide.shredder.request',
-        'response_queue': 'mq.guide.shredder.response',
-        'dlq': 'mq.guide.shredder.dlq',
-        'description': 'Decodes transactions and creates guide edges',
-        'cascade_to': ['detailer', 'funder', 'aggregator']
+    'decoder': {
+        'request_queue': 'mq.guide.decoder.request',
+        'response_queue': 'mq.guide.decoder.response',
+        'dlq': 'mq.guide.decoder.dlq',
+        'description': 'Fetches decoded transaction actions from Solscan',
+        'cascade_to': []  # Shredder polls staging table
     },
     'detailer': {
         'request_queue': 'mq.guide.detailer.request',
@@ -143,6 +269,13 @@ WORKER_REGISTRY = {
         'response_queue': 'mq.guide.enricher.response',
         'dlq': 'mq.guide.enricher.dlq',
         'description': 'Enriches token and pool metadata',
+        'cascade_to': []
+    },
+    'shredder': {
+        'request_queue': 'mq.guide.shredder.request',  # Not used - shredder polls staging
+        'response_queue': 'mq.guide.shredder.response',
+        'dlq': 'mq.guide.shredder.dlq',
+        'description': 'Processes staged data into tx tables',
         'cascade_to': []
     }
 }
@@ -849,13 +982,15 @@ def run_response_consumer(ready_event: threading.Event = None):
                 try:
                     response = json.loads(body.decode('utf-8'))
                     worker = response.get('worker')
-                    request_id = response.get('request_id')
+                    request_id = response.get('request_id', '')
+                    correlation_id = response.get('correlation_id', request_id)
                     status = response.get('status')
                     result = response.get('result', {})
 
-                    print(f"[RESPONSE] {worker} -> {status} (request: {request_id[:8]}...)")
+                    # Extract batch info for tracking
+                    batch_num = result.get('batch_num', 0)
+                    total_batches = result.get('batches', 0)
 
-                    # Update request log
                     # Update request status in DB
                     if status in ('completed', 'partial'):
                         update_request_status(request_id, 'completed', result=result)
@@ -863,9 +998,41 @@ def run_response_consumer(ready_event: threading.Event = None):
                         update_request_status(request_id, 'failed',
                                             error_message=result.get('error', 'Unknown error'),
                                             result=result)
+                        print(f"[FAILED] {worker} request {request_id[:8]} failed: {result.get('error', 'Unknown')}")
                     else:
-                        print(f"[WARN] Unknown status '{status}' - treating as completed")
                         update_request_status(request_id, 'completed', result=result)
+
+                    # Pipeline completion tracking
+                    if worker == 'producer' and status in ('completed', 'partial'):
+                        # Producer done - mark complete and check if downstream already finished
+                        print(f"[PRODUCER] {correlation_id[:8]}: {result.get('processed', 0)} sigs → {total_batches} batches")
+                        completion = mark_producer_done(correlation_id, total_batches)
+                        if completion:
+                            # Downstream workers already finished before producer response arrived!
+                            print(f"[PIPELINE COMPLETE] {completion['correlation_id'][:8]}: "
+                                  f"{completion['batches']} batches × {len(completion['workers'])} workers "
+                                  f"({completion['total_responses']} responses) in {completion['elapsed_seconds']}s")
+
+                    elif worker in ('decoder', 'detailer') and status in ('completed', 'partial'):
+                        # Track batch completion
+                        completion = record_batch_response(correlation_id, worker, batch_num)
+                        if completion:
+                            # Pipeline complete!
+                            print(f"[PIPELINE COMPLETE] {completion['correlation_id'][:8]}: "
+                                  f"{completion['batches']} batches × {len(completion['workers'])} workers "
+                                  f"({completion['total_responses']} responses) in {completion['elapsed_seconds']}s")
+
+                    elif worker == 'shredder' and status in ('completed', 'partial'):
+                        # Shredder sends ONE response when all staging rows for a correlation are done
+                        # Mark all batches as complete for shredder (it processes them as one unit)
+                        completion = record_batch_response(correlation_id, worker, 1)  # Always batch 1
+                        staging_rows = result.get('staging_rows_processed', 0)
+                        print(f"[SHREDDER] {correlation_id[:8]}: processed {staging_rows} staging rows")
+                        if completion:
+                            # Pipeline complete!
+                            print(f"[PIPELINE COMPLETE] {completion['correlation_id'][:8]}: "
+                                  f"{completion['batches']} batches × {len(completion['workers'])} workers "
+                                  f"({completion['total_responses']} responses) in {completion['elapsed_seconds']}s")
 
                     # Check for auto-cascade (on success or partial)
                     if status in ('completed', 'partial') and worker in WORKER_REGISTRY:

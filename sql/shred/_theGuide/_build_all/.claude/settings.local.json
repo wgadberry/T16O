@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell:*)",
+      "Bash(dir:*)",
+      "Bash(python -c:*)",
+      "Bash(python install_services.py:*)",
+      "Bash(python -m pip:*)",
+      "Bash(findstr:*)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" get T16OExchange.Guide.Gateway Application)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" get T16OExchange.Guide.Gateway AppParameters)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" get T16OExchange.Guide.Gateway AppDirectory)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" set T16OExchange.Guide.Gateway AppDirectory \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\_wrk\")",
+      "Bash(where:*)",
+      "Bash(test:*)",
+      "Bash(echo:*)",
+      "Bash(tr:*)",
+      "Bash(\"/c/Users/wgadb/AppData/Local/Programs/Python/Python313/python.exe\" --version)",
+      "Bash(\"/c/Users/wgadb/AppData/Local/Programs/Python/Python313/python.exe\" -c \"import sys; print\\(''Prefix:'', sys.prefix\\); import encodings; print\\(''encodings OK''\\)\")",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python313\\\\python.exe\" --version)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python313\\\\python.exe\" -c \"import sys; print\\(''Prefix:'', sys.prefix\\); import encodings; print\\(''encodings: OK''\\)\")",
+      "Bash(grep:*)",
+      "Bash(cmd /c \"cd /d C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all && start-workers.bat\")",
+      "Bash(mysql:*)",
+      "Bash(sc query:*)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\" -c \"\nimport sys\nsys.path.insert\\(0, ''.''\\)\nfrom importlib import import_module\n\n# Test imports\nprint\\(''Testing imports...''\\)\nimport json\nimport pika\nimport mysql.connector\nprint\\(''  pika:'', pika.__version__\\)\nprint\\(''  mysql.connector:'', mysql.connector.__version__\\)\n\n# Test config loading\nprint\\(''Testing config...''\\)\nimport os\nconfig_path = os.path.join\\(''.'', ''guide-config.json''\\)\nwith open\\(config_path\\) as f:\n    cfg = json.load\\(f\\)\nprint\\(''  Config loaded, keys:'', list\\(cfg.keys\\(\\)\\)[:5], ''...''\\)\n\n# Test RabbitMQ connection\nprint\\(''Testing RabbitMQ...''\\)\ncredentials = pika.PlainCredentials\\(cfg.get\\(''RABBITMQ_USER'', ''admin''\\), cfg.get\\(''RABBITMQ_PASSWORD'', ''admin123''\\)\\)\nparams = pika.ConnectionParameters\\(\n    host=cfg.get\\(''RABBITMQ_HOST'', ''localhost''\\),\n    port=cfg.get\\(''RABBITMQ_PORT'', 5692\\),\n    virtual_host=cfg.get\\(''RABBITMQ_VHOST'', ''t16o_mq''\\),\n    credentials=credentials\n\\)\nconn = pika.BlockingConnection\\(params\\)\nchannel = conn.channel\\(\\)\nprint\\(''  Connected to RabbitMQ''\\)\n\n# Check queue\nmethod = channel.queue_declare\\(queue=''mq.guide.producer.request'', passive=True\\)\nprint\\(f''  producer.request queue: {method.method.message_count} messages''\\)\nconn.close\\(\\)\nprint\\(''All OK''\\)\n\")",
+      "Bash(timeout 10 \"C:\\\\Users\\\\wgadb\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\":*)",
+      "Bash(taskkill:*)",
+      "Bash(nssm get:*)",
+      "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\nssm\\\\nssm.exe\" get \"T16OExchange.Guide.Producer\" AppStdout)",
+      "Bash(cmd /c \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe get T16OExchange.Guide.Producer AppStdout\")"
+    ]
+  }
+}

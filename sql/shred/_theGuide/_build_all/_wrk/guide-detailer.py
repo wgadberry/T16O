@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Guide Detailer - Transaction detail enrichment daemon
+Guide Detailer - Fetches transaction detail data and stages for shredding
 
 Consumes signature batches from gateway, fetches detail data from Solscan,
-and calls sp_tx_detail_batch for balance change processing.
+and inserts into staging table with tx_state=16 (detailed).
 
 Usage:
     python guide-detailer.py --queue-consumer          # Gateway mode (primary)
@@ -25,6 +25,7 @@ except ImportError:
 
 try:
     import mysql.connector
+    from mysql.connector import Error as MySQLError
     HAS_MYSQL = True
 except ImportError:
     HAS_MYSQL = False
@@ -69,8 +70,14 @@ DB_CONFIG = {
     'ssl_disabled': True,
     'use_pure': True,
     'ssl_verify_cert': False,
-    'ssl_verify_identity': False
+    'ssl_verify_identity': False,
+    'autocommit': True,  # Prevent table locks when idle
 }
+
+# Staging table config
+STAGING_SCHEMA = 't16o_db_staging'
+STAGING_TABLE = 'txs'
+TX_STATE_DETAILED = 16  # Will be fetched from config table
 
 
 # =============================================================================
@@ -129,29 +136,12 @@ def sanitize_large_ints(obj):
     return obj
 
 
-def wrap_detail_response(detail_response: dict) -> dict:
-    """Wrap detail response in expected format for sp_tx_detail_batch"""
-    return {"detail": sanitize_large_ints(detail_response)}
-
-
-def filter_to_existing_signatures(cursor, signatures: list) -> list:
-    """Filter to only signatures that exist in tx table"""
-    if not signatures:
-        return []
-
-    placeholders = ','.join(['%s'] * len(signatures))
-    cursor.execute(f"SELECT signature FROM tx WHERE signature IN ({placeholders})", signatures)
-    existing = {row[0] for row in cursor.fetchall()}
-
-    return [sig for sig in signatures if sig in existing]
-
-
 # =============================================================================
 # Core Processing
 # =============================================================================
 
 class DetailerProcessor:
-    """Core detailer processing logic"""
+    """Core detailer processing logic - fetches and stages detail data"""
 
     def __init__(self, db_conn, dry_run: bool = False):
         self.db_conn = db_conn
@@ -159,6 +149,7 @@ class DetailerProcessor:
         self.dry_run = dry_run
         self.loop = asyncio.new_event_loop()
         self._api_session = None
+        self._tx_state_detailed = None
 
     async def get_api_session(self):
         if self._api_session is None:
@@ -170,61 +161,86 @@ class DetailerProcessor:
             await self._api_session.close()
             self._api_session = None
 
-    def call_detail_batch(self, json_data: dict) -> tuple:
-        """Call sp_tx_detail_batch with JSON, return (tx_count, detail_count)"""
-        json_str = json.dumps(json_data)
-        self.cursor.execute("SET @p_tx = 0, @p_detail = 0")
-        self.cursor.execute("CALL sp_tx_detail_batch(%s, @p_tx, @p_detail)", (json_str,))
-        self.cursor.execute("SELECT @p_tx, @p_detail")
-        result = self.cursor.fetchone()
-        self.db_conn.commit()
-        return (result[0] or 0, result[1] or 0)
+    def get_tx_state_detailed(self) -> int:
+        """Get detailed tx_state value from config table"""
+        if self._tx_state_detailed is None:
+            self.cursor.execute(
+                "SELECT CAST(config_value AS UNSIGNED) FROM config "
+                "WHERE config_type = 'tx_state' AND config_key = 'detailed'"
+            )
+            row = self.cursor.fetchone()
+            self._tx_state_detailed = row[0] if row else TX_STATE_DETAILED
+        return self._tx_state_detailed
 
-    async def process_signatures(self, signatures: list) -> dict:
+    def insert_staging(self, detail_response: dict, priority: int = 5, correlation_id: str = None, sig_hash: str = None) -> int:
+        """Insert detail JSON into staging table, return staging_id"""
+        tx_state = self.get_tx_state_detailed()
+
+        # Sanitize large integers and wrap response
+        sanitized = sanitize_large_ints(detail_response)
+
+        self.cursor.execute(f"""
+            INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE} (txs, tx_state, priority, correlation_id, sig_hash)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (json.dumps(sanitized), tx_state, priority, correlation_id, sig_hash))
+
+        staging_id = self.cursor.lastrowid
+        self.db_conn.commit()
+        return staging_id
+
+    async def process_signatures(self, signatures: list, priority: int = 5, correlation_id: str = None, sig_hash: str = None) -> dict:
         """Core processing logic for a batch of signatures"""
-        result = {'processed': 0, 'skipped': 0, 'tx_count': 0, 'detail_count': 0, 'error': None}
+        result = {
+            'processed': 0,
+            'skipped': 0,
+            'staging_id': None,
+            'tx_count': 0,
+            'error': None
+        }
 
         if not signatures:
             return result
 
-        # Phase 0: Pre-filter to existing signatures
-        original_count = len(signatures)
-        valid_sigs = filter_to_existing_signatures(self.cursor, signatures)
-        result['skipped'] = original_count - len(valid_sigs)
-
-        if result['skipped'] > 0:
-            print(f"  [~] Skipped {result['skipped']}/{original_count} non-existing")
-
-        if not valid_sigs:
-            print(f"  [=] No valid signatures found")
-            return result
-
         if self.dry_run:
-            print(f"  [DRY] Would detail {len(valid_sigs)} signatures")
-            result['processed'] = len(valid_sigs)
+            print(f"  [DRY] Would detail {len(signatures)} signatures")
+            result['processed'] = len(signatures)
             return result
 
         # Phase 1: Fetch detail data from Solscan
         start_time = time.time()
-        session = await self.get_api_session()
-        detail_response = await fetch_detail(session, valid_sigs)
+        try:
+            session = await self.get_api_session()
+            detail_response = await fetch_detail(session, signatures)
+        except Exception as e:
+            result['error'] = f'Solscan API error: {e}'
+            return result
         fetch_time = time.time() - start_time
 
         if not detail_response.get('success'):
             result['error'] = 'Detail API returned unsuccessful response'
             return result
 
-        # Phase 2: Wrap and call stored procedure
-        combined = wrap_detail_response(detail_response)
-        sp_start = time.time()
-        tx_count, detail_count = self.call_detail_batch(combined)
-        sp_time = time.time() - sp_start
+        # Get actual transactions returned
+        tx_data = detail_response.get('data', [])
+        result['tx_count'] = len(tx_data)
 
-        print(f"  [+] tx={tx_count} details={detail_count} (fetch={fetch_time:.2f}s, SP={sp_time:.2f}s)")
+        if not tx_data:
+            result['error'] = 'Detail API returned no data'
+            return result
 
-        result['processed'] = len(valid_sigs)
-        result['tx_count'] = tx_count
-        result['detail_count'] = detail_count
+        if len(tx_data) < len(signatures):
+            print(f"  [~] Solscan returned {len(tx_data)}/{len(signatures)} transactions")
+
+        # Phase 2: Insert into staging table
+        staging_start = time.time()
+        staging_id = self.insert_staging(detail_response, priority, correlation_id, sig_hash)
+        staging_time = time.time() - staging_start
+
+        result['staging_id'] = staging_id
+        result['processed'] = len(tx_data)
+
+        print(f"  [+] Staged {len(tx_data)} txs → staging.id={staging_id} "
+              f"(fetch={fetch_time:.2f}s, insert={staging_time:.3f}s)")
 
         return result
 
@@ -249,13 +265,17 @@ def setup_gateway_rabbitmq():
     return connection, channel
 
 
-def publish_response(channel, request_id: str, status: str, result: dict):
-    """Publish response to gateway response queue"""
+def publish_response(channel, request_id: str, correlation_id: str, status: str, result: dict, batch_num: int = 0):
+    """Publish response to detailer response queue"""
+    # Include batch_num in result for gateway tracking
+    result['batch_num'] = batch_num
+
     response = {
         'request_id': request_id,
+        'correlation_id': correlation_id,
         'worker': 'detailer',
         'status': status,
-        'timestamp': datetime.now().isoformat() + 'Z',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
         'result': result
     }
 
@@ -314,24 +334,32 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
+                    correlation_id = message.get('correlation_id', request_id)
+                    sig_hash = message.get('sig_hash')  # For pairing with decoder
                     batch_data = message.get('batch', {})
+                    priority = message.get('priority', 5)
 
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]}")
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]} "
+                          f"(correlation: {correlation_id[:8]}, sig_hash: {sig_hash[:8] if sig_hash else 'N/A'})")
 
                     processor = ensure_db_connection()
                     if not processor:
                         raise Exception("Database connection unavailable")
 
                     signatures = batch_data.get('signatures', [])
+                    batch_num = batch_data.get('batch_num', 0)
+
                     if not signatures:
                         print(f"  No signatures in batch")
-                        publish_response(gateway_channel, request_id, 'completed',
-                                       {'processed': 0, 'message': 'No signatures provided'})
+                        publish_response(gateway_channel, request_id, correlation_id, 'completed',
+                                       {'processed': 0, 'message': 'No signatures provided'}, batch_num)
                         ch.basic_ack(delivery_tag=method.delivery_tag)
                         return
 
-                    print(f"  Processing {len(signatures)} signatures...")
-                    result = processor.loop.run_until_complete(processor.process_signatures(signatures))
+                    print(f"  Processing {len(signatures)} signatures (batch {batch_num})...")
+                    result = processor.loop.run_until_complete(
+                        processor.process_signatures(signatures, priority, correlation_id, sig_hash)
+                    )
 
                     # Build response
                     if result.get('error'):
@@ -339,18 +367,22 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                         response_data = {'processed': 0, 'error': result['error']}
                     elif result['processed'] == 0:
                         status = 'completed'
-                        response_data = {'processed': 0, 'skipped': result['skipped'], 'message': 'No matching tx'}
+                        response_data = {'processed': 0, 'skipped': result['skipped'], 'message': 'No data returned'}
                     else:
                         status = 'completed'
                         response_data = {
                             'processed': result['processed'],
                             'tx_count': result['tx_count'],
-                            'detail_count': result['detail_count']
+                            'staging_id': result['staging_id']
                         }
 
-                    publish_response(gateway_channel, request_id, status, response_data)
+                    publish_response(gateway_channel, request_id, correlation_id, status, response_data, batch_num)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
+                except MySQLError as e:
+                    print(f"[ERROR] MySQL error: {e}, requeuing...")
+                    db_state['conn'] = None
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                 except Exception as e:
                     print(f"[ERROR] Failed to process message: {e}")
                     import traceback
@@ -379,7 +411,7 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Guide Detailer - Transaction detail enrichment')
+    parser = argparse.ArgumentParser(description='Guide Detailer - Fetch and stage transaction details')
     parser.add_argument('--prefetch', type=int, default=3, help='RabbitMQ prefetch count')
     parser.add_argument('--dry-run', action='store_true', help='Preview only, no DB changes')
     parser.add_argument('--queue-consumer', action='store_true', help='Run as gateway queue consumer')

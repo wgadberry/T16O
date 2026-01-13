@@ -9,6 +9,9 @@ networkx>=3.0
 matplotlib>=3.6.0
 orjson>=3.8.0
 
+# Windows Service Support (t16o_exchange.guide.*)
+pywin32>=306
+
 # Optional (for advanced analysis)
 numpy>=1.24.0
 pandas>=2.0.0

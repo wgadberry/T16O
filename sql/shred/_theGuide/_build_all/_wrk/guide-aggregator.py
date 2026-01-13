@@ -97,7 +97,8 @@ DB_CONFIG = {
     'port': _CONFIG.get('DB_PORT', 3396),
     'user': _CONFIG.get('DB_USER', 'root'),
     'password': _CONFIG.get('DB_PASSWORD', 'rootpassword'),
-    'database': _CONFIG.get('DB_NAME', 't16o_db')
+    'database': _CONFIG.get('DB_NAME', 't16o_db'),
+    'autocommit': True,  # Prevent table locks when idle
 }
 
 # RabbitMQ (gateway - t16o_mq vhost)

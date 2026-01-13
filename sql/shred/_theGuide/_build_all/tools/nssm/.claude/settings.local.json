@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./nssm get:*)",
+      "Bash(./nssm set T16OExchange.Guide.Gateway AppStdout \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\_wrk\\\\gateway-stdout.log\")",
+      "Bash(./nssm set T16OExchange.Guide.Gateway AppStderr \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\_wrk\\\\gateway-stderr.log\")",
+      "Bash(./nssm set:*)"
+    ]
+  }
+}

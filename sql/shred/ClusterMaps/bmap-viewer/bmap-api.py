@@ -22,7 +22,7 @@ BASE_BACKOFF = 0.3  # seconds
 # Path to guide-producer.py
 GUIDE_PRODUCER_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__),
-    '..', '..', '..', '_wrk', 'guide-producer.py'
+    '..', '..', '_theGuide\_build_all\_wrk', 'guide-producer.py'
 ))
 
 app = Flask(__name__)
@@ -161,6 +161,7 @@ def get_timerange():
                     JOIN tx_token tk ON tk.id = g.token_id
                     JOIN tx_address mint ON mint.id = tk.mint_address_id
                     WHERE mint.address = %s
+		    AND tk.token_symbol not in ('SOL','WSOL','USDC','USDT')
                 """
                 cursor.execute(query, (mint_address,))
             else:
@@ -173,6 +174,7 @@ def get_timerange():
                     JOIN tx t ON t.id = g.tx_id
                     JOIN tx_token tk ON tk.id = g.token_id
                     WHERE tk.token_symbol = %s
+                    AND tk.token_symbol not in ('SOL','WSOL','USDC','USDT')
                 """
                 cursor.execute(query, (token_symbol,))
 

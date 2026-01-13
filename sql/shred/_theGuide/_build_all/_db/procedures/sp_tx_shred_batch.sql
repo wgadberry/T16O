@@ -99,7 +99,7 @@ BEGIN
     -- =========================================================================
     -- 4. INSERT: ALL activities[] → tx_activity
     -- =========================================================================
-    INSERT INTO tx_activity (tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, account_address_id)
+    INSERT IGNORE INTO tx_activity (tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, account_address_id)
     SELECT ts.tx_id, jt.idx, jt.o_idx, jt.name, jt.a_type, prg.id, oprg.id, a_acc.id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
@@ -119,15 +119,14 @@ BEGIN
     LEFT JOIN tx_address aop ON aop.address = jt.op_id
     LEFT JOIN tx_program oprg ON oprg.program_address_id = aop.id
     LEFT JOIN tx_address a_acc ON a_acc.address = jt.acc_addr
-    WHERE ts.tx_id IS NOT NULL AND jt.a_type IS NOT NULL
-    ON DUPLICATE KEY UPDATE name = VALUES(name), activity_type = VALUES(activity_type);
+    WHERE ts.tx_id IS NOT NULL AND jt.a_type IS NOT NULL;
 
     SET p_activity_count = ROW_COUNT();
 
     -- =========================================================================
     -- 5. INSERT: transfers[] → tx_activity (with derived name from tx_program)
     -- =========================================================================
-    INSERT INTO tx_activity (tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, account_address_id)
+    INSERT IGNORE INTO tx_activity (tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, account_address_id)
     SELECT ts.tx_id, jt.idx, jt.o_idx, prg.name, jt.t_type, prg.id, oprg.id, s_own.id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
@@ -146,8 +145,7 @@ BEGIN
     LEFT JOIN tx_address aop ON aop.address = jt.op_id
     LEFT JOIN tx_program oprg ON oprg.program_address_id = aop.id
     LEFT JOIN tx_address s_own ON s_own.address = jt.s_own_addr
-    WHERE ts.tx_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE activity_type = VALUES(activity_type);
+    WHERE ts.tx_id IS NOT NULL;
 
     SET p_activity_count = p_activity_count + ROW_COUNT();
 
@@ -168,7 +166,7 @@ BEGIN
     -- =========================================================================
     -- 6. INSERT: tx_swap (with activity_id lookup)
     -- =========================================================================
-    INSERT INTO tx_swap (activity_id, tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, amm_id, account_address_id, token_1_id, token_2_id, amount_1, amount_2)
+    INSERT IGNORE INTO tx_swap (activity_id, tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, amm_id, account_address_id, token_1_id, token_2_id, amount_1, amount_2)
     SELECT act.id, ts.tx_id, jt.idx, jt.o_idx, jt.name, jt.a_type, prg.id, oprg.id, pol.id, a_acc.id, tk1.id, tk2.id, jt.a1, jt.a2
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
@@ -195,15 +193,14 @@ BEGIN
     LEFT JOIN tx_address a_acc ON a_acc.address = jt.acc_addr
     LEFT JOIN tx_address m1 ON m1.address = jt.t1 LEFT JOIN tx_token tk1 ON tk1.mint_address_id = m1.id
     LEFT JOIN tx_address m2 ON m2.address = jt.t2 LEFT JOIN tx_token tk2 ON tk2.mint_address_id = m2.id
-    WHERE jt.a_type LIKE 'ACTIVITY_%SWAP' AND ts.tx_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE activity_id = VALUES(activity_id), name = VALUES(name), activity_type = VALUES(activity_type);
+    WHERE jt.a_type LIKE 'ACTIVITY_%SWAP' AND ts.tx_id IS NOT NULL;
 
     SET p_swap_count = ROW_COUNT();
 
     -- =========================================================================
     -- 7. INSERT: tx_transfer (with activity_id lookup)
     -- =========================================================================
-    INSERT INTO tx_transfer (activity_id, tx_id, ins_index, outer_ins_index, transfer_type, program_id, outer_program_id, token_id, decimals, amount, source_address_id, source_owner_address_id, destination_address_id, destination_owner_address_id)
+    INSERT IGNORE INTO tx_transfer (activity_id, tx_id, ins_index, outer_ins_index, transfer_type, program_id, outer_program_id, token_id, decimals, amount, source_address_id, source_owner_address_id, destination_address_id, destination_owner_address_id)
     SELECT act.id, ts.tx_id, jt.idx, jt.o_idx, jt.t_type, prg.id, oprg.id, tk.id, jt.decimal_val, jt.amt, s_ata.id, s_own.id, d_ata.id, d_own.id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
         tx_hash VARCHAR(90) PATH '$.tx_hash',
@@ -231,8 +228,7 @@ BEGIN
     LEFT JOIN tx_address s_own ON s_own.address = jt.s_own_addr
     LEFT JOIN tx_address d_ata ON d_ata.address = jt.d_ata_addr
     LEFT JOIN tx_address d_own ON d_own.address = jt.d_own_addr
-    WHERE ts.tx_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE activity_id = VALUES(activity_id), transfer_type = VALUES(transfer_type);
+    WHERE ts.tx_id IS NOT NULL;
 
     SET p_transfer_count = ROW_COUNT();
 

@@ -2,7 +2,7 @@
 """
 Guide Producer - Signature fetcher for theGuide pipeline
 
-Fetches transaction signatures from Chainstack RPC and cascades to shredder.
+Fetches transaction signatures from Chainstack RPC and cascades to decoder + detailer.
 
 Usage:
     python guide-producer.py --queue-consumer          # Gateway mode (primary)
@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import requests
@@ -53,7 +54,8 @@ RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
 RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
 RABBITMQ_REQUEST_QUEUE = 'mq.guide.producer.request'
 RABBITMQ_RESPONSE_QUEUE = 'mq.guide.producer.response'
-SHREDDER_REQUEST_QUEUE = 'mq.guide.shredder.request'
+DECODER_REQUEST_QUEUE = 'mq.guide.decoder.request'
+DETAILER_REQUEST_QUEUE = 'mq.guide.detailer.request'
 
 DB_CONFIG = {
     'host': _cfg.get('DB_HOST', '127.0.0.1'),
@@ -64,7 +66,8 @@ DB_CONFIG = {
     'ssl_disabled': True,
     'use_pure': True,
     'ssl_verify_cert': False,
-    'ssl_verify_identity': False
+    'ssl_verify_identity': False,
+    'autocommit': True,  # Prevent table locks when idle
 }
 
 
@@ -179,10 +182,11 @@ def setup_gateway_rabbitmq():
     return connection, channel
 
 
-def publish_response(channel, request_id: str, status: str, result: dict, error: str = None):
+def publish_response(channel, request_id: str, correlation_id: str, status: str, result: dict, error: str = None):
     """Publish response to gateway response queue"""
     response = {
         'request_id': request_id,
+        'correlation_id': correlation_id,
         'worker': 'producer',
         'status': status,
         'timestamp': datetime.now().isoformat() + 'Z',
@@ -199,13 +203,49 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
     )
 
 
-def publish_cascade_to_shredder(channel, request_id: str, correlation_id: str,
-                                 signatures: list, batch_num: int,
-                                 total_batches: int, priority: int = 5) -> bool:
-    """Publish a batch of signatures directly to shredder request queue"""
+def compute_sig_hash(signatures: list) -> str:
+    """Compute SHA256 hash of sorted signatures for batch pairing"""
+    sorted_sigs = '|'.join(sorted(signatures))
+    return hashlib.sha256(sorted_sigs.encode()).hexdigest()
+
+
+def filter_existing_signatures(db_cursor, signatures: list) -> tuple:
+    """
+    Filter out signatures that already exist in the tx table.
+    Returns tuple: (new_signatures, skipped_count)
+    """
+    if not signatures or not db_cursor:
+        return signatures, 0
+
+    try:
+        placeholders = ','.join(['%s'] * len(signatures))
+        db_cursor.execute(
+            f"SELECT signature FROM tx WHERE signature IN ({placeholders})",
+            signatures
+        )
+        existing = {row[0] for row in db_cursor.fetchall()}
+
+        if not existing:
+            return signatures, 0
+
+        new_sigs = [sig for sig in signatures if sig not in existing]
+        return new_sigs, len(existing)
+    except Exception as e:
+        print(f"  [WARN] Could not filter duplicates: {e}")
+        return signatures, 0
+
+
+def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
+                                signatures: list, batch_num: int,
+                                total_batches: int, priority: int = 5) -> bool:
+    """Publish a batch of signatures to both decoder and detailer queues in parallel"""
+    # Compute sig_hash for pairing decoder and detailer batches
+    sig_hash = compute_sig_hash(signatures)
+
     cascade_msg = {
         'request_id': f"{request_id}-batch{batch_num}",
         'correlation_id': correlation_id,
+        'sig_hash': sig_hash,
         'parent_request_id': request_id,
         'action': 'cascade',
         'source_worker': 'producer',
@@ -218,21 +258,28 @@ def publish_cascade_to_shredder(channel, request_id: str, correlation_id: str,
         }
     }
 
+    body = json.dumps(cascade_msg).encode('utf-8')
+    props = pika.BasicProperties(delivery_mode=2, content_type='application/json', priority=priority)
+
     try:
+        # Cascade to decoder (fetches decoded/actions data)
         channel.basic_publish(
-            exchange='',
-            routing_key=SHREDDER_REQUEST_QUEUE,
-            body=json.dumps(cascade_msg).encode('utf-8'),
-            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json', priority=priority)
+            exchange='', routing_key=DECODER_REQUEST_QUEUE,
+            body=body, properties=props
+        )
+        # Cascade to detailer (fetches detail/balance data)
+        channel.basic_publish(
+            exchange='', routing_key=DETAILER_REQUEST_QUEUE,
+            body=body, properties=props
         )
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to cascade to shredder: {e}")
+        print(f"[ERROR] Failed to cascade: {e}")
         return False
 
 
 def process_gateway_request(message: dict, rpc_session, gateway_channel, db_cursor=None) -> dict:
-    """Process a request from the gateway with incremental cascade to shredder"""
+    """Process a request from the gateway with parallel cascade to decoder + detailer"""
     request_id = message.get('request_id', 'unknown')
     correlation_id = message.get('correlation_id', request_id)
     batch = message.get('batch', {})
@@ -296,6 +343,8 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                             print(f"  Smart sync: fetching new sigs after {until_sig[:20]}...")
 
         signatures = []
+        total_skipped = 0
+
         for sig_obj in fetch_all_signatures(
             rpc_session, address, CHAINSTACK_RPC_URL,
             max_signatures=max_signatures, until=until_sig, before=before_sig
@@ -308,19 +357,37 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
             while len(signatures) >= batch_size:
                 batch_to_send = signatures[:batch_size]
                 signatures = signatures[batch_size:]
-                total_batched += 1
-                if publish_cascade_to_shredder(gateway_channel, request_id, correlation_id,
-                                                batch_to_send, total_batched, estimated_batches, priority):
-                    print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} -> shredder ({len(batch_to_send)} sigs)")
 
+                # Filter out signatures that already exist in tx table
+                new_sigs, skipped = filter_existing_signatures(db_cursor, batch_to_send)
+                total_skipped += skipped
+
+                if new_sigs:
+                    total_batched += 1
+                    if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                                    new_sigs, total_batched, estimated_batches, priority):
+                        skip_info = f", skipped {skipped}" if skipped > 0 else ""
+                        print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
+                elif skipped > 0:
+                    print(f"  [SKIP] Batch skipped entirely ({skipped} already exist)")
+
+        # Handle remaining signatures
         if signatures:
-            total_batched += 1
-            if publish_cascade_to_shredder(gateway_channel, request_id, correlation_id,
-                                            signatures, total_batched, total_batched, priority):
-                print(f"  [CASCADE] Batch {total_batched}/{total_batched} -> shredder ({len(signatures)} sigs)")
+            new_sigs, skipped = filter_existing_signatures(db_cursor, signatures)
+            total_skipped += skipped
 
-        print(f"  Fetched {total_fetched} signatures, cascaded {total_batched} batches")
-        return {'processed': total_fetched, 'batches': total_batched, 'errors': 0, 'cascade_to': []}
+            if new_sigs:
+                total_batched += 1
+                if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                                new_sigs, total_batched, total_batched, priority):
+                    skip_info = f", skipped {skipped}" if skipped > 0 else ""
+                    print(f"  [CASCADE] Batch {total_batched}/{total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
+            elif skipped > 0:
+                print(f"  [SKIP] Final batch skipped entirely ({skipped} already exist)")
+
+        skip_info = f", skipped {total_skipped} duplicates" if total_skipped > 0 else ""
+        print(f"  Fetched {total_fetched} signatures, cascaded {total_batched} batches{skip_info}")
+        return {'processed': total_fetched, 'batches': total_batched, 'skipped': total_skipped, 'errors': 0, 'cascade_to': []}
 
     except Exception as e:
         print(f"  [ERROR] {e}")
@@ -376,14 +443,30 @@ def run_queue_consumer(prefetch: int = 1):
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]}")
+
+                    # Validate message format
+                    batch = message.get('batch', {})
+                    filters = batch.get('filters', {})
+                    address = filters.get('mint_address') or filters.get('address')
+
+                    if not address:
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address in batch.filters)")
+                        print(f"  Keys received: {list(message.keys())}")
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
+                        return
+
+                    correlation_id = message.get('correlation_id', request_id)
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (corr: {correlation_id[:8]})")
 
                     db_cursor = ensure_db_connection()
                     result = process_gateway_request(message, rpc_session, gateway_channel, db_cursor)
                     status = 'completed' if result.get('errors', 0) == 0 else 'partial'
-                    publish_response(gateway_channel, request_id, status, result)
+                    publish_response(gateway_channel, request_id, correlation_id, status, result)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] Invalid JSON -> DLQ: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
                 except Exception as e:
                     print(f"[ERROR] Failed to process message: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
@@ -482,16 +565,16 @@ def main():
                         if args.dry_run:
                             print(f"  [DRY] Batch {total_batches}: {len(batch)} sigs")
                         else:
-                            publish_cascade_to_shredder(gateway_channel, f"cli-{addr_idx}",
+                            publish_cascade_to_workers(gateway_channel, f"cli-{addr_idx}",
                                                         f"cli-{addr_idx}", batch, total_batches, 0, args.priority)
-                            print(f"  [>] Batch {total_batches} -> shredder")
+                            print(f"  [>] Batch {total_batches} -> decoder+detailer")
 
             if sig_list:
                 total_batches += 1
                 if args.dry_run:
                     print(f"  [DRY] Batch {total_batches}: {len(sig_list)} sigs")
                 else:
-                    publish_cascade_to_shredder(gateway_channel, f"cli-{addr_idx}",
+                    publish_cascade_to_workers(gateway_channel, f"cli-{addr_idx}",
                                                 f"cli-{addr_idx}", sig_list, total_batches, 0, args.priority)
 
             total_sigs += len(sig_list)
