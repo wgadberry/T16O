@@ -23,15 +23,41 @@
     </div>
 
     <nav class="sidebar-nav">
-      <a *ngFor="let item of menuItems"
-         class="sidebar-item"
-         [routerLink]="item.route"
-         routerLinkActive="active"
-         (click)="onMenuItemClick(item)"
-         pRipple>
-        <i [class]="item.icon"></i>
-        <span class="sidebar-item-label">{{ item.label }}</span>
-      </a>
+      <ng-container *ngFor="let item of menuItems">
+        <!-- Menu item without children -->
+        <a *ngIf="!item.children || item.children.length === 0"
+           class="sidebar-item"
+           [routerLink]="item.route"
+           routerLinkActive="active"
+           (click)="onMenuItemClick(item, $event)"
+           pRipple>
+          <i [class]="item.icon"></i>
+          <span class="sidebar-item-label">{{ item.label }}</span>
+        </a>
+
+        <!-- Menu item with children -->
+        <div *ngIf="item.children && item.children.length > 0" class="sidebar-item-group">
+          <a class="sidebar-item has-children"
+             [class.expanded]="item.expanded"
+             (click)="onMenuItemClick(item, $event)"
+             pRipple>
+            <i [class]="item.icon"></i>
+            <span class="sidebar-item-label">{{ item.label }}</span>
+            <i class="pi expand-icon" [ngClass]="item.expanded ? 'pi-chevron-down' : 'pi-chevron-right'"></i>
+          </a>
+          <div class="sidebar-submenu" [class.expanded]="item.expanded">
+            <a *ngFor="let child of item.children"
+               class="sidebar-item sidebar-subitem"
+               [routerLink]="child.route"
+               routerLinkActive="active"
+               (click)="onMenuItemClick(child, $event)"
+               pRipple>
+              <i [class]="child.icon"></i>
+              <span class="sidebar-item-label">{{ child.label }}</span>
+            </a>
+          </div>
+        </div>
+      </ng-container>
     </nav>
   </div>
 </aside>
@@ -46,14 +72,40 @@
           position="left"
           styleClass="mobile-drawer">
   <nav class="sidebar-nav">
-    <a *ngFor="let item of menuItems"
-       class="sidebar-item"
-       [routerLink]="item.route"
-       routerLinkActive="active"
-       (click)="onMenuItemClick(item)"
-       pRipple>
-      <i [class]="item.icon"></i>
-      <span class="sidebar-item-label">{{ item.label }}</span>
-    </a>
+    <ng-container *ngFor="let item of menuItems">
+      <!-- Menu item without children -->
+      <a *ngIf="!item.children || item.children.length === 0"
+         class="sidebar-item"
+         [routerLink]="item.route"
+         routerLinkActive="active"
+         (click)="onMenuItemClick(item, $event)"
+         pRipple>
+        <i [class]="item.icon"></i>
+        <span class="sidebar-item-label">{{ item.label }}</span>
+      </a>
+
+      <!-- Menu item with children -->
+      <div *ngIf="item.children && item.children.length > 0" class="sidebar-item-group">
+        <a class="sidebar-item has-children"
+           [class.expanded]="item.expanded"
+           (click)="onMenuItemClick(item, $event)"
+           pRipple>
+          <i [class]="item.icon"></i>
+          <span class="sidebar-item-label">{{ item.label }}</span>
+          <i class="pi expand-icon" [ngClass]="item.expanded ? 'pi-chevron-down' : 'pi-chevron-right'"></i>
+        </a>
+        <div class="sidebar-submenu" [class.expanded]="item.expanded">
+          <a *ngFor="let child of item.children"
+             class="sidebar-item sidebar-subitem"
+             [routerLink]="child.route"
+             routerLinkActive="active"
+             (click)="onMenuItemClick(child, $event)"
+             pRipple>
+            <i [class]="child.icon"></i>
+            <span class="sidebar-item-label">{{ child.label }}</span>
+          </a>
+        </div>
+      </div>
+    </ng-container>
   </nav>
 </p-drawer>

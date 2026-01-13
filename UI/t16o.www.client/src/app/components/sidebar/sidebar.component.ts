@@ -6,6 +6,8 @@ export interface SidebarMenuItem {
   icon: string;
   route?: string;
   badge?: string;
+  children?: SidebarMenuItem[];
+  expanded?: boolean;
 }
 
 @Component({
@@ -59,13 +61,25 @@ export class SidebarComponent implements OnInit {
     }
   }
 
-  onMenuItemClick(item: SidebarMenuItem) {
+  onMenuItemClick(item: SidebarMenuItem, event?: Event) {
+    if (item.children && item.children.length > 0) {
+      event?.preventDefault();
+      event?.stopPropagation();
+      item.expanded = !item.expanded;
+      return;
+    }
     if (item.route) {
       this.router.navigate([item.route]);
     }
     if (this.isMobile) {
       this.mobileDrawerVisibleChange.emit(false);
     }
+  }
+
+  toggleSubmenu(item: SidebarMenuItem, event: Event) {
+    event.preventDefault();
+    event.stopPropagation();
+    item.expanded = !item.expanded;
   }
 
   onMobileDrawerHide() {

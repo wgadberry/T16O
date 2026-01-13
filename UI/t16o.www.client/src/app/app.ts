@@ -19,7 +19,15 @@ export class App implements OnInit {
   public sidebarMenuItems: SidebarMenuItem[] = [
     { label: 'Dashboard', icon: 'pi pi-home', route: '/dashboard' },
     { label: 'Weather', icon: 'pi pi-cloud', route: '/weather' },
-    { label: 'Analytics', icon: 'pi pi-chart-bar', route: '/analytics' },
+    {
+      label: 'Analytics',
+      icon: 'pi pi-chart-bar',
+      expanded: false,
+      children: [
+        { label: 'Cluster Maps', icon: 'pi pi-sitemap', route: '/analytics/cluster-maps' },
+        { label: 'Wallet Trails', icon: 'pi pi-map', route: '/analytics/wallet-trails' }
+      ]
+    },
     { label: 'Reports', icon: 'pi pi-file', route: '/reports' },
     { label: 'Settings', icon: 'pi pi-cog', route: '/settings' }
   ];

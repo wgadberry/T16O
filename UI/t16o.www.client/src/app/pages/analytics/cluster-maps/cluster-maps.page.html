@@ -1,0 +1,164 @@
+<div class="page-container">
+  <div class="cluster-maps-layout">
+    <!-- Left Sidebar -->
+    <div class="sidebar-panel">
+      <!-- Query Form -->
+      <p-card>
+        <ng-template #header>
+          <div class="card-header">
+            <h3><i class="pi pi-search"></i> Query</h3>
+          </div>
+        </ng-template>
+
+        <div class="form-group">
+          <label>Token Symbol</label>
+          <input type="text" pInputText [(ngModel)]="tokenSymbol" placeholder="e.g. BONK">
+        </div>
+
+        <div class="form-group">
+          <label>Mint Address</label>
+          <input type="text" pInputText [(ngModel)]="mintAddress" placeholder="Mint address...">
+        </div>
+
+        <div class="form-group">
+          <label>TX Window</label>
+          <p-select [options]="txLimitOptions" [(ngModel)]="txLimit" optionLabel="label" optionValue="value" styleClass="w-full"></p-select>
+        </div>
+
+        <button pButton label="Load Token" icon="pi pi-play" (click)="loadData()" [loading]="loading" class="w-full"></button>
+      </p-card>
+
+      <!-- Token Info -->
+      <ng-container *ngIf="currentData?.result?.token as token">
+        <p-card>
+          <ng-template #header>
+            <div class="card-header">
+              <h3><i class="pi pi-info-circle"></i> Token Info</h3>
+            </div>
+          </ng-template>
+
+          <div class="token-symbol">{{ token.symbol || 'Unknown' }}</div>
+          <div class="info-row">
+            <span class="label">Mint</span>
+            <span class="value" [title]="token.mint || ''">
+              {{ formatMintAddress(token.mint) }}
+            </span>
+          </div>
+          <div class="info-row">
+            <span class="label">Nodes</span>
+            <span class="value">{{ getNodesCount() }}</span>
+          </div>
+          <div class="info-row">
+            <span class="label">Edges</span>
+            <span class="value">{{ getEdgesCount() }}</span>
+          </div>
+        </p-card>
+      </ng-container>
+
+      <!-- Current Transaction -->
+      <ng-container *ngIf="currentData?.result?.txs as txs">
+        <p-card>
+          <ng-template #header>
+            <div class="card-header">
+              <h3><i class="pi pi-bolt"></i> Current TX</h3>
+            </div>
+          </ng-template>
+
+          <div class="tx-signature">{{ txs.signature }}</div>
+          <div class="tx-time">{{ txs.block_time_utc }}</div>
+          <div class="edge-types">
+            <span *ngFor="let edgeType of txs.edge_types"
+                  class="edge-type"
+                  [ngClass]="edgeType">
+              {{ edgeType }}
+            </span>
+          </div>
+        </p-card>
+
+        <!-- Navigation -->
+        <p-card>
+          <ng-template #header>
+            <div class="card-header">
+              <h3><i class="pi pi-arrows-h"></i> Navigation</h3>
+            </div>
+          </ng-template>
+
+          <div class="nav-section">
+            <h4>Previous ({{ getPrevCount() }})</h4>
+            <ng-container *ngIf="txs.prev as prevTxs">
+              <div *ngFor="let tx of prevTxs.slice(0, 3)"
+                   class="nav-item"
+                   (click)="navigateToTransaction(tx.signature)">
+                <div class="nav-sig">{{ tx.signature.slice(0, 16) }}...</div>
+                <div class="nav-time">{{ tx.block_time_utc }}</div>
+              </div>
+            </ng-container>
+          </div>
+
+          <div class="nav-section">
+            <h4>Next ({{ getNextCount() }})</h4>
+            <ng-container *ngIf="txs.next as nextTxs">
+              <div *ngFor="let tx of nextTxs.slice(0, 3)"
+                   class="nav-item"
+                   (click)="navigateToTransaction(tx.signature)">
+                <div class="nav-sig">{{ tx.signature.slice(0, 16) }}...</div>
+                <div class="nav-time">{{ tx.block_time_utc }}</div>
+              </div>
+            </ng-container>
+          </div>
+        </p-card>
+      </ng-container>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+      <p-card>
+        <ng-template #header>
+          <div class="card-header bubble-map-header">
+            <h3><i class="pi pi-sitemap"></i> Cluster Map</h3>
+            <div class="bubble-map-controls">
+              <button pButton icon="pi pi-refresh" label="Reset Zoom" (click)="resetZoom()" class="p-button-text p-button-sm"></button>
+              <button pButton icon="pi pi-tag" label="Toggle Labels" (click)="toggleLabels()" class="p-button-text p-button-sm"></button>
+            </div>
+          </div>
+        </ng-template>
+
+        <!-- Error Message -->
+        <p-message *ngIf="errorMessage" severity="error" [text]="errorMessage" styleClass="w-full mb-3"></p-message>
+
+        <!-- Loading -->
+        <div *ngIf="loading" class="loading-container">
+          <p-progressSpinner></p-progressSpinner>
+          <span>Loading data...</span>
+        </div>
+
+        <!-- Bubble Map Container -->
+        <div #bubbleMapContainer class="bubble-map-container" [hidden]="loading"></div>
+
+        <!-- Legend -->
+        <div class="legend" *ngIf="currentData">
+          <div class="legend-item">
+            <div class="legend-dot high-balance"></div>
+            <span>High Balance</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot medium-balance"></div>
+            <span>Medium Balance</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot low-balance"></div>
+            <span>Low Balance</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot zero-balance"></div>
+            <span>Zero/Pool</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot funder"></div>
+            <span>Funded By</span>
+          </div>
+        </div>
+      </p-card>
+    </div>
+  </div>
+</div>

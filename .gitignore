@@ -48,3 +48,10 @@ prompt.md
 # OS
 .DS_Store
 Thumbs.db
+/sql/shred/ClusterMaps/bmap-viewer/node_modules
+
+# don't put node_modules into repo
+*-cwd
+
+# not sure we need this
+nul
