@@ -31,6 +31,10 @@ BEGIN
 
     SET v_shredded_state = CAST(fn_get_config('tx_state', 'shredded') AS UNSIGNED);
 
+    -- Temp table to collect tx_ids for batch update at the end
+    DROP TEMPORARY TABLE IF EXISTS tmp_detail_tx_ids;
+    CREATE TEMPORARY TABLE tmp_detail_tx_ids (tx_id BIGINT PRIMARY KEY);
+
     SELECT txs INTO v_txs_json
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
@@ -70,12 +74,19 @@ BEGIN
                 SET p_token_balance_count = p_token_balance_count + v_count;
             END IF;
 
-            -- Mark transaction as detailed (16) + shredded (4)
-            UPDATE tx SET tx_state = tx_state | 20 WHERE id = v_tx_id;
+            -- Collect tx_id for batch update at end
+            INSERT IGNORE INTO tmp_detail_tx_ids (tx_id) VALUES (v_tx_id);
         END IF;
 
         SET v_idx = v_idx + 1;
     END WHILE;
+
+    -- Batch update: Mark all tx as detailed (16) + shredded (4)
+    UPDATE tx SET tx_state = tx_state | 20
+    WHERE id IN (SELECT tx_id FROM tmp_detail_tx_ids);
+
+    -- Cleanup temp table
+    DROP TEMPORARY TABLE IF EXISTS tmp_detail_tx_ids;
 
     -- Mark staging row as processed
     UPDATE t16o_db_staging.txs

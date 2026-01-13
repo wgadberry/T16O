@@ -34,6 +34,10 @@ BEGIN
 
     SET v_shredded_state = CAST(fn_get_config('tx_state', 'shredded') AS UNSIGNED);
 
+    -- Temp table to collect tx_ids for batch updates at the end
+    DROP TEMPORARY TABLE IF EXISTS tmp_decode_tx_ids;
+    CREATE TEMPORARY TABLE tmp_decode_tx_ids (tx_id BIGINT PRIMARY KEY);
+
     SELECT txs INTO v_txs_json
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
@@ -73,27 +77,37 @@ BEGIN
                 SET p_activity_count = p_activity_count + v_count;
             END IF;
 
-            -- Link transfers and swaps to their activity records
-            UPDATE tx_transfer t
-            JOIN tx_activity a ON a.tx_id = t.tx_id
-                               AND a.ins_index = t.ins_index
-                               AND a.outer_ins_index = t.outer_ins_index
-            SET t.activity_id = a.id
-            WHERE t.tx_id = v_tx_id AND t.activity_id IS NULL;
-
-            UPDATE tx_swap s
-            JOIN tx_activity a ON a.tx_id = s.tx_id
-                               AND a.ins_index = s.ins_index
-                               AND a.outer_ins_index = s.outer_ins_index
-            SET s.activity_id = a.id
-            WHERE s.tx_id = v_tx_id AND s.activity_id IS NULL;
-
-            -- Mark tx as shredded (add bit 4)
-            UPDATE tx SET tx_state = tx_state | 4 WHERE id = v_tx_id;
+            -- Collect tx_id for batch updates at end
+            INSERT IGNORE INTO tmp_decode_tx_ids (tx_id) VALUES (v_tx_id);
         END IF;
 
         SET v_idx = v_idx + 1;
     END WHILE;
+
+    -- Batch update: Link transfers to activity records
+    UPDATE tx_transfer t
+    JOIN tx_activity a ON a.tx_id = t.tx_id
+                       AND a.ins_index = t.ins_index
+                       AND a.outer_ins_index = t.outer_ins_index
+    SET t.activity_id = a.id
+    WHERE t.tx_id IN (SELECT tx_id FROM tmp_decode_tx_ids)
+      AND t.activity_id IS NULL;
+
+    -- Batch update: Link swaps to activity records
+    UPDATE tx_swap s
+    JOIN tx_activity a ON a.tx_id = s.tx_id
+                       AND a.ins_index = s.ins_index
+                       AND a.outer_ins_index = s.outer_ins_index
+    SET s.activity_id = a.id
+    WHERE s.tx_id IN (SELECT tx_id FROM tmp_decode_tx_ids)
+      AND s.activity_id IS NULL;
+
+    -- Batch update: Mark all tx as shredded (add bit 4)
+    UPDATE tx SET tx_state = tx_state | 4
+    WHERE id IN (SELECT tx_id FROM tmp_decode_tx_ids);
+
+    -- Cleanup temp table
+    DROP TEMPORARY TABLE IF EXISTS tmp_decode_tx_ids;
 
     UPDATE t16o_db_staging.txs
     SET tx_state = v_shredded_state
