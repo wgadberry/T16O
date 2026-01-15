@@ -1,14 +1,12 @@
--- sp_tx_insert_swaps stored procedure
--- Inserts swap records from decoded activity JSON
--- FIXED: Uses correct JSON path $.data.amm_id (not $.routers.amm.pool_id)
+-- sp_tx_insert_swaps: Batch insert ALL swaps from full staging JSON
+-- Uses JSON_TABLE with NESTED PATH to process all txs at once (no loop)
 
 DELIMITER ;;
 
 DROP PROCEDURE IF EXISTS `sp_tx_insert_swaps`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_swaps`(
-    IN p_tx_id BIGINT,
-    IN p_activities_json JSON,
+    IN p_txs_json JSON,
     OUT p_count INT
 )
 BEGIN
@@ -38,56 +36,83 @@ BEGIN
         fee_token_id
     )
     SELECT
-        p_tx_id,
+        tx.id,
         a.ins_index,
         a.outer_ins_index,
         a.name,
         a.activity_type,
-        fn_tx_ensure_program(a.program_id),
-        fn_tx_ensure_program(a.outer_program_id),
-        fn_tx_ensure_pool(a.amm_id),
-        fn_tx_ensure_address(a.account, 'wallet'),
-        fn_tx_ensure_token(a.token_1),
-        fn_tx_ensure_token(a.token_2),
+        prog.id,
+        outer_prog.id,
+        pool.id,
+        account_addr.id,
+        tok1.id,
+        tok2.id,
         a.amount_1,
         a.amount_2,
         a.token_decimal_1,
         a.token_decimal_2,
-        fn_tx_ensure_address(a.token_account_1_1, 'ata'),
-        fn_tx_ensure_address(a.token_account_1_2, 'ata'),
-        fn_tx_ensure_address(a.token_account_2_1, 'ata'),
-        fn_tx_ensure_address(a.token_account_2_2, 'ata'),
-        fn_tx_ensure_address(a.owner_1, 'wallet'),
-        fn_tx_ensure_address(a.owner_2, 'wallet'),
+        ta_1_1.id,
+        ta_1_2.id,
+        ta_2_1.id,
+        ta_2_2.id,
+        owner1.id,
+        owner2.id,
         a.fee_amount,
-        fn_tx_ensure_token(a.fee_token)
+        fee_tok.id
     FROM JSON_TABLE(
-        p_activities_json,
-        '$[*]' COLUMNS (
-            ins_index SMALLINT PATH '$.ins_index',
-            outer_ins_index SMALLINT PATH '$.outer_ins_index',
-            name VARCHAR(50) PATH '$.name',
-            activity_type VARCHAR(50) PATH '$.activity_type',
-            program_id VARCHAR(44) PATH '$.program_id',
-            outer_program_id VARCHAR(44) PATH '$.outer_program_id',
-            amm_id VARCHAR(44) PATH '$.data.amm_id',
-            account VARCHAR(44) PATH '$.data.account',
-            token_1 VARCHAR(44) PATH '$.data.token_1',
-            token_2 VARCHAR(44) PATH '$.data.token_2',
-            amount_1 BIGINT UNSIGNED PATH '$.data.amount_1',
-            amount_2 BIGINT UNSIGNED PATH '$.data.amount_2',
-            token_decimal_1 TINYINT UNSIGNED PATH '$.data.token_decimal_1',
-            token_decimal_2 TINYINT UNSIGNED PATH '$.data.token_decimal_2',
-            token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1',
-            token_account_1_2 VARCHAR(44) PATH '$.data.token_account_1_2',
-            token_account_2_1 VARCHAR(44) PATH '$.data.token_account_2_1',
-            token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2',
-            owner_1 VARCHAR(44) PATH '$.data.owner_1',
-            owner_2 VARCHAR(44) PATH '$.data.owner_2',
-            fee_amount BIGINT UNSIGNED PATH '$.data.fee_ammount',
-            fee_token VARCHAR(44) PATH '$.data.fee_token'
+        p_txs_json,
+        '$.data[*]' COLUMNS (
+            tx_hash VARCHAR(88) PATH '$.tx_hash',
+            NESTED PATH '$.activities[*]' COLUMNS (
+                ins_index SMALLINT PATH '$.ins_index',
+                outer_ins_index SMALLINT PATH '$.outer_ins_index',
+                name VARCHAR(50) PATH '$.name',
+                activity_type VARCHAR(50) PATH '$.activity_type',
+                program_id VARCHAR(44) PATH '$.program_id',
+                outer_program_id VARCHAR(44) PATH '$.outer_program_id',
+                amm_id VARCHAR(44) PATH '$.data.amm_id',
+                account VARCHAR(44) PATH '$.data.account',
+                token_1 VARCHAR(44) PATH '$.data.token_1',
+                token_2 VARCHAR(44) PATH '$.data.token_2',
+                amount_1 BIGINT UNSIGNED PATH '$.data.amount_1',
+                amount_2 BIGINT UNSIGNED PATH '$.data.amount_2',
+                token_decimal_1 TINYINT UNSIGNED PATH '$.data.token_decimal_1',
+                token_decimal_2 TINYINT UNSIGNED PATH '$.data.token_decimal_2',
+                token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1',
+                token_account_1_2 VARCHAR(44) PATH '$.data.token_account_1_2',
+                token_account_2_1 VARCHAR(44) PATH '$.data.token_account_2_1',
+                token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2',
+                owner_1 VARCHAR(44) PATH '$.data.owner_1',
+                owner_2 VARCHAR(44) PATH '$.data.owner_2',
+                fee_amount BIGINT UNSIGNED PATH '$.data.fee_ammount',
+                fee_token VARCHAR(44) PATH '$.data.fee_token'
+            )
         )
     ) AS a
+    -- Join to tx table to get tx_id from signature
+    JOIN tx ON tx.signature = a.tx_hash
+    -- Only process NEW transactions
+    JOIN tmp_batch_tx_signatures sig ON sig.signature = a.tx_hash AND sig.is_new = 1
+    -- JOINs for lookups
+    LEFT JOIN tx_address prog_addr ON prog_addr.address = a.program_id
+    LEFT JOIN tx_program prog ON prog.program_address_id = prog_addr.id
+    LEFT JOIN tx_address outer_prog_addr ON outer_prog_addr.address = a.outer_program_id
+    LEFT JOIN tx_program outer_prog ON outer_prog.program_address_id = outer_prog_addr.id
+    LEFT JOIN tx_address pool_addr ON pool_addr.address = a.amm_id
+    LEFT JOIN tx_pool pool ON pool.pool_address_id = pool_addr.id
+    LEFT JOIN tx_address account_addr ON account_addr.address = a.account
+    LEFT JOIN tx_address tok1_addr ON tok1_addr.address = a.token_1
+    LEFT JOIN tx_token tok1 ON tok1.mint_address_id = tok1_addr.id
+    LEFT JOIN tx_address tok2_addr ON tok2_addr.address = a.token_2
+    LEFT JOIN tx_token tok2 ON tok2.mint_address_id = tok2_addr.id
+    LEFT JOIN tx_address ta_1_1 ON ta_1_1.address = a.token_account_1_1
+    LEFT JOIN tx_address ta_1_2 ON ta_1_2.address = a.token_account_1_2
+    LEFT JOIN tx_address ta_2_1 ON ta_2_1.address = a.token_account_2_1
+    LEFT JOIN tx_address ta_2_2 ON ta_2_2.address = a.token_account_2_2
+    LEFT JOIN tx_address owner1 ON owner1.address = a.owner_1
+    LEFT JOIN tx_address owner2 ON owner2.address = a.owner_2
+    LEFT JOIN tx_address fee_tok_addr ON fee_tok_addr.address = a.fee_token
+    LEFT JOIN tx_token fee_tok ON fee_tok.mint_address_id = fee_tok_addr.id
     WHERE a.activity_type = 'ACTIVITY_TOKEN_SWAP';
 
     SET p_count = ROW_COUNT();

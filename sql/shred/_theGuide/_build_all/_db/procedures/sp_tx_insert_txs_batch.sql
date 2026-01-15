@@ -1,5 +1,5 @@
 -- sp_tx_insert_txs_batch: Bulk insert transactions using JSON_TABLE
--- Two-phase approach: pre-populate lookups, then JOIN (no inline function calls)
+-- Uses JOINs only (no fn_tx_ensure_* calls) - requires sp_tx_prepopulate_lookups first
 
 DELIMITER ;;
 
@@ -12,96 +12,6 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_txs_batch`(
 )
 BEGIN
     DECLARE v_total_count INT;
-
-    -- =========================================================================
-    -- PHASE 1: Pre-populate lookup tables with all unique values
-    -- =========================================================================
-
-    -- 1a. Insert all unique addresses (wallets, mints combined)
-    INSERT IGNORE INTO tx_address (address, address_type)
-    SELECT DISTINCT addr, addr_type FROM (
-        -- Signer accounts (wallet)
-        SELECT t.signer_account AS addr, 'wallet' AS addr_type
-        FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            signer_account VARCHAR(44) PATH '$.one_line_summary.data.account'
-        )) t WHERE t.signer_account IS NOT NULL AND t.signer_account != 'null'
-
-        UNION
-
-        -- Fallback signers (wallet)
-        SELECT t.fallback_signer, 'wallet'
-        FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            fallback_signer VARCHAR(44) PATH '$.transfers[0].source_owner'
-        )) t WHERE t.fallback_signer IS NOT NULL AND t.fallback_signer != 'null'
-
-        UNION
-
-        -- Token 1 mints
-        SELECT t.token_1, 'mint'
-        FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            token_1 VARCHAR(44) PATH '$.one_line_summary.data.token_1'
-        )) t WHERE t.token_1 IS NOT NULL AND t.token_1 != 'null'
-
-        UNION
-
-        -- Token 2 mints
-        SELECT t.token_2, 'mint'
-        FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            token_2 VARCHAR(44) PATH '$.one_line_summary.data.token_2'
-        )) t WHERE t.token_2 IS NOT NULL AND t.token_2 != 'null'
-
-        UNION
-
-        -- Fee token mints
-        SELECT t.fee_token, 'mint'
-        FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            fee_token VARCHAR(44) PATH '$.one_line_summary.data.fee_token'
-        )) t WHERE t.fee_token IS NOT NULL AND t.fee_token != 'null'
-
-        UNION
-
-        -- Aggregator programs
-        SELECT t.agg_program, 'program'
-        FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            agg_program VARCHAR(44) PATH '$.one_line_summary.program_id'
-        )) t WHERE t.agg_program IS NOT NULL AND t.agg_program != 'null'
-    ) AS all_addresses;
-
-    -- 1b. Insert tokens (for mints that now exist in tx_address)
-    INSERT IGNORE INTO tx_token (mint_address_id)
-    SELECT a.id
-    FROM tx_address a
-    WHERE a.address_type = 'mint'
-      AND a.address IN (
-        SELECT DISTINCT addr FROM (
-            SELECT t.token_1 AS addr FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-                token_1 VARCHAR(44) PATH '$.one_line_summary.data.token_1'
-            )) t WHERE t.token_1 IS NOT NULL AND t.token_1 != 'null'
-            UNION
-            SELECT t.token_2 FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-                token_2 VARCHAR(44) PATH '$.one_line_summary.data.token_2'
-            )) t WHERE t.token_2 IS NOT NULL AND t.token_2 != 'null'
-            UNION
-            SELECT t.fee_token FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-                fee_token VARCHAR(44) PATH '$.one_line_summary.data.fee_token'
-            )) t WHERE t.fee_token IS NOT NULL AND t.fee_token != 'null'
-        ) mints
-      );
-
-    -- 1c. Insert programs (for program addresses that now exist in tx_address)
-    INSERT IGNORE INTO tx_program (program_address_id)
-    SELECT a.id
-    FROM tx_address a
-    WHERE a.address_type = 'program'
-      AND a.address IN (
-        SELECT t.agg_program FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
-            agg_program VARCHAR(44) PATH '$.one_line_summary.program_id'
-        )) t WHERE t.agg_program IS NOT NULL AND t.agg_program != 'null'
-      );
-
-    -- =========================================================================
-    -- PHASE 2: Insert transactions with JOINs (no function calls)
-    -- =========================================================================
 
     -- Create temp table to track signatures
     DROP TEMPORARY TABLE IF EXISTS tmp_batch_tx_signatures;
@@ -122,7 +32,7 @@ BEGIN
 
     SET v_total_count = ROW_COUNT();
 
-    -- Main tx insert with JOINs instead of function calls
+    -- Main tx insert with JOINs (addresses already populated by sp_tx_prepopulate_lookups)
     INSERT IGNORE INTO tx (
         signature,
         block_id,
@@ -189,7 +99,7 @@ BEGIN
             tx_json JSON PATH '$'
         )
     ) AS t
-    -- JOINs for lookups (no function calls!)
+    -- JOINs for lookups (addresses already populated by sp_tx_prepopulate_lookups)
     LEFT JOIN tx_address signer_addr ON signer_addr.address = t.signer_account
     LEFT JOIN tx_address fallback_addr ON fallback_addr.address = t.fallback_signer
     LEFT JOIN tx_address agg_prog_addr ON agg_prog_addr.address = t.agg_program

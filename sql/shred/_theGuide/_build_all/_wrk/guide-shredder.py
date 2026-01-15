@@ -194,7 +194,7 @@ class ShredderProcessor:
             self._tx_states[key] = row['val'] if row else defaults.get(key, 0)
         return self._tx_states[key]
 
-    def fetch_pending_staging_rows(self, limit: int = 10) -> list:
+    def fetch_pending_staging_rows(self, limit: int = 50) -> list:
         """
         Claim and fetch staging rows that need processing.
         Uses atomic UPDATE to claim rows, avoiding locks that block INSERTs.
@@ -216,7 +216,7 @@ class ShredderProcessor:
                 SELECT id, tx_state, priority, created_utc, correlation_id, sig_hash
                 FROM {STAGING_SCHEMA}.{STAGING_TABLE}
                 WHERE tx_state IN (%s, %s)
-                ORDER BY priority DESC, created_utc ASC
+                ORDER BY priority DESC, sig_hash, tx_state, created_utc ASC
                 LIMIT %s
             """, (decoded_state, detailed_state, limit))
             return self.cursor.fetchall()
