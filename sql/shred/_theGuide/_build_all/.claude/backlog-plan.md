@@ -32,11 +32,6 @@ docker ps -a --size
 
 ## 2. Completed Items
 
-- [x] **Reduce Solscan `/account/transfer` API calls** - Implemented 3-tier lookup in guide-funder.py
-  - Tier 1: DB lookup (30% hit rate = ~32K fewer Solscan calls)
-  - Tier 2: Chainstack RPC + DB (rarely triggered, DB catches most)
-  - Tier 3: Solscan fallback
-  - Output now shows source tier for each funder found
 - [x] Fix smart sync to fetch newer transactions (guide-producer.py)
 - [x] Add WHERE NOT EXISTS to prevent ID gaps (sp_tx_prepopulate_lookups.sql)
 - [x] Fix mq-publish.py to publish directly to queue (exchange binding issue)
