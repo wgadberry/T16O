@@ -7,11 +7,12 @@ All requests are routed through the gateway for API key validation.
 Usage:
   python guide-publish.py --api-key <key> producer --addresses addr1,addr2 --limit 100
   python guide-publish.py --api-key <key> decoder --signatures sig1,sig2,sig3
-  python guide-publish.py --api-key <key> shredder --signatures sig1,sig2,sig3
   python guide-publish.py --api-key <key> detailer --signatures sig1,sig2,sig3
   python guide-publish.py --api-key <key> funder --addresses addr1,addr2,addr3
   python guide-publish.py --api-key <key> aggregator --sync guide,funding,tokens
   python guide-publish.py --api-key <key> enricher --enrich tokens,pools
+
+Note: shredder is not available via queue - it polls the staging table directly.
 """
 
 import argparse
@@ -44,8 +45,8 @@ except FileNotFoundError:
 # All requests go through gateway
 GATEWAY_QUEUE = "mq.guide.gateway.request"
 
-# Valid target workers (matches WORKER_REGISTRY in guide-gateway.py)
-VALID_WORKERS = ["producer", "decoder", "shredder", "detailer", "funder", "aggregator", "enricher"]
+# Valid target workers (shredder excluded - it polls staging table, not queue)
+VALID_WORKERS = ["producer", "decoder", "detailer", "funder", "aggregator", "enricher"]
 
 
 def get_connection():
@@ -115,9 +116,6 @@ Examples:
   # Decode specific signatures via Solscan
   python guide-publish.py --api-key KEY decoder --signatures 5abc...,6def...
 
-  # Process signatures through shredder
-  python guide-publish.py --api-key KEY shredder --signatures 5abc...,6def...
-
   # Get balance details for signatures
   python guide-publish.py --api-key KEY detailer --signatures 5abc...,6def...
 
@@ -181,7 +179,7 @@ Examples:
         if args.until:
             batch["filters"]["until"] = args.until
 
-    elif args.worker in ("decoder", "shredder", "detailer"):
+    elif args.worker in ("decoder", "detailer"):
         if not args.signatures:
             parser.error(f"{args.worker} requires --signatures")
         batch = {
