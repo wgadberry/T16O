@@ -64,8 +64,8 @@ def get_connection():
 
 
 def publish(worker: str, payload: dict, priority: int = 5):
-    routing_key = ROUTING_KEYS.get(worker)
-    if not routing_key:
+    queue_name = ROUTING_KEYS.get(worker)
+    if not queue_name:
         print(f"Error: Unknown worker '{worker}'")
         print(f"Available: {', '.join(ROUTING_KEYS.keys())}")
         sys.exit(1)
@@ -76,9 +76,13 @@ def publish(worker: str, payload: dict, priority: int = 5):
     connection = get_connection()
     channel = connection.channel()
 
+    # Ensure queue exists
+    channel.queue_declare(queue=queue_name, durable=True, arguments={'x-max-priority': 10})
+
+    # Publish directly to queue (not via exchange - avoids binding issues)
     channel.basic_publish(
-        exchange=EXCHANGE,
-        routing_key=routing_key,
+        exchange='',  # Default exchange - routes directly to queue
+        routing_key=queue_name,
         body=json.dumps(payload),
         properties=pika.BasicProperties(
             delivery_mode=2,  # persistent
@@ -88,7 +92,7 @@ def publish(worker: str, payload: dict, priority: int = 5):
     )
     connection.close()
 
-    print(f"Published to {routing_key}")
+    print(f"Published to {queue_name}")
     print(f"Payload: {json.dumps(payload, indent=2)}")
 
 

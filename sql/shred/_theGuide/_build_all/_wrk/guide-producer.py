@@ -307,40 +307,72 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
         # Smart sync if DB available and no explicit pagination
         if db_cursor and not request_before and not request_until:
-            db_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (address,))
+            db_cursor.execute("SELECT id, address_type FROM tx_address WHERE address = %s", (address,))
             addr_row = db_cursor.fetchone()
             if addr_row:
-                addr_id = addr_row[0]
-                db_cursor.execute("""
-                    SELECT COUNT(DISTINCT t.id) FROM tx t
-                    LEFT JOIN tx_guide g ON g.tx_id = t.id
-                    WHERE t.signer_address_id = %s OR g.from_address_id = %s OR g.to_address_id = %s
-                """, (addr_id, addr_id, addr_id))
+                addr_id, addr_type = addr_row
+
+                # Different queries for mint addresses vs wallet addresses
+                if addr_type == 'mint':
+                    # For mint addresses, query via tx_transfer.token_id
+                    count_query = """
+                        SELECT COUNT(DISTINCT t.id) FROM tx t
+                        JOIN tx_transfer tr ON tr.tx_id = t.id
+                        JOIN tx_token tok ON tok.id = tr.token_id
+                        WHERE tok.mint_address_id = %s
+                    """
+                    oldest_query = """
+                        SELECT t.signature FROM tx t
+                        JOIN tx_transfer tr ON tr.tx_id = t.id
+                        JOIN tx_token tok ON tok.id = tr.token_id
+                        WHERE tok.mint_address_id = %s
+                        ORDER BY t.block_time ASC LIMIT 1
+                    """
+                    newest_query = """
+                        SELECT t.signature FROM tx t
+                        JOIN tx_transfer tr ON tr.tx_id = t.id
+                        JOIN tx_token tok ON tok.id = tr.token_id
+                        WHERE tok.mint_address_id = %s
+                        ORDER BY t.block_time DESC LIMIT 1
+                    """
+                    query_params = (addr_id,)
+                else:
+                    # For wallet addresses, query via signer/from/to
+                    count_query = """
+                        SELECT COUNT(DISTINCT t.id) FROM tx t
+                        LEFT JOIN tx_guide g ON g.tx_id = t.id
+                        WHERE t.signer_address_id = %s OR g.from_address_id = %s OR g.to_address_id = %s
+                    """
+                    oldest_query = """
+                        SELECT t.signature FROM tx t
+                        LEFT JOIN tx_guide g ON g.tx_id = t.id
+                        WHERE t.signer_address_id = %s OR g.from_address_id = %s OR g.to_address_id = %s
+                        ORDER BY t.block_time ASC LIMIT 1
+                    """
+                    newest_query = """
+                        SELECT t.signature FROM tx t
+                        LEFT JOIN tx_guide g ON g.tx_id = t.id
+                        WHERE t.signer_address_id = %s OR g.from_address_id = %s OR g.to_address_id = %s
+                        ORDER BY t.block_time DESC LIMIT 1
+                    """
+                    query_params = (addr_id, addr_id, addr_id)
+
+                db_cursor.execute(count_query, query_params)
                 existing_count = db_cursor.fetchone()[0] or 0
 
                 if existing_count > 0:
                     if max_signatures > existing_count:
-                        db_cursor.execute("""
-                            SELECT t.signature FROM tx t
-                            LEFT JOIN tx_guide g ON g.tx_id = t.id
-                            WHERE t.signer_address_id = %s OR g.from_address_id = %s OR g.to_address_id = %s
-                            ORDER BY t.block_time ASC LIMIT 1
-                        """, (addr_id, addr_id, addr_id))
+                        db_cursor.execute(oldest_query, query_params)
                         row = db_cursor.fetchone()
                         if row:
                             before_sig = row[0]
-                            print(f"  Smart sync: fetching MORE historical (have {existing_count}, want {max_signatures})")
+                            print(f"  Smart sync ({addr_type}): fetching MORE historical (have {existing_count}, want {max_signatures})")
                     else:
-                        db_cursor.execute("""
-                            SELECT t.signature FROM tx t
-                            LEFT JOIN tx_guide g ON g.tx_id = t.id
-                            WHERE t.signer_address_id = %s OR g.from_address_id = %s OR g.to_address_id = %s
-                            ORDER BY t.block_time DESC LIMIT 1
-                        """, (addr_id, addr_id, addr_id))
+                        db_cursor.execute(newest_query, query_params)
                         row = db_cursor.fetchone()
                         if row:
                             until_sig = row[0]
-                            print(f"  Smart sync: fetching new sigs after {until_sig[:20]}...")
+                            print(f"  Smart sync ({addr_type}): fetching new sigs after {until_sig[:20]}...")
 
         signatures = []
         total_skipped = 0
