@@ -73,7 +73,7 @@ def publish_to_gateway(api_key: str, target_worker: str, action: str, batch: dic
         "priority": priority,
         "batch": batch,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "source": "guide-publish-cli"
+        "source": "queue"
     }
 
     connection = get_connection()

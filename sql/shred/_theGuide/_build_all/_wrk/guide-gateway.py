@@ -422,13 +422,13 @@ def log_request(
             json.dumps(payload_summary) if payload_summary else None,
             status
         ))
-        print(f"[LOG] Request {request_id[:8]} logged as {status} (correlation: {effective_correlation_id[:8]})")
+        print(f"[LOG] Request {request_id[:8]} logged as {status} (correlation: {effective_correlation_id[:8]})", flush=True)
         conn.commit()
         cursor.close()
         conn.close()
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to log request: {e}")
+        print(f"[ERROR] Failed to log request: {e}", flush=True)
         return False
 
 
@@ -982,7 +982,7 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         request_id = message.get('request_id', str(uuid.uuid4()))
 
                         if not api_key:
-                            print(f"[REJECT] Missing api_key in request {request_id}")
+                            print(f"[REJECT] Missing api_key in request {request_id}", flush=True)
                             log_request(
                                 request_id=request_id,
                                 api_key_id=None,
@@ -997,7 +997,7 @@ def run_queue_consumer(ready_event: threading.Event = None):
                             return
 
                         if not target_worker:
-                            print(f"[REJECT] Missing target_worker in request {request_id}")
+                            print(f"[REJECT] Missing target_worker in request {request_id}", flush=True)
                             log_request(
                                 request_id=request_id,
                                 api_key_id=None,
@@ -1014,7 +1014,7 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         # Validate API key
                         key_info = validate_api_key(api_key)
                         if not key_info:
-                            print(f"[REJECT] Invalid API key: {api_key[:8]}... for request {request_id}")
+                            print(f"[REJECT] Invalid API key: {api_key[:8]}... for request {request_id}", flush=True)
                             log_request(
                                 request_id=request_id,
                                 api_key_id=None,
@@ -1030,7 +1030,7 @@ def run_queue_consumer(ready_event: threading.Event = None):
 
                         # Check permissions
                         if not check_permission(key_info, target_worker, action or 'process'):
-                            print(f"[REJECT] Permission denied for {target_worker}/{action} request {request_id}")
+                            print(f"[REJECT] Permission denied for {target_worker}/{action} request {request_id}", flush=True)
                             log_request(
                                 request_id=request_id,
                                 api_key_id=key_info.get('id'),
