@@ -462,6 +462,8 @@ def update_pool_from_api(cursor, conn, pool_address_id: int, pool_id: int,
         """, (program_address_id_fk, pool_address_id))
 
         # Update tx_pool
+        # Only reset attempt_cnt if we have all required data (token_account1_id and label)
+        has_all_data = token_account1_id is not None and label is not None
         cursor.execute("""
             UPDATE tx_pool SET
                 program_id = COALESCE(%s, program_id),
@@ -471,11 +473,11 @@ def update_pool_from_api(cursor, conn, pool_address_id: int, pool_id: int,
                 token_account2_id = COALESCE(%s, token_account2_id),
                 lp_token_id = COALESCE(%s, lp_token_id),
                 pool_label = COALESCE(%s, pool_label),
-                attempt_cnt = 0
+                attempt_cnt = CASE WHEN %s THEN 0 ELSE attempt_cnt END
             WHERE id = %s
         """, (program_id, token1_id, token2_id,
               token_account1_id, token_account2_id, lp_token_id,
-              label, pool_id))
+              label, has_all_data, pool_id))
         conn.commit()
         return True
 
