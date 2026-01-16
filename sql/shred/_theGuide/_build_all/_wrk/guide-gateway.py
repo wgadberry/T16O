@@ -964,14 +964,53 @@ def run_queue_consumer(ready_event: threading.Event = None):
                     action = message.get('action')
 
                     if action == 'cascade':
+                        # Cascade from worker to downstream workers
                         results = process_cascade(message)
                         print(f"[CASCADE] Processed cascade from {message.get('source_worker')}: {len(results)} downstream")
                     else:
-                        print(f"[WARN] Unknown action: {action}")
+                        # Regular request - validate API key and route to worker
+                        api_key = message.get('api_key')
+                        target_worker = message.get('target_worker')
+                        source = message.get('source', 'queue')
+
+                        if not api_key:
+                            print(f"[REJECT] Missing api_key in request")
+                            ch.basic_ack(delivery_tag=method.delivery_tag)
+                            return
+
+                        if not target_worker:
+                            print(f"[REJECT] Missing target_worker in request")
+                            ch.basic_ack(delivery_tag=method.delivery_tag)
+                            return
+
+                        # Validate API key
+                        key_info = validate_api_key(api_key)
+                        if not key_info:
+                            print(f"[REJECT] Invalid API key: {api_key[:8]}...")
+                            ch.basic_ack(delivery_tag=method.delivery_tag)
+                            return
+
+                        # Check permissions
+                        if not check_permission(key_info, target_worker, action or 'process'):
+                            print(f"[REJECT] Permission denied for {target_worker}/{action}")
+                            ch.basic_ack(delivery_tag=method.delivery_tag)
+                            return
+
+                        # Process the request
+                        result = process_request(
+                            worker=target_worker,
+                            action=action or 'process',
+                            payload=message,
+                            api_key=api_key,
+                            source=source
+                        )
+                        print(f"[REQUEST] {target_worker}/{action}: {result.get('request_id', 'unknown')}")
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                 except Exception as e:
                     print(f"[ERROR] Failed to process message: {e}")
+                    import traceback
+                    traceback.print_exc()
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=GATEWAY_REQUEST_QUEUE, on_message_callback=callback)
