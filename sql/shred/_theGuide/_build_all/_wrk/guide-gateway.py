@@ -289,11 +289,35 @@ def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
 
+# =============================================================================
+# API Key Cache (60-second TTL)
+# =============================================================================
+
+API_KEY_CACHE = {}  # {api_key: {'data': {...}, 'timestamp': time.time()}}
+API_KEY_CACHE_TTL = 60  # seconds
+API_KEY_CACHE_LOCK = threading.Lock()
+
+
 def validate_api_key(api_key: str) -> Optional[Dict]:
-    """Validate API key and return key details if valid"""
+    """
+    Validate API key and return key details if valid.
+    Uses in-memory cache with 60-second TTL to reduce DB hits.
+    """
     if not HAS_MYSQL:
         return {'id': 0, 'name': 'No-Auth', 'permissions': {'workers': ['*'], 'actions': ['*']}}
 
+    current_time = time.time()
+
+    # Check cache first
+    with API_KEY_CACHE_LOCK:
+        if api_key in API_KEY_CACHE:
+            cached = API_KEY_CACHE[api_key]
+            age = current_time - cached['timestamp']
+            if age < API_KEY_CACHE_TTL:
+                return cached['data']
+            # Cache expired, will re-query below
+
+    # Query database
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
@@ -308,6 +332,14 @@ def validate_api_key(api_key: str) -> Optional[Dict]:
 
         if result and result['permissions']:
             result['permissions'] = json.loads(result['permissions']) if isinstance(result['permissions'], str) else result['permissions']
+
+        # Update cache (even if None - caches invalid keys too)
+        with API_KEY_CACHE_LOCK:
+            API_KEY_CACHE[api_key] = {
+                'data': result,
+                'timestamp': current_time
+            }
+
         return result
     except Exception as e:
         print(f"[ERROR] API key validation failed: {e}")
