@@ -5,7 +5,8 @@ CLI tool to publish messages to theGuide Gateway.
 All requests are routed through the gateway for API key validation.
 
 Usage:
-  python guide-publish.py --api-key <key> producer --address <addr> --limit 100
+  python guide-publish.py --api-key <key> producer --addresses addr1,addr2 --limit 100
+  python guide-publish.py --api-key <key> decoder --signatures sig1,sig2,sig3
   python guide-publish.py --api-key <key> shredder --signatures sig1,sig2,sig3
   python guide-publish.py --api-key <key> detailer --signatures sig1,sig2,sig3
   python guide-publish.py --api-key <key> funder --addresses addr1,addr2,addr3
@@ -43,8 +44,8 @@ except FileNotFoundError:
 # All requests go through gateway
 GATEWAY_QUEUE = "mq.guide.gateway.request"
 
-# Valid target workers
-VALID_WORKERS = ["producer", "shredder", "detailer", "funder", "aggregator", "enricher"]
+# Valid target workers (matches WORKER_REGISTRY in guide-gateway.py)
+VALID_WORKERS = ["producer", "decoder", "shredder", "detailer", "funder", "aggregator", "enricher"]
 
 
 def get_connection():
@@ -108,20 +109,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Fetch 100 signatures for a token mint
-  python guide-publish.py --api-key admin_master_key producer --address EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --limit 100
+  # Fetch 100 signatures for token mints
+  python guide-publish.py --api-key KEY producer --addresses EPjF...,So11... --limit 100
 
-  # Process specific signatures through shredder
-  python guide-publish.py --api-key admin_master_key shredder --signatures 5abc...,6def...
+  # Decode specific signatures via Solscan
+  python guide-publish.py --api-key KEY decoder --signatures 5abc...,6def...
+
+  # Process signatures through shredder
+  python guide-publish.py --api-key KEY shredder --signatures 5abc...,6def...
+
+  # Get balance details for signatures
+  python guide-publish.py --api-key KEY detailer --signatures 5abc...,6def...
 
   # Trace funding for addresses
-  python guide-publish.py --api-key admin_master_key funder --addresses addr1,addr2
+  python guide-publish.py --api-key KEY funder --addresses addr1,addr2
 
   # Run aggregator sync
-  python guide-publish.py --api-key admin_master_key aggregator --sync guide,funding,tokens
+  python guide-publish.py --api-key KEY aggregator --sync guide,funding,tokens
 
   # Enrich tokens and pools
-  python guide-publish.py --api-key admin_master_key enricher --enrich tokens,pools
+  python guide-publish.py --api-key KEY enricher --enrich tokens,pools
         """
     )
 
@@ -133,16 +140,21 @@ Examples:
     parser.add_argument("worker", choices=VALID_WORKERS,
                         help="Target worker")
 
-    # Worker-specific arguments
-    parser.add_argument("--address", "-a", help="Single address (mint or wallet)")
-    parser.add_argument("--addresses", help="Comma-separated addresses")
-    parser.add_argument("--signatures", "-s", help="Comma-separated signatures")
+    # Standardized arguments
+    parser.add_argument("--addresses", "-a", help="Comma-separated addresses (mints or wallets)")
+    parser.add_argument("--signatures", "-s", help="Comma-separated transaction signatures")
+
+    # Producer-specific
     parser.add_argument("--limit", "-l", type=int, default=100,
                         help="Limit for producer (default: 100)")
     parser.add_argument("--before", help="Fetch signatures before this one")
     parser.add_argument("--until", help="Fetch signatures until this one")
+
+    # Aggregator/Enricher-specific
     parser.add_argument("--sync", help="Aggregator sync targets: guide,funding,tokens,bmap,all")
     parser.add_argument("--enrich", help="Enricher targets: tokens,pools,all")
+
+    # Common options
     parser.add_argument("--priority", "-p", type=int, default=5,
                         help="Message priority 0-10 (default: 5)")
     parser.add_argument("--action", default="process",
@@ -155,11 +167,12 @@ Examples:
     action = args.action
 
     if args.worker == "producer":
-        if not args.address:
-            parser.error("producer requires --address")
+        if not args.addresses:
+            parser.error("producer requires --addresses")
+        addresses = [a.strip() for a in args.addresses.split(",")]
         batch = {
             "filters": {
-                "address": args.address
+                "addresses": addresses
             },
             "size": args.limit
         }
@@ -168,7 +181,7 @@ Examples:
         if args.until:
             batch["filters"]["until"] = args.until
 
-    elif args.worker in ("shredder", "detailer"):
+    elif args.worker in ("decoder", "shredder", "detailer"):
         if not args.signatures:
             parser.error(f"{args.worker} requires --signatures")
         batch = {
@@ -176,11 +189,10 @@ Examples:
         }
 
     elif args.worker == "funder":
-        if not args.addresses and not args.address:
-            parser.error("funder requires --address or --addresses")
-        addrs = args.addresses.split(",") if args.addresses else [args.address]
+        if not args.addresses:
+            parser.error("funder requires --addresses")
         batch = {
-            "addresses": [a.strip() for a in addrs]
+            "addresses": [a.strip() for a in args.addresses.split(",")]
         }
 
     elif args.worker == "aggregator":
