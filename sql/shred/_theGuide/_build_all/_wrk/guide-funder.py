@@ -79,6 +79,10 @@ _cfg = load_config()
 SOLSCAN_API_BASE = _cfg.get('SOLSCAN_API', "https://pro-api.solscan.io/v2.0")
 SOLSCAN_API_TOKEN = _cfg.get('SOLSCAN_TOKEN', "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NTg0MzQzODI5MTEsImVtYWlsIjoid2dhZGJlcnJ5QGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc1ODQzNDM4Mn0.d_ZYyfZGaFdLfYXsuB_M2rT_Q6WkwpxVp0ZqNE_zUAk")
 
+# Chainstack RPC (for Tier 2 funder lookup)
+RPC_URL = _cfg.get('RPC_URL', "https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb")
+RPC_DELAY = _cfg.get('RPC_DELAY', 0.2)
+
 # RabbitMQ (legacy queue)
 RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
 RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
@@ -137,6 +141,100 @@ def should_skip_address(address: str) -> bool:
         if address.startswith(prefix):
             return True
     return False
+
+
+# =============================================================================
+# Tiered Funder Lookup (DB -> RPC -> Solscan)
+# =============================================================================
+
+def lookup_funder_from_db(cursor, target_address: str) -> Optional[Dict]:
+    """
+    Tier 1: Query our own DB for earliest SOL inflow to find funder.
+    Returns dict with: funder, signature, amount, block_time or None.
+    """
+    # Simplified query: find earliest transfer TO this address
+    # Look for SOL transfers by joining tx_token to find SOL mint
+    cursor.execute("""
+        SELECT t.signature, a_funder.address as funder, tr.amount, t.block_time
+        FROM tx_transfer tr
+        JOIN tx t ON t.id = tr.tx_id
+        JOIN tx_address a_target ON a_target.id = tr.destination_owner_address_id
+        JOIN tx_address a_funder ON a_funder.id = tr.source_owner_address_id
+        JOIN tx_token tok ON tok.id = tr.token_id
+        JOIN tx_address a_mint ON a_mint.id = tok.mint_address_id
+        WHERE a_target.address = %s
+          AND a_mint.address IN (%s, %s)
+          AND tr.source_owner_address_id IS NOT NULL
+          AND tr.source_owner_address_id != tr.destination_owner_address_id
+        ORDER BY t.block_time ASC
+        LIMIT 1
+    """, (target_address, SOL_TOKEN, SOL_TOKEN_2))
+
+    row = cursor.fetchone()
+    if row:
+        return {
+            'funder': row['funder'],
+            'signature': row['signature'],
+            'amount': row['amount'] or 0,
+            'block_time': row['block_time'],
+            'source': 'db'
+        }
+    return None
+
+
+def lookup_funder_from_rpc(session: requests.Session, target_address: str, cursor) -> Optional[Dict]:
+    """
+    Tier 2: Use Chainstack RPC getSignaturesForAddress to find oldest tx,
+    then look up in our DB for the funder.
+    Returns dict with: funder, signature, amount, block_time or None.
+    """
+    payload = {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "getSignaturesForAddress",
+        "params": [target_address, {"limit": 1}]
+    }
+
+    try:
+        response = session.post(RPC_URL, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"    [!] RPC error: {e}")
+        return None
+
+    if 'error' in data or not data.get('result'):
+        return None
+
+    # Get oldest signature
+    oldest_sig = data['result'][0].get('signature') if data['result'] else None
+    if not oldest_sig:
+        return None
+
+    # Look up this transaction in our DB for transfer details
+    cursor.execute("""
+        SELECT a_funder.address as funder, tr.amount, t.block_time
+        FROM tx t
+        JOIN tx_transfer tr ON tr.tx_id = t.id
+        JOIN tx_address a_funder ON a_funder.id = tr.source_owner_address_id
+        JOIN tx_address a_target ON a_target.id = tr.destination_owner_address_id
+        WHERE t.signature = %s
+          AND a_target.address = %s
+          AND tr.source_owner_address_id IS NOT NULL
+          AND tr.source_owner_address_id != tr.destination_owner_address_id
+        LIMIT 1
+    """, (oldest_sig, target_address))
+
+    row = cursor.fetchone()
+    if row:
+        return {
+            'funder': row['funder'],
+            'signature': oldest_sig,
+            'amount': row['amount'] or 0,
+            'block_time': row['block_time'],
+            'source': 'rpc+db'
+        }
+    return None
 
 
 # =============================================================================
@@ -562,12 +660,20 @@ class AddressHistoryWorker:
         self.api_delay = api_delay
         self.batch_delay = batch_delay
 
+        # RPC session for Tier 2 lookups
+        self.rpc_session = requests.Session()
+        self.rpc_session.headers.update({"Content-Type": "application/json"})
+
         # Stats
         self.messages_processed = 0
         self.addresses_processed = 0
         self.addresses_skipped = 0
         self.funders_found = 0
         self.funders_not_found = 0
+        # Tiered lookup stats
+        self.funders_from_db = 0
+        self.funders_from_rpc = 0
+        self.funders_from_solscan = 0
 
         # Pending messages and addresses
         self.pending_messages = []  # List of (body, delivery_tag)
@@ -745,19 +851,40 @@ class AddressHistoryWorker:
 
     def find_funder_for_address(self, address: str) -> Optional[Dict]:
         """
-        Fetch first transactions for address and find funding wallet.
+        Find funding wallet using 3-tier approach:
+        1. Query our own DB (free, instant)
+        2. Chainstack RPC + DB lookup (uses RPC quota, not Solscan)
+        3. Solscan API (last resort)
         Returns funding info dict or None.
         """
         # Skip known programs and system addresses
         if should_skip_address(address):
             return None
 
+        # Tier 1: Check our DB first (free)
+        funding_info = lookup_funder_from_db(self.cursor, address)
+        if funding_info:
+            self.funders_from_db += 1
+            return funding_info
+
+        # Tier 2: Try RPC to get oldest signature, then DB lookup
+        time.sleep(RPC_DELAY)
+        funding_info = lookup_funder_from_rpc(self.rpc_session, address, self.cursor)
+        if funding_info:
+            self.funders_from_rpc += 1
+            return funding_info
+
+        # Tier 3: Fall back to Solscan API
         time.sleep(self.api_delay)
         data = self.solscan.get_account_transfers(address, self.tx_limit)
-        if not data:
-            return None
+        if data:
+            funding_info = self.solscan.find_funding_wallet(address, data)
+            if funding_info:
+                funding_info['source'] = 'solscan'
+                self.funders_from_solscan += 1
+                return funding_info
 
-        return self.solscan.find_funding_wallet(address, data)
+        return None
 
     def process_addresses(self, addresses: List[str]) -> Dict:
         """
@@ -821,7 +948,7 @@ class AddressHistoryWorker:
             funding_info = self.find_funder_for_address(addr)
 
             if funding_info:
-                print(f" -> funded by {funding_info['funder'][:16]}...")
+                print(f" -> funded by {funding_info['funder'][:16]}... [{funding_info.get('source', 'unknown')}]")
                 self.save_funding_info(addr, funding_info)
                 result['funders_found'] += 1
                 self.funders_found += 1
@@ -965,7 +1092,7 @@ class AddressHistoryWorker:
             funding_info = self.find_funder_for_address(addr)
 
             if funding_info:
-                print(f" -> funded by {funding_info['funder'][:16]}...")
+                print(f" -> funded by {funding_info['funder'][:16]}... [{funding_info.get('source', 'unknown')}]")
                 self.save_funding_info(addr, funding_info)
                 self.funders_found += 1
             else:
@@ -1171,6 +1298,13 @@ def main():
                 self.addresses_skipped = 0
                 self.funders_found = 0
                 self.funders_not_found = 0
+                # RPC session for Tier 2 lookups
+                self.rpc_session = requests.Session()
+                self.rpc_session.headers.update({"Content-Type": "application/json"})
+                # Tiered lookup stats
+                self.funders_from_db = 0
+                self.funders_from_rpc = 0
+                self.funders_from_solscan = 0
 
             def get_address_info(self, addresses):
                 if not addresses:
@@ -1217,13 +1351,33 @@ def main():
                 return claimed
 
             def find_funder_for_address(self, address):
+                """3-tier lookup: DB -> RPC -> Solscan"""
                 if should_skip_address(address):
                     return None
+
+                # Tier 1: Check our DB first (free)
+                funding_info = lookup_funder_from_db(self.cursor, address)
+                if funding_info:
+                    self.funders_from_db += 1
+                    return funding_info
+
+                # Tier 2: Try RPC to get oldest signature, then DB lookup
+                time.sleep(RPC_DELAY)
+                funding_info = lookup_funder_from_rpc(self.rpc_session, address, self.cursor)
+                if funding_info:
+                    self.funders_from_rpc += 1
+                    return funding_info
+
+                # Tier 3: Fall back to Solscan API
                 time.sleep(self.api_delay)
                 data = self.solscan.get_account_transfers(address, self.tx_limit)
-                if not data:
-                    return None
-                return self.solscan.find_funding_wallet(address, data)
+                if data:
+                    funding_info = self.solscan.find_funding_wallet(address, data)
+                    if funding_info:
+                        funding_info['source'] = 'solscan'
+                        self.funders_from_solscan += 1
+                        return funding_info
+                return None
 
             def save_funding_info(self, target_address, funding_info):
                 if self.dry_run:
@@ -1342,7 +1496,7 @@ def main():
                         print(f"  [{j + 1}/{len(addresses_to_process)}] {addr[:20]}...", end='')
                         funding_info = worker.find_funder_for_address(addr)
                         if funding_info:
-                            print(f" -> funded by {funding_info['funder'][:16]}...")
+                            print(f" -> funded by {funding_info['funder'][:16]}... [{funding_info.get('source', 'unknown')}]")
                             worker.save_funding_info(addr, funding_info)
                             worker.funders_found += 1
                         else:
@@ -1402,7 +1556,7 @@ def main():
                         print(f"  [{i + j + 1}/{len(addresses_to_process)}] {addr[:20]}...", end='')
                         funding_info = worker.find_funder_for_address(addr)
                         if funding_info:
-                            print(f" -> funded by {funding_info['funder'][:16]}...")
+                            print(f" -> funded by {funding_info['funder'][:16]}... [{funding_info.get('source', 'unknown')}]")
                             worker.save_funding_info(addr, funding_info)
                             worker.funders_found += 1
                         else:
@@ -1425,6 +1579,9 @@ def main():
         print(f"  Addresses processed: {worker.addresses_processed}")
         print(f"  Addresses skipped: {worker.addresses_skipped}")
         print(f"  Funders found: {worker.funders_found}")
+        print(f"    - from DB (tier 1): {worker.funders_from_db}")
+        print(f"    - from RPC (tier 2): {worker.funders_from_rpc}")
+        print(f"    - from Solscan (tier 3): {worker.funders_from_solscan}")
         print(f"  Funders not found: {worker.funders_not_found}")
         print(f"{'='*60}")
         return 0
@@ -1471,6 +1628,9 @@ def main():
     print(f"  Addresses processed: {worker.addresses_processed}")
     print(f"  Addresses skipped: {worker.addresses_skipped}")
     print(f"  Funders found: {worker.funders_found}")
+    print(f"    - from DB (tier 1): {worker.funders_from_db}")
+    print(f"    - from RPC (tier 2): {worker.funders_from_rpc}")
+    print(f"    - from Solscan (tier 3): {worker.funders_from_solscan}")
     print(f"  Funders not found: {worker.funders_not_found}")
     print(f"{'='*60}")
 
