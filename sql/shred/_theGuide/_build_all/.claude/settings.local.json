@@ -39,7 +39,24 @@
       "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" get T16OExchange.Guide.Funder AppParameters)",
       "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" set T16OExchange.Guide.Aggregator AppParameters \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\_wrk\\\\guide-aggregator.py --daemon\")",
       "Bash(\"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\\\\tools\\\\nssm\\\\nssm.exe\" get T16OExchange.Guide.Shredder AppParameters)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(curl:*)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" status --short)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" add sql/shred/_theGuide/_build_all/_wrk/guide-producer.py)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" commit -m \"$\\(cat <<''EOF''\nFix smart sync to fetch newer transactions instead of older\n\nWhen requesting more transactions than exist in DB, use until_sig\ninstead of before_sig. This fetches from newest down to our oldest,\ninstead of trying to fetch older \\(which returns 0 if we already have\nthe oldest transactions\\).\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" push)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" add sql/shred/_theGuide/_build_all/_db/procedures/sp_tx_prepopulate_lookups.sql)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" commit -m \"$\\(cat <<''EOF''\nAdd WHERE NOT EXISTS to prevent ID gaps in tx_address\n\nPrevents auto_increment ID waste by checking existence before INSERT.\nKeeps INSERT IGNORE as fallback for race conditions between workers.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(docker stop:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker exec:*)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" add docker/docker-compose.v1.yml)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" commit -m \"$\\(cat <<''EOF''\nReduce MySQL binlog retention from 3 days to 6 hours\n\nPrevents disk space exhaustion from binlog accumulation.\nPrevious setting was causing ~14GB of binlog files.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(docker system:*)"
     ]
   }
 }
