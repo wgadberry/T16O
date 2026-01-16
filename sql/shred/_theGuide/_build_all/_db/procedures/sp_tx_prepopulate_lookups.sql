@@ -12,9 +12,9 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_prepopulate_lookups`(
 BEGIN
     -- =========================================================================
     -- PHASE 1a: Pre-populate tx_address with ALL addresses from entire JSON
-    -- Uses WHERE NOT EXISTS to avoid wasting auto_increment IDs
+    -- Uses WHERE NOT EXISTS to minimize ID waste + IGNORE for race conditions
     -- =========================================================================
-    INSERT INTO tx_address (address, address_type)
+    INSERT IGNORE INTO tx_address (address, address_type)
     SELECT DISTINCT addr, addr_type FROM (
         -- =========================
         -- FROM one_line_summary
@@ -269,7 +269,7 @@ BEGIN
     -- =========================================================================
     -- PHASE 1b: Pre-populate tx_token for all mints
     -- =========================================================================
-    INSERT INTO tx_token (mint_address_id)
+    INSERT IGNORE INTO tx_token (mint_address_id)
     SELECT a.id
     FROM tx_address a
     WHERE a.address_type = 'mint'
@@ -278,7 +278,7 @@ BEGIN
     -- =========================================================================
     -- PHASE 1c: Pre-populate tx_program for all programs
     -- =========================================================================
-    INSERT INTO tx_program (program_address_id)
+    INSERT IGNORE INTO tx_program (program_address_id)
     SELECT a.id
     FROM tx_address a
     WHERE a.address_type = 'program'
@@ -287,7 +287,7 @@ BEGIN
     -- =========================================================================
     -- PHASE 1d: Pre-populate tx_pool for all pools
     -- =========================================================================
-    INSERT INTO tx_pool (pool_address_id)
+    INSERT IGNORE INTO tx_pool (pool_address_id)
     SELECT a.id
     FROM tx_address a
     WHERE a.address_type = 'pool'
