@@ -369,7 +369,9 @@ def log_request(
     action: str,
     priority: int = 5,
     payload: Optional[Dict] = None,
-    correlation_id: Optional[str] = None
+    correlation_id: Optional[str] = None,
+    status: str = 'queued',
+    error: Optional[str] = None
 ) -> bool:
     """Log a request to tx_request_log
 
@@ -377,6 +379,8 @@ def log_request(
         correlation_id: Original REST request ID that flows through entire cascade chain.
                        For REST requests, this equals request_id.
                        For cascades, this is the original parent's request_id.
+        status: Request status (queued, rejected, failed, completed)
+        error: Error message if status is rejected/failed
     """
     if not HAS_MYSQL:
         return True
@@ -396,6 +400,8 @@ def log_request(
                 'filters': payload.get('batch', {}).get('filters'),
                 'action': action
             }
+            if error:
+                payload_summary['error'] = error
 
         # Ensure correlation_id is set (default to request_id for REST requests)
         effective_correlation_id = correlation_id if correlation_id else request_id
@@ -403,7 +409,7 @@ def log_request(
         cursor.execute("""
             INSERT INTO tx_request_log
             (request_id, correlation_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             request_id,
             effective_correlation_id,
@@ -413,9 +419,10 @@ def log_request(
             action,
             priority,
             payload_hash,
-            json.dumps(payload_summary) if payload_summary else None
+            json.dumps(payload_summary) if payload_summary else None,
+            status
         ))
-        print(f"[LOG] Request {request_id[:8]} logged (correlation: {effective_correlation_id[:8]})")
+        print(f"[LOG] Request {request_id[:8]} logged as {status} (correlation: {effective_correlation_id[:8]})")
         conn.commit()
         cursor.close()
         conn.close()
@@ -972,27 +979,68 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         api_key = message.get('api_key')
                         target_worker = message.get('target_worker')
                         source = message.get('source', 'queue')
+                        request_id = message.get('request_id', str(uuid.uuid4()))
 
                         if not api_key:
-                            print(f"[REJECT] Missing api_key in request")
+                            print(f"[REJECT] Missing api_key in request {request_id}")
+                            log_request(
+                                request_id=request_id,
+                                api_key_id=None,
+                                source=source,
+                                target_worker=target_worker or 'unknown',
+                                action=action or 'process',
+                                payload=message,
+                                status='rejected',
+                                error='Missing api_key'
+                            )
                             ch.basic_ack(delivery_tag=method.delivery_tag)
                             return
 
                         if not target_worker:
-                            print(f"[REJECT] Missing target_worker in request")
+                            print(f"[REJECT] Missing target_worker in request {request_id}")
+                            log_request(
+                                request_id=request_id,
+                                api_key_id=None,
+                                source=source,
+                                target_worker='unknown',
+                                action=action or 'process',
+                                payload=message,
+                                status='rejected',
+                                error='Missing target_worker'
+                            )
                             ch.basic_ack(delivery_tag=method.delivery_tag)
                             return
 
                         # Validate API key
                         key_info = validate_api_key(api_key)
                         if not key_info:
-                            print(f"[REJECT] Invalid API key: {api_key[:8]}...")
+                            print(f"[REJECT] Invalid API key: {api_key[:8]}... for request {request_id}")
+                            log_request(
+                                request_id=request_id,
+                                api_key_id=None,
+                                source=source,
+                                target_worker=target_worker,
+                                action=action or 'process',
+                                payload=message,
+                                status='rejected',
+                                error=f'Invalid API key: {api_key[:8]}...'
+                            )
                             ch.basic_ack(delivery_tag=method.delivery_tag)
                             return
 
                         # Check permissions
                         if not check_permission(key_info, target_worker, action or 'process'):
-                            print(f"[REJECT] Permission denied for {target_worker}/{action}")
+                            print(f"[REJECT] Permission denied for {target_worker}/{action} request {request_id}")
+                            log_request(
+                                request_id=request_id,
+                                api_key_id=key_info.get('id'),
+                                source=source,
+                                target_worker=target_worker,
+                                action=action or 'process',
+                                payload=message,
+                                status='rejected',
+                                error=f'Permission denied for {target_worker}/{action}'
+                            )
                             ch.basic_ack(delivery_tag=method.delivery_tag)
                             return
 
