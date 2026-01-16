@@ -362,11 +362,14 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
                 if existing_count > 0:
                     if max_signatures > existing_count:
+                        # When requesting significantly more than we have, fetch NEWER transactions
+                        # (we likely have the oldest already, missing the newer ones)
+                        # Use until_sig to fetch from most recent down to our oldest
                         db_cursor.execute(oldest_query, query_params)
                         row = db_cursor.fetchone()
                         if row:
-                            before_sig = row[0]
-                            print(f"  Smart sync ({addr_type}): fetching MORE historical (have {existing_count}, want {max_signatures})")
+                            until_sig = row[0]
+                            print(f"  Smart sync ({addr_type}): fetching NEWER sigs (have {existing_count}, until oldest {until_sig[:20]}...)")
                     else:
                         db_cursor.execute(newest_query, query_params)
                         row = db_cursor.fetchone()
