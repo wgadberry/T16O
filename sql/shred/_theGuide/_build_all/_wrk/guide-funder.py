@@ -666,14 +666,15 @@ class AddressHistoryWorker:
         block_time = funding_info['block_time']
 
         # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
+        # Mark as init_tx_fetched=1 to prevent recursive funder lookups (we don't need to find the funder's funder)
         self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
         funder_row = self.cursor.fetchone()
         if funder_row:
             funder_id = funder_row['id']
         else:
             self.cursor.execute("""
-                INSERT INTO tx_address (address, address_type)
-                VALUES (%s, 'wallet')
+                INSERT INTO tx_address (address, address_type, init_tx_fetched)
+                VALUES (%s, 'wallet', 1)
             """, (funder,))
             funder_id = self.cursor.lastrowid
 
@@ -1248,13 +1249,14 @@ def main():
                 block_time = funding_info['block_time']
 
                 # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
+                # Mark as init_tx_fetched=1 to prevent recursive funder lookups
                 self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
                 funder_row = self.cursor.fetchone()
                 if funder_row:
                     funder_id = funder_row['id']
                 else:
                     self.cursor.execute("""
-                        INSERT INTO tx_address (address, address_type) VALUES (%s, 'wallet')
+                        INSERT INTO tx_address (address, address_type, init_tx_fetched) VALUES (%s, 'wallet', 1)
                     """, (funder,))
                     funder_id = self.cursor.lastrowid
 
