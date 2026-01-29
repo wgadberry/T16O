@@ -689,15 +689,19 @@ def process_request(
     payload: Dict,
     api_key: str,
     source: str = 'rest',
-    correlation_id: Optional[str] = None
+    correlation_id: Optional[str] = None,
+    request_id: Optional[str] = None
 ) -> Dict:
     """Process a request: validate, log, and route to worker
 
     Args:
         correlation_id: For REST requests, this is None and will be set to request_id.
                        For cascades, this is passed from parent to track the original request.
+        request_id: Optional request ID to use. If not provided, a new UUID is generated.
+                   This allows queue messages to preserve their original request_id.
     """
-    request_id = str(uuid.uuid4())
+    if not request_id:
+        request_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat() + 'Z'
 
     # For REST requests, correlation_id = request_id (start of chain)
@@ -980,6 +984,7 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         target_worker = message.get('target_worker')
                         source = message.get('source', 'queue')
                         request_id = message.get('request_id', str(uuid.uuid4()))
+                        correlation_id = message.get('correlation_id')  # May be None for initial requests
 
                         if not api_key:
                             print(f"[REJECT] Missing api_key in request {request_id}", flush=True)
@@ -1044,13 +1049,15 @@ def run_queue_consumer(ready_event: threading.Event = None):
                             ch.basic_ack(delivery_tag=method.delivery_tag)
                             return
 
-                        # Process the request
+                        # Process the request, preserving the original request_id and correlation_id
                         result = process_request(
                             worker=target_worker,
                             action=action or 'process',
                             payload=message,
                             api_key=api_key,
-                            source=source
+                            source=source,
+                            correlation_id=correlation_id,
+                            request_id=request_id
                         )
                         print(f"[REQUEST] {target_worker}/{action}: {result.get('request_id', 'unknown')}")
 
