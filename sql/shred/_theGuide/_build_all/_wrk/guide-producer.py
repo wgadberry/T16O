@@ -278,23 +278,77 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
         return False
 
 
-def process_gateway_request(message: dict, rpc_session, gateway_channel, db_cursor=None) -> dict:
-    """Process a request from the gateway with parallel cascade to decoder + detailer"""
+def process_multiple_addresses(
+    message: dict, addresses: list, rpc_session, gateway_channel, db_cursor,
+    request_id: str, correlation_id: str, priority: int,
+    max_signatures: int, request_before: str, request_until: str
+) -> dict:
+    """Process multiple addresses in a single request, aggregating results"""
+    print(f"[{request_id[:8]}] Processing {len(addresses)} addresses (correlation: {correlation_id[:8]})")
+
+    total_processed = 0
+    total_batches = 0
+    total_skipped = 0
+    total_errors = 0
+    address_results = []
+
+    for idx, address in enumerate(addresses, 1):
+        print(f"  [{idx}/{len(addresses)}] {address[:20]}...")
+
+        # Create a sub-message for single address processing
+        sub_message = {
+            'request_id': f"{request_id}-addr{idx}",
+            'correlation_id': correlation_id,
+            'priority': priority,
+            'batch': {
+                'filters': {
+                    'address': address,
+                    'before': request_before,
+                    'until': request_until
+                },
+                'size': max_signatures
+            }
+        }
+
+        result = process_single_address(sub_message, rpc_session, gateway_channel, db_cursor)
+
+        total_processed += result.get('processed', 0)
+        total_batches += result.get('batches', 0)
+        total_skipped += result.get('skipped', 0)
+        total_errors += result.get('errors', 0)
+
+        address_results.append({
+            'address': address,
+            'processed': result.get('processed', 0),
+            'batches': result.get('batches', 0)
+        })
+
+    return {
+        'processed': total_processed,
+        'batches': total_batches,
+        'skipped': total_skipped,
+        'errors': total_errors,
+        'addresses': len(addresses),
+        'address_results': address_results,
+        'cascade_to': []
+    }
+
+
+def process_single_address(message: dict, rpc_session, gateway_channel, db_cursor=None) -> dict:
+    """Process a single address - extracted from process_gateway_request for reuse"""
     request_id = message.get('request_id', 'unknown')
     correlation_id = message.get('correlation_id', request_id)
     batch = message.get('batch', {})
     priority = message.get('priority', 5)
 
     filters = batch.get('filters', {})
-    address = filters.get('mint_address') or filters.get('address')
+    address = filters.get('address') or filters.get('mint_address')
     max_signatures = batch.get('size', 100)
     request_before = filters.get('before')
     request_until = filters.get('until')
 
     if not address:
-        return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
-
-    print(f"[{request_id[:8]}] Processing request for {address[:20]}... (correlation: {correlation_id[:8]})")
+        return {'processed': 0, 'batches': 0, 'errors': 1, 'error': 'No address'}
 
     total_fetched = 0
     total_batched = 0
@@ -312,9 +366,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
             if addr_row:
                 addr_id, addr_type = addr_row
 
-                # Different queries for mint addresses vs wallet addresses
                 if addr_type == 'mint':
-                    # For mint addresses, query via tx_transfer.token_id
                     count_query = """
                         SELECT COUNT(DISTINCT t.id) FROM tx t
                         JOIN tx_transfer tr ON tr.tx_id = t.id
@@ -337,7 +389,6 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                     """
                     query_params = (addr_id,)
                 else:
-                    # For wallet addresses, query via signer/from/to
                     count_query = """
                         SELECT COUNT(DISTINCT t.id) FROM tx t
                         LEFT JOIN tx_guide g ON g.tx_id = t.id
@@ -362,20 +413,17 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
                 if existing_count > 0:
                     if max_signatures > existing_count:
-                        # When requesting significantly more than we have, fetch NEWER transactions
-                        # (we likely have the oldest already, missing the newer ones)
-                        # Use until_sig to fetch from most recent down to our oldest
                         db_cursor.execute(oldest_query, query_params)
                         row = db_cursor.fetchone()
                         if row:
                             until_sig = row[0]
-                            print(f"  Smart sync ({addr_type}): fetching NEWER sigs (have {existing_count}, until oldest {until_sig[:20]}...)")
+                            print(f"    Smart sync ({addr_type}): fetching NEWER sigs (have {existing_count})")
                     else:
                         db_cursor.execute(newest_query, query_params)
                         row = db_cursor.fetchone()
                         if row:
                             until_sig = row[0]
-                            print(f"  Smart sync ({addr_type}): fetching new sigs after {until_sig[:20]}...")
+                            print(f"    Smart sync ({addr_type}): fetching new sigs")
 
         signatures = []
         total_skipped = 0
@@ -393,7 +441,6 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 batch_to_send = signatures[:batch_size]
                 signatures = signatures[batch_size:]
 
-                # Filter out signatures that already exist in tx table
                 new_sigs, skipped = filter_existing_signatures(db_cursor, batch_to_send)
                 total_skipped += skipped
 
@@ -402,9 +449,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                     if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
                                                     new_sigs, total_batched, estimated_batches, priority):
                         skip_info = f", skipped {skipped}" if skipped > 0 else ""
-                        print(f"  [CASCADE] Batch {total_batched}/{estimated_batches} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
-                elif skipped > 0:
-                    print(f"  [SKIP] Batch skipped entirely ({skipped} already exist)")
+                        print(f"    [CASCADE] Batch {total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
 
         # Handle remaining signatures
         if signatures:
@@ -416,17 +461,72 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
                                                 new_sigs, total_batched, total_batched, priority):
                     skip_info = f", skipped {skipped}" if skipped > 0 else ""
-                    print(f"  [CASCADE] Batch {total_batched}/{total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
-            elif skipped > 0:
-                print(f"  [SKIP] Final batch skipped entirely ({skipped} already exist)")
+                    print(f"    [CASCADE] Batch {total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
 
-        skip_info = f", skipped {total_skipped} duplicates" if total_skipped > 0 else ""
-        print(f"  Fetched {total_fetched} signatures, cascaded {total_batched} batches{skip_info}")
-        return {'processed': total_fetched, 'batches': total_batched, 'skipped': total_skipped, 'errors': 0, 'cascade_to': []}
+        return {'processed': total_fetched, 'batches': total_batched, 'skipped': total_skipped, 'errors': 0}
 
     except Exception as e:
-        print(f"  [ERROR] {e}")
+        print(f"    [ERROR] {e}")
         return {'processed': total_fetched, 'batches': total_batched, 'errors': 1, 'error': str(e)}
+
+
+def process_gateway_request(message: dict, rpc_session, gateway_channel, db_cursor=None) -> dict:
+    """Process a request from the gateway with parallel cascade to decoder + detailer"""
+    request_id = message.get('request_id', 'unknown')
+    correlation_id = message.get('correlation_id', request_id)
+    batch = message.get('batch', {})
+    priority = message.get('priority', 5)
+
+    filters = batch.get('filters', {})
+    max_signatures = batch.get('size', 100)
+    request_before = filters.get('before')
+    request_until = filters.get('until')
+
+    # Support multiple address formats: _addresses (preprocessed), addresses (array), address/mint_address (string)
+    addresses = message.get('_addresses', [])
+    if not addresses:
+        addresses = filters.get('addresses', [])
+    if not addresses:
+        single_addr = filters.get('mint_address') or filters.get('address')
+        if single_addr:
+            addresses = [single_addr]
+
+    if not addresses:
+        return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
+
+    # Process multiple addresses if provided
+    if len(addresses) > 1:
+        return process_multiple_addresses(
+            message, addresses, rpc_session, gateway_channel, db_cursor,
+            request_id, correlation_id, priority, max_signatures, request_before, request_until
+        )
+
+    # Single address processing - delegate to process_single_address
+    address = addresses[0]
+    print(f"[{request_id[:8]}] Processing request for {address[:20]}... (correlation: {correlation_id[:8]})")
+
+    # Create a normalized message for process_single_address
+    single_message = {
+        'request_id': request_id,
+        'correlation_id': correlation_id,
+        'priority': priority,
+        'batch': {
+            'filters': {
+                'address': address,
+                'before': request_before,
+                'until': request_until
+            },
+            'size': max_signatures
+        }
+    }
+
+    result = process_single_address(single_message, rpc_session, gateway_channel, db_cursor)
+    result['cascade_to'] = []  # Add cascade_to for response compatibility
+
+    skip_info = f", skipped {result.get('skipped', 0)} duplicates" if result.get('skipped', 0) > 0 else ""
+    print(f"  Fetched {result.get('processed', 0)} signatures, cascaded {result.get('batches', 0)} batches{skip_info}")
+
+    return result
 
 
 def run_queue_consumer(prefetch: int = 1):
@@ -479,16 +579,25 @@ def run_queue_consumer(prefetch: int = 1):
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
 
-                    # Validate message format
+                    # Validate message format - support both singular and plural address formats
                     batch = message.get('batch', {})
                     filters = batch.get('filters', {})
-                    address = filters.get('mint_address') or filters.get('address')
 
-                    if not address:
+                    # Handle multiple formats: addresses (array), address (string), mint_address (string)
+                    addresses = filters.get('addresses', [])
+                    if not addresses:
+                        single_addr = filters.get('mint_address') or filters.get('address')
+                        if single_addr:
+                            addresses = [single_addr]
+
+                    if not addresses:
                         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address in batch.filters)")
-                        print(f"  Keys received: {list(message.keys())}")
+                        print(f"  Keys received: {list(message.keys())}, filters: {list(filters.keys())}")
                         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
                         return
+
+                    # Store addresses in message for processing
+                    message['_addresses'] = addresses
 
                     correlation_id = message.get('correlation_id', request_id)
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (corr: {correlation_id[:8]})")
