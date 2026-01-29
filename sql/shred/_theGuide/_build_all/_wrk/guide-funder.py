@@ -485,7 +485,10 @@ def run_queue_consumer(args):
             print(f"  Addresses: {len(addresses)}")
 
             # === USE PROVEN CLASS METHOD FOR CORE PROCESSING ===
-            result = worker.process_addresses(addresses)
+            # For explicit API calls (action='process'), force re-lookup even if previously attempted
+            # For cascades from other workers, respect init_tx_fetched to avoid duplicate work
+            force_lookup = (action == 'process')
+            result = worker.process_addresses(addresses, force=force_lookup)
 
             elapsed = time.time() - start_time
 
@@ -610,23 +613,35 @@ class AddressHistoryWorker:
         """, addresses)
         self.db_conn.commit()
 
-    def claim_addresses(self, addresses: List[str]) -> List[str]:
+    def claim_addresses(self, addresses: List[str], force: bool = False) -> List[str]:
         """
         Atomically claim addresses for processing (init_tx_fetched = 0 -> 2).
         Returns list of addresses successfully claimed.
         This prevents duplicate processing when multiple workers run.
+
+        Args:
+            addresses: List of addresses to claim
+            force: If True, claim even if already processed (init_tx_fetched=1)
         """
         if not addresses or self.dry_run:
             return addresses  # In dry-run, pretend we claimed all
 
         claimed = []
         for addr in addresses:
-            # Atomic claim: only succeeds if init_tx_fetched is still 0 (or NULL)
-            self.cursor.execute("""
-                UPDATE tx_address
-                SET init_tx_fetched = 2
-                WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
-            """, (addr,))
+            if force:
+                # Force mode: claim any address not currently being processed (init_tx_fetched != 2)
+                self.cursor.execute("""
+                    UPDATE tx_address
+                    SET init_tx_fetched = 2
+                    WHERE address = %s AND (init_tx_fetched != 2 OR init_tx_fetched IS NULL)
+                """, (addr,))
+            else:
+                # Normal mode: only claim if init_tx_fetched is still 0 (or NULL)
+                self.cursor.execute("""
+                    UPDATE tx_address
+                    SET init_tx_fetched = 2
+                    WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
+                """, (addr,))
             if self.cursor.rowcount > 0:
                 claimed.append(addr)
         self.db_conn.commit()
@@ -768,12 +783,16 @@ class AddressHistoryWorker:
 
         return self.solscan.find_funding_wallet(address, data)
 
-    def process_addresses(self, addresses: List[str]) -> Dict:
+    def process_addresses(self, addresses: List[str], force: bool = False) -> Dict:
         """
         Core processing logic for a list of addresses.
         Returns dict with: processed, claimed, funders_found, funders_not_found
 
         Used by both process_batch() and run_queue_consumer() to avoid code duplication.
+
+        Args:
+            addresses: List of addresses to process
+            force: If True, re-process addresses even if init_tx_fetched=1 (for explicit API calls)
         """
         result = {
             'processed': 0,
@@ -802,16 +821,17 @@ class AddressHistoryWorker:
         candidates = []
         for addr in addresses:
             info = address_info.get(addr, {})
-            if not info.get('init_tx_fetched'):
+            # If force=True, re-process even if already attempted (for explicit API calls)
+            if force or not info.get('init_tx_fetched'):
                 candidates.append(addr)
             else:
                 result['skipped'] += 1
 
-        print(f"  Candidates for lookup: {len(candidates)}")
+        print(f"  Candidates for lookup: {len(candidates)}{' (force=True)' if force else ''}")
         print(f"  Already processed/claimed: {result['skipped']}")
 
         # Step 4: Atomically claim addresses
-        claimed = self.claim_addresses(candidates)
+        claimed = self.claim_addresses(candidates, force=force)
         result['claimed'] = len(claimed)
         if len(claimed) < len(candidates):
             skipped_by_claim = len(candidates) - len(claimed)
