@@ -1359,9 +1359,10 @@ def run_response_consumer(ready_event: threading.Event = None):
                                     'action': 'cascade',
                                     'source_worker': worker,
                                     'source_request_id': request_id,
+                                    'correlation_id': correlation_id,
                                     'targets': targets,
                                     'batch': cascade_batch,
-                                    'api_key': 'internal_cascade_key',
+                                    'api_key': response.get('api_key') or 'internal_cascade_key',
                                     'priority': response.get('priority', 5)
                                 }
 

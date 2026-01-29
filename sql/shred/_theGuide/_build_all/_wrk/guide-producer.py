@@ -182,7 +182,7 @@ def setup_gateway_rabbitmq():
     return connection, channel
 
 
-def publish_response(channel, request_id: str, correlation_id: str, status: str, result: dict, priority: int = 5, error: str = None):
+def publish_response(channel, request_id: str, correlation_id: str, status: str, result: dict, priority: int = 5, api_key: str = None, error: str = None):
     """Publish response to gateway response queue"""
     response = {
         'request_id': request_id,
@@ -190,6 +190,7 @@ def publish_response(channel, request_id: str, correlation_id: str, status: str,
         'worker': 'producer',
         'status': status,
         'priority': priority,  # Pass through for cascade priority inheritance
+        'api_key': api_key,    # Pass through for cascade API key inheritance
         'timestamp': datetime.now().isoformat() + 'Z',
         'result': result
     }
@@ -602,12 +603,13 @@ def run_queue_consumer(prefetch: int = 1):
 
                     correlation_id = message.get('correlation_id', request_id)
                     priority = message.get('priority', 5)
+                    api_key = message.get('api_key')
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (corr: {correlation_id[:8]}, pri: {priority})")
 
                     db_cursor = ensure_db_connection()
                     result = process_gateway_request(message, rpc_session, gateway_channel, db_cursor)
                     status = 'completed' if result.get('errors', 0) == 0 else 'partial'
-                    publish_response(gateway_channel, request_id, correlation_id, status, result, priority=priority)
+                    publish_response(gateway_channel, request_id, correlation_id, status, result, priority=priority, api_key=api_key)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
                 except json.JSONDecodeError as e:
