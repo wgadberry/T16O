@@ -7,8 +7,10 @@ Features:
 - REST API endpoints for external clients
 - Queue-based inbound routing for internal cascades
 - API key authentication and validation
+- Per-API-key rate limiting (configurable requests/minute)
 - Request logging to tx_request_log
 - Worker request routing with priority support
+- REST API defaults to priority 8; CLI/queue defaults to 5
 
 Architecture:
     [External Clients] --REST API--> [Gateway] --> [Worker Queues]
@@ -47,7 +49,7 @@ import hashlib
 import threading
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 # Flask for REST API
 try:
@@ -296,6 +298,91 @@ def get_db_connection():
 API_KEY_CACHE = {}  # {api_key: {'data': {...}, 'timestamp': time.time()}}
 API_KEY_CACHE_TTL = 60  # seconds
 API_KEY_CACHE_LOCK = threading.Lock()
+
+# =============================================================================
+# Rate Limiting (sliding window per API key)
+# =============================================================================
+
+RATE_LIMIT_TRACKER = {}  # {api_key_id: {'requests': [(timestamp, count), ...], 'window_start': time}}
+RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_WINDOW_SECONDS = 60  # 1-minute sliding window
+
+# Default priority for REST API calls (higher than CLI default of 5)
+REST_API_DEFAULT_PRIORITY = 8
+
+
+def check_rate_limit(api_key_id: int, rate_limit: int) -> Tuple[bool, Optional[int]]:
+    """
+    Check if an API key has exceeded its rate limit.
+
+    Args:
+        api_key_id: The API key's database ID
+        rate_limit: Maximum requests allowed per window (0 = unlimited)
+
+    Returns:
+        Tuple of (allowed: bool, retry_after_seconds: Optional[int])
+        If allowed is False, retry_after_seconds indicates when to retry
+    """
+    if not rate_limit or rate_limit <= 0:
+        return True, None  # No rate limit configured
+
+    current_time = time.time()
+    window_start = current_time - RATE_LIMIT_WINDOW_SECONDS
+
+    with RATE_LIMIT_LOCK:
+        if api_key_id not in RATE_LIMIT_TRACKER:
+            RATE_LIMIT_TRACKER[api_key_id] = {'requests': []}
+
+        tracker = RATE_LIMIT_TRACKER[api_key_id]
+
+        # Remove requests outside the sliding window
+        tracker['requests'] = [ts for ts in tracker['requests'] if ts > window_start]
+
+        # Count requests in current window
+        request_count = len(tracker['requests'])
+
+        if request_count >= rate_limit:
+            # Rate limit exceeded - calculate retry time
+            if tracker['requests']:
+                oldest_in_window = min(tracker['requests'])
+                retry_after = int(oldest_in_window - window_start) + 1
+            else:
+                retry_after = RATE_LIMIT_WINDOW_SECONDS
+            return False, retry_after
+
+        # Allow request and record it
+        tracker['requests'].append(current_time)
+        return True, None
+
+
+def get_rate_limit_status(api_key_id: int, rate_limit: int) -> dict:
+    """Get current rate limit status for an API key"""
+    if not rate_limit or rate_limit <= 0:
+        return {'limited': False, 'limit': None, 'remaining': None, 'reset_seconds': None}
+
+    current_time = time.time()
+    window_start = current_time - RATE_LIMIT_WINDOW_SECONDS
+
+    with RATE_LIMIT_LOCK:
+        if api_key_id not in RATE_LIMIT_TRACKER:
+            return {'limited': False, 'limit': rate_limit, 'remaining': rate_limit, 'reset_seconds': 0}
+
+        tracker = RATE_LIMIT_TRACKER[api_key_id]
+        requests_in_window = [ts for ts in tracker['requests'] if ts > window_start]
+        remaining = max(0, rate_limit - len(requests_in_window))
+
+        if requests_in_window:
+            oldest = min(requests_in_window)
+            reset_seconds = int((oldest + RATE_LIMIT_WINDOW_SECONDS) - current_time)
+        else:
+            reset_seconds = 0
+
+        return {
+            'limited': remaining == 0,
+            'limit': rate_limit,
+            'remaining': remaining,
+            'reset_seconds': max(0, reset_seconds)
+        }
 
 
 def validate_api_key(api_key: str) -> Optional[Dict]:
@@ -881,11 +968,59 @@ def create_app():
             }), 404
 
         # Get API key from header
-        api_key = request.headers.get('X-API-Key', 'admin_master_key')
+        api_key = request.headers.get('X-API-Key')
+        if not api_key:
+            return jsonify({
+                'success': False,
+                'error': 'Missing X-API-Key header'
+            }), 401
+
+        # Validate API key first (needed for rate limit check)
+        key_info = validate_api_key(api_key)
+        if not key_info:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid or inactive API key'
+            }), 401
+
+        # Check rate limit
+        rate_limit = key_info.get('rate_limit', 0)
+        allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
+        if not allowed:
+            # Log rate-limited request
+            request_id = str(uuid.uuid4())
+            payload = request.get_json() or {}
+            log_request(
+                request_id=request_id,
+                api_key_id=key_info.get('id'),
+                source='rest',
+                target_worker=worker,
+                action=payload.get('action', 'process'),
+                priority=payload.get('priority', REST_API_DEFAULT_PRIORITY),
+                payload=payload,
+                status='rejected',
+                error=f'Rate limit exceeded ({rate_limit}/min)'
+            )
+            print(f"[RATE LIMIT] API key {key_info.get('name', 'unknown')} exceeded {rate_limit}/min for {worker}", flush=True)
+
+            response = jsonify({
+                'success': False,
+                'error': 'Rate limit exceeded',
+                'request_id': request_id,
+                'retry_after_seconds': retry_after,
+                'rate_limit': rate_limit,
+                'window_seconds': RATE_LIMIT_WINDOW_SECONDS
+            })
+            response.headers['Retry-After'] = str(retry_after)
+            return response, 429
 
         # Get request payload
         payload = request.get_json() or {}
         action = payload.get('action', 'process')
+
+        # Set priority: use payload value if provided, otherwise REST API default (8)
+        priority = payload.get('priority', REST_API_DEFAULT_PRIORITY)
+        payload['priority'] = priority
 
         result = process_request(
             worker=worker,
@@ -895,8 +1030,16 @@ def create_app():
             source='rest'
         )
 
+        # Add rate limit headers to successful responses
+        rate_status = get_rate_limit_status(key_info['id'], rate_limit)
+        response = jsonify(result)
+        if rate_limit:
+            response.headers['X-RateLimit-Limit'] = str(rate_limit)
+            response.headers['X-RateLimit-Remaining'] = str(rate_status['remaining'])
+            response.headers['X-RateLimit-Reset'] = str(rate_status['reset_seconds'])
+
         status_code = 200 if result['success'] else 400
-        return jsonify(result), status_code
+        return response, status_code
 
     @app.route('/api/status/<request_id>', methods=['GET'])
     def get_status(request_id):
