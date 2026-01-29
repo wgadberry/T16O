@@ -637,13 +637,20 @@ class AddressHistoryWorker:
         if not addresses:
             return
 
-        # Batch insert with INSERT IGNORE
-        values = [(addr, 'unknown') for addr in addresses]
-        self.cursor.executemany("""
-            INSERT IGNORE INTO tx_address (address, address_type)
-            VALUES (%s, %s)
-        """, values)
-        self.db_conn.commit()
+        # Check which addresses already exist to avoid consuming AUTO_INCREMENT IDs
+        placeholders = ','.join(['%s'] * len(addresses))
+        self.cursor.execute(f"SELECT address FROM tx_address WHERE address IN ({placeholders})", addresses)
+        existing = {row['address'] for row in self.cursor.fetchall()}
+
+        # Only insert addresses that don't exist
+        new_addresses = [addr for addr in addresses if addr not in existing]
+        if new_addresses:
+            values = [(addr, 'unknown') for addr in new_addresses]
+            self.cursor.executemany("""
+                INSERT INTO tx_address (address, address_type)
+                VALUES (%s, %s)
+            """, values)
+            self.db_conn.commit()
 
     def save_funding_info(self, target_address: str, funding_info: Dict):
         """
@@ -658,16 +665,17 @@ class AddressHistoryWorker:
         amount = funding_info['amount']
         block_time = funding_info['block_time']
 
-        # Ensure funder address exists
-        self.cursor.execute("""
-            INSERT IGNORE INTO tx_address (address, address_type)
-            VALUES (%s, 'wallet')
-        """, (funder,))
-
-        # Get funder address ID
+        # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
         self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
         funder_row = self.cursor.fetchone()
-        funder_id = funder_row['id'] if funder_row else None
+        if funder_row:
+            funder_id = funder_row['id']
+        else:
+            self.cursor.execute("""
+                INSERT INTO tx_address (address, address_type)
+                VALUES (%s, 'wallet')
+            """, (funder,))
+            funder_id = self.cursor.lastrowid
 
         # Get target address ID
         self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
@@ -1185,11 +1193,18 @@ def main():
             def ensure_addresses_exist(self, addresses):
                 if not addresses:
                     return
-                values = [(addr, 'unknown') for addr in addresses]
-                self.cursor.executemany("""
-                    INSERT IGNORE INTO tx_address (address, address_type) VALUES (%s, %s)
-                """, values)
-                self.db_conn.commit()
+                # Check which addresses already exist to avoid consuming AUTO_INCREMENT IDs
+                placeholders = ','.join(['%s'] * len(addresses))
+                self.cursor.execute(f"SELECT address FROM tx_address WHERE address IN ({placeholders})", addresses)
+                existing = {row['address'] for row in self.cursor.fetchall()}
+                # Only insert addresses that don't exist
+                new_addresses = [addr for addr in addresses if addr not in existing]
+                if new_addresses:
+                    values = [(addr, 'unknown') for addr in new_addresses]
+                    self.cursor.executemany("""
+                        INSERT INTO tx_address (address, address_type) VALUES (%s, %s)
+                    """, values)
+                    self.db_conn.commit()
 
             def mark_addresses_initialized(self, addresses):
                 if not addresses or self.dry_run:
@@ -1232,12 +1247,16 @@ def main():
                 amount = funding_info['amount']
                 block_time = funding_info['block_time']
 
-                self.cursor.execute("""
-                    INSERT IGNORE INTO tx_address (address, address_type) VALUES (%s, 'wallet')
-                """, (funder,))
+                # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
                 self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
                 funder_row = self.cursor.fetchone()
-                funder_id = funder_row['id'] if funder_row else None
+                if funder_row:
+                    funder_id = funder_row['id']
+                else:
+                    self.cursor.execute("""
+                        INSERT INTO tx_address (address, address_type) VALUES (%s, 'wallet')
+                    """, (funder,))
+                    funder_id = self.cursor.lastrowid
 
                 self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
                 target_row = self.cursor.fetchone()
