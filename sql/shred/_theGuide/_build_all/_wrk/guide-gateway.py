@@ -907,6 +907,21 @@ def create_app():
     """Create Flask application"""
     app = Flask(__name__)
 
+    # Enable CORS for all routes (allows browser-based API testing)
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+        response.headers['Access-Control-Expose-Headers'] = 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After'
+        return response
+
+    # Handle preflight OPTIONS requests
+    @app.route('/<path:path>', methods=['OPTIONS'])
+    @app.route('/', methods=['OPTIONS'])
+    def options_handler(path=''):
+        return '', 204
+
     @app.route('/api/health', methods=['GET'])
     def health():
         """Health check endpoint"""
