@@ -1093,6 +1093,8 @@ def main():
                         help='Query DB for addresses with funded_by_address_id=NULL and init_tx_fetched=0, then process them.')
     parser.add_argument('--limit', type=int, default=0,
                         help='Max addresses to process in --sync-db-missing mode (0 = unlimited)')
+    parser.add_argument('--interval', type=int, default=0,
+                        help='Polling interval in seconds for --sync-db-missing mode. If set, daemon will sleep and retry when no work found (0 = exit when done)')
     parser.add_argument('--queue-consumer', action='store_true',
                         help='Run as gateway queue consumer (uses t16o_mq vhost)')
 
