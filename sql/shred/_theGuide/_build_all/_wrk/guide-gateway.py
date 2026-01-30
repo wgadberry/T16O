@@ -725,6 +725,9 @@ def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
         ensure_queues_exist(channel)
 
         queue_name = WORKER_REGISTRY[worker]['request_queue']
+        # Extract correlation_id from message for RabbitMQ header
+        correlation_id = message.get('correlation_id')
+
         channel.basic_publish(
             exchange='',
             routing_key=queue_name,
@@ -732,7 +735,8 @@ def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
             properties=pika.BasicProperties(
                 delivery_mode=2,  # persistent
                 content_type='application/json',
-                priority=priority
+                priority=priority,
+                correlation_id=correlation_id  # RabbitMQ standard property for tracing
             )
         )
         conn.close()
@@ -749,6 +753,9 @@ def publish_to_gateway(message: Dict, priority: int = 5) -> bool:
         channel = conn.channel()
         ensure_queues_exist(channel)
 
+        # Extract correlation_id from message for RabbitMQ header
+        correlation_id = message.get('correlation_id')
+
         channel.basic_publish(
             exchange='',
             routing_key=GATEWAY_REQUEST_QUEUE,
@@ -756,7 +763,8 @@ def publish_to_gateway(message: Dict, priority: int = 5) -> bool:
             properties=pika.BasicProperties(
                 delivery_mode=2,
                 content_type='application/json',
-                priority=priority
+                priority=priority,
+                correlation_id=correlation_id  # RabbitMQ standard property for tracing
             )
         )
         conn.close()
@@ -912,7 +920,7 @@ def create_app():
     def add_cors_headers(response):
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-Correlation-Id'
         response.headers['Access-Control-Expose-Headers'] = 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After'
         return response
 
@@ -998,6 +1006,14 @@ def create_app():
                 'error': 'Invalid or inactive API key'
             }), 401
 
+        # Get correlation ID from header (required for request tracing)
+        correlation_id = request.headers.get('X-Correlation-Id')
+        if not correlation_id:
+            return jsonify({
+                'success': False,
+                'error': 'Missing X-Correlation-Id header'
+            }), 400
+
         # Check rate limit
         rate_limit = key_info.get('rate_limit', 0)
         allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
@@ -1014,7 +1030,8 @@ def create_app():
                 priority=payload.get('priority', REST_API_DEFAULT_PRIORITY),
                 payload=payload,
                 status='rejected',
-                error=f'Rate limit exceeded ({rate_limit}/min)'
+                error=f'Rate limit exceeded ({rate_limit}/min)',
+                correlation_id=correlation_id
             )
             print(f"[RATE LIMIT] API key {key_info.get('name', 'unknown')} exceeded {rate_limit}/min for {worker}", flush=True)
 
@@ -1022,6 +1039,7 @@ def create_app():
                 'success': False,
                 'error': 'Rate limit exceeded',
                 'request_id': request_id,
+                'correlation_id': correlation_id,
                 'retry_after_seconds': retry_after,
                 'rate_limit': rate_limit,
                 'window_seconds': RATE_LIMIT_WINDOW_SECONDS
@@ -1042,7 +1060,8 @@ def create_app():
             action=action,
             payload=payload,
             api_key=api_key,
-            source='rest'
+            source='rest',
+            correlation_id=correlation_id
         )
 
         # Add rate limit headers to successful responses

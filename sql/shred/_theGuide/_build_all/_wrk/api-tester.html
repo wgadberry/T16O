@@ -187,6 +187,11 @@
                     <label>API Key</label>
                     <input type="text" id="apiKey" value="admin_master_key">
                 </div>
+                <div class="col">
+                    <label>Correlation ID (required)</label>
+                    <input type="text" id="correlationId" value="" placeholder="your-session-id-123">
+                </div>
+                <button class="btn btn-secondary" style="align-self: flex-end; margin-bottom: 0;" onclick="generateCorrelationId()">Generate</button>
             </div>
 
             <div class="row">
@@ -334,10 +339,16 @@
             document.getElementById('responseHeaders').innerHTML = '';
         }
 
+        function generateCorrelationId() {
+            const id = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            document.getElementById('correlationId').value = id;
+        }
+
         async function sendRequest() {
             const method = document.getElementById('method').value;
             const url = document.getElementById('url').value;
             const apiKey = document.getElementById('apiKey').value;
+            const correlationId = document.getElementById('correlationId').value;
             const body = document.getElementById('body').value;
 
             const responseEl = document.getElementById('response');
@@ -356,6 +367,9 @@
                 };
                 if (apiKey) {
                     headers['X-API-Key'] = apiKey;
+                }
+                if (correlationId) {
+                    headers['X-Correlation-Id'] = correlationId;
                 }
 
                 const options = {
