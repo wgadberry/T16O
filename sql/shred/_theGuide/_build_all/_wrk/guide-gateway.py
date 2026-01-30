@@ -923,6 +923,7 @@ def process_request(
         'correlation_id': effective_correlation_id,  # Pass through cascade chain
         'request_log_id': request_log_id,  # For billing - links tx records to gateway request
         'api_key': api_key,
+        'api_key_id': key_info.get('id'),  # For billing tracking through cascade
         'priority': priority,
         'timestamp': timestamp,
         'action': action,
