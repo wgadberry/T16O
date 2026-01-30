@@ -7,7 +7,8 @@ DELIMITER ;;
 DROP PROCEDURE IF EXISTS `sp_tx_prepopulate_lookups`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_prepopulate_lookups`(
-    IN p_txs_json JSON
+    IN p_txs_json JSON,
+    IN p_request_log_id BIGINT UNSIGNED
 )
 BEGIN
     -- =========================================================================
@@ -318,6 +319,152 @@ BEGIN
     FROM tx_address a
     WHERE a.address_type = 'pool'
       AND NOT EXISTS (SELECT 1 FROM tx_pool p WHERE p.pool_address_id = a.id);
+
+    -- =========================================================================
+    -- PHASE 1f: Tag newly created addresses with request_log_id for billing
+    -- Tags ALL address types (wallet, mint, pool, ata, program, vault)
+    -- Only sets on addresses that don't have a request_log_id yet (first request wins)
+    -- =========================================================================
+    IF p_request_log_id IS NOT NULL THEN
+        UPDATE tx_address
+        SET request_log_id = p_request_log_id
+        WHERE request_log_id IS NULL
+          AND address IN (
+            SELECT DISTINCT addr FROM (
+                -- Wallets from one_line_summary
+                SELECT t.signer_account AS addr FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
+                    signer_account VARCHAR(44) PATH '$.one_line_summary.data.account'
+                )) t WHERE t.signer_account IS NOT NULL AND t.signer_account != 'null'
+                UNION
+                SELECT t.fallback_signer FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
+                    fallback_signer VARCHAR(44) PATH '$.transfers[0].source_owner'
+                )) t WHERE t.fallback_signer IS NOT NULL AND t.fallback_signer != 'null'
+                UNION
+                -- Mints from one_line_summary
+                SELECT t.token_1 FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
+                    token_1 VARCHAR(44) PATH '$.one_line_summary.data.token_1'
+                )) t WHERE t.token_1 IS NOT NULL AND t.token_1 != 'null'
+                UNION
+                SELECT t.token_2 FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
+                    token_2 VARCHAR(44) PATH '$.one_line_summary.data.token_2'
+                )) t WHERE t.token_2 IS NOT NULL AND t.token_2 != 'null'
+                UNION
+                SELECT t.fee_token FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
+                    fee_token VARCHAR(44) PATH '$.one_line_summary.data.fee_token'
+                )) t WHERE t.fee_token IS NOT NULL AND t.fee_token != 'null'
+                UNION
+                -- Programs from one_line_summary
+                SELECT t.agg_program FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
+                    agg_program VARCHAR(44) PATH '$.one_line_summary.program_id'
+                )) t WHERE t.agg_program IS NOT NULL AND t.agg_program != 'null'
+                UNION
+                -- ATAs and wallets from transfers
+                SELECT t.source FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    source VARCHAR(44) PATH '$.source'
+                )) t WHERE t.source IS NOT NULL AND t.source != 'null'
+                UNION
+                SELECT t.destination FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    destination VARCHAR(44) PATH '$.destination'
+                )) t WHERE t.destination IS NOT NULL AND t.destination != 'null'
+                UNION
+                SELECT t.source_owner FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    source_owner VARCHAR(44) PATH '$.source_owner'
+                )) t WHERE t.source_owner IS NOT NULL AND t.source_owner != 'null'
+                UNION
+                SELECT t.destination_owner FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    destination_owner VARCHAR(44) PATH '$.destination_owner'
+                )) t WHERE t.destination_owner IS NOT NULL AND t.destination_owner != 'null'
+                UNION
+                -- Mints from transfers
+                SELECT t.token_address FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    token_address VARCHAR(44) PATH '$.token_address'
+                )) t WHERE t.token_address IS NOT NULL AND t.token_address != 'null'
+                UNION
+                SELECT t.base_token FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    base_token VARCHAR(44) PATH '$.base_value.token_address'
+                )) t WHERE t.base_token IS NOT NULL AND t.base_token != 'null'
+                UNION
+                -- Programs from transfers
+                SELECT t.program_id FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    program_id VARCHAR(44) PATH '$.program_id'
+                )) t WHERE t.program_id IS NOT NULL AND t.program_id != 'null'
+                UNION
+                SELECT t.outer_program_id FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
+                    outer_program_id VARCHAR(44) PATH '$.outer_program_id'
+                )) t WHERE t.outer_program_id IS NOT NULL AND t.outer_program_id != 'null'
+                UNION
+                -- Programs from activities
+                SELECT a.program_id FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    program_id VARCHAR(44) PATH '$.program_id'
+                )) a WHERE a.program_id IS NOT NULL AND a.program_id != 'null'
+                UNION
+                SELECT a.outer_program_id FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    outer_program_id VARCHAR(44) PATH '$.outer_program_id'
+                )) a WHERE a.outer_program_id IS NOT NULL AND a.outer_program_id != 'null'
+                UNION
+                -- Wallets from activities
+                SELECT a.account FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    account VARCHAR(44) PATH '$.data.account'
+                )) a WHERE a.account IS NOT NULL AND a.account != 'null'
+                UNION
+                SELECT a.source FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    source VARCHAR(44) PATH '$.data.source'
+                )) a WHERE a.source IS NOT NULL AND a.source != 'null'
+                UNION
+                SELECT a.owner_1 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    owner_1 VARCHAR(44) PATH '$.data.owner_1'
+                )) a WHERE a.owner_1 IS NOT NULL AND a.owner_1 != 'null'
+                UNION
+                SELECT a.owner_2 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    owner_2 VARCHAR(44) PATH '$.data.owner_2'
+                )) a WHERE a.owner_2 IS NOT NULL AND a.owner_2 != 'null'
+                UNION
+                -- ATAs from activities
+                SELECT a.new_account FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    new_account VARCHAR(44) PATH '$.data.new_account'
+                )) a WHERE a.new_account IS NOT NULL AND a.new_account != 'null'
+                UNION
+                SELECT a.init_account FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    init_account VARCHAR(44) PATH '$.data.init_account'
+                )) a WHERE a.init_account IS NOT NULL AND a.init_account != 'null'
+                UNION
+                -- Mints from activities
+                SELECT a.token_1 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    token_1 VARCHAR(44) PATH '$.data.token_1'
+                )) a WHERE a.token_1 IS NOT NULL AND a.token_1 != 'null'
+                UNION
+                SELECT a.token_2 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    token_2 VARCHAR(44) PATH '$.data.token_2'
+                )) a WHERE a.token_2 IS NOT NULL AND a.token_2 != 'null'
+                UNION
+                SELECT a.fee_token FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    fee_token VARCHAR(44) PATH '$.data.fee_token'
+                )) a WHERE a.fee_token IS NOT NULL AND a.fee_token != 'null'
+                UNION
+                -- Pools from activities
+                SELECT a.amm_id FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    amm_id VARCHAR(44) PATH '$.data.amm_id'
+                )) a WHERE a.amm_id IS NOT NULL AND a.amm_id != 'null'
+                UNION
+                -- Vaults from activities
+                SELECT a.token_account_1_1 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1'
+                )) a WHERE a.token_account_1_1 IS NOT NULL AND a.token_account_1_1 != 'null'
+                UNION
+                SELECT a.token_account_1_2 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    token_account_1_2 VARCHAR(44) PATH '$.data.token_account_1_2'
+                )) a WHERE a.token_account_1_2 IS NOT NULL AND a.token_account_1_2 != 'null'
+                UNION
+                SELECT a.token_account_2_1 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    token_account_2_1 VARCHAR(44) PATH '$.data.token_account_2_1'
+                )) a WHERE a.token_account_2_1 IS NOT NULL AND a.token_account_2_1 != 'null'
+                UNION
+                SELECT a.token_account_2_2 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+                    token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2'
+                )) a WHERE a.token_account_2_2 IS NOT NULL AND a.token_account_2_2 != 'null'
+            ) AS all_addresses
+          );
+    END IF;
 
 END;;
 

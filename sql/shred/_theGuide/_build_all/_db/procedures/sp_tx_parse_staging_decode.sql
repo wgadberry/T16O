@@ -43,7 +43,7 @@ BEGIN
     -- =========================================================================
     -- PHASE 1: Pre-populate all lookup tables (addresses, tokens, programs, pools)
     -- =========================================================================
-    CALL sp_tx_prepopulate_lookups(v_txs_json);
+    CALL sp_tx_prepopulate_lookups(v_txs_json, v_request_log_id);
 
     -- =========================================================================
     -- PHASE 2: Bulk insert all transactions

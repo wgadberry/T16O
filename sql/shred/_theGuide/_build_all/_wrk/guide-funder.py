@@ -362,6 +362,46 @@ def publish_response(channel, request_id: str, status: str, result: Dict,
 # Daemon Request Logging (for billing)
 # =============================================================================
 
+def log_worker_request(cursor, conn, request_id: str, correlation_id: str,
+                       worker: str, action: str, batch_num: int = 0,
+                       batch_size: int = 0, priority: int = 5,
+                       api_key_id: int = None) -> int:
+    """
+    Create a request_log entry for worker activity.
+    Returns the request_log.id for tracking (existing or newly created).
+    """
+    # Check if record already exists (for retry scenarios)
+    if api_key_id is not None:
+        cursor.execute("""
+            SELECT id FROM tx_request_log
+            WHERE request_id = %s AND target_worker = %s AND api_key_id = %s
+        """, (request_id, worker, api_key_id))
+    else:
+        cursor.execute("""
+            SELECT id FROM tx_request_log
+            WHERE request_id = %s AND target_worker = %s AND api_key_id IS NULL
+        """, (request_id, worker))
+
+    existing = cursor.fetchone()
+    if existing:
+        return existing[0] if isinstance(existing, tuple) else existing['id']
+
+    # Insert new record
+    payload_summary = json.dumps({
+        'batch_num': batch_num,
+        'batch_size': batch_size,
+        'source': 'queue'
+    })
+
+    cursor.execute("""
+        INSERT INTO tx_request_log
+        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, status, payload_summary)
+        VALUES (%s, %s, %s, 'queue', %s, %s, %s, 'processing', %s)
+    """, (request_id, correlation_id, api_key_id, worker, action, priority, payload_summary))
+    conn.commit()
+    return cursor.lastrowid
+
+
 def log_daemon_request(cursor, db_conn, worker: str, action: str, batch_size: int = 0) -> int:
     """
     Create a request_log entry for daemon work cycle.
@@ -495,17 +535,28 @@ def run_queue_consumer(args):
             request = json.loads(body)
             request_id = request.get('request_id', str(uuid.uuid4()))
             correlation_id = request.get('correlation_id', request_id)
-            request_log_id = request.get('request_log_id')  # For billing linkage
+            api_key_id = request.get('api_key_id')  # For billing tracking
             action = request.get('action', 'process')
+            priority = request.get('priority', 5)
             batch = request.get('batch', {})
 
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]}...")
-            print(f"  Action: {action}, request_log_id: {request_log_id}")
+            print(f"  Action: {action}, api_key_id: {api_key_id}")
 
             # Ensure DB connection is alive
             worker, cursor = ensure_db_connection(channel)
             if not worker:
                 raise Exception("Database connection unavailable")
+
+            # Log this worker's request for billing tracking
+            # This creates or retrieves the funder's own request_log entry (not gateway's)
+            funder_log_id = log_worker_request(
+                cursor, db_state['conn'],
+                request_id, correlation_id, 'funder', action,
+                batch_size=len(batch.get('addresses', []) or batch.get('funder_addresses', [])),
+                priority=priority, api_key_id=api_key_id
+            )
+            print(f"  Funder request_log_id: {funder_log_id}")
 
             # Extract addresses from batch
             # Check multiple keys: 'addresses', 'funder_addresses' (from shredder cascade), or 'address_ids'
@@ -524,7 +575,7 @@ def run_queue_consumer(args):
                     'processed': 0,
                     'funders_found': 0,
                     'funders_not_found': 0
-                }, correlation_id, request_log_id)
+                }, correlation_id, funder_log_id)
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
@@ -534,7 +585,7 @@ def run_queue_consumer(args):
             # For explicit API calls (action='process'), force re-lookup even if previously attempted
             # For cascades from other workers, respect init_tx_fetched to avoid duplicate work
             force_lookup = (action == 'process')
-            result = worker.process_addresses(addresses, force=force_lookup, request_log_id=request_log_id)
+            result = worker.process_addresses(addresses, force=force_lookup, request_log_id=funder_log_id)
 
             elapsed = time.time() - start_time
 
@@ -551,7 +602,7 @@ def run_queue_consumer(args):
                     'elapsed_seconds': round(elapsed, 2)
                 }
 
-            publish_response(ch, request_id, status, response_data, correlation_id, request_log_id)
+            publish_response(ch, request_id, status, response_data, correlation_id, funder_log_id)
 
             print(f"  Completed in {elapsed:.1f}s: {result['funders_found']} found, {result['funders_not_found']} not found")
             ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -568,8 +619,8 @@ def run_queue_consumer(args):
 
             req_id = request.get('request_id', 'unknown') if 'request' in dir() else 'unknown'
             corr_id = request.get('correlation_id', req_id) if 'request' in dir() else req_id
-            req_log_id = request.get('request_log_id') if 'request' in dir() else None
-            publish_response(ch, req_id, 'failed', {'error': str(e)}, corr_id, req_log_id)
+            funder_id = funder_log_id if 'funder_log_id' in dir() else None
+            publish_response(ch, req_id, 'failed', {'error': str(e)}, corr_id, funder_id)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     channel.basic_consume(
@@ -890,6 +941,18 @@ class AddressHistoryWorker:
         if self.dry_run:
             print(f"  DRY RUN - would lookup funding for {len(claimed)} addresses")
             return result
+
+        # Step 4b: For explicit API calls, update addresses to use this request's request_log_id
+        # This ensures the client who requested funder processing is billed, not the original creator
+        if force and request_log_id and claimed:
+            placeholders = ','.join(['%s'] * len(claimed))
+            self.cursor.execute(f"""
+                UPDATE tx_address
+                SET request_log_id = %s
+                WHERE address IN ({placeholders})
+            """, [request_log_id] + claimed)
+            self.db_conn.commit()
+            print(f"  Updated {self.cursor.rowcount} addresses with request_log_id={request_log_id}")
 
         # Step 5: Find funders for each address
         initialized_addresses = []
@@ -1361,16 +1424,18 @@ def main():
                 Fetch addresses from DB where funded_by_address_id IS NULL
                 and init_tx_fetched = 0 (or NULL).
                 Orders by id ASC to process oldest addresses first (backfill mode).
+                Returns list of dicts with 'address' and 'request_log_id' for billing.
                 """
                 query = """
-                    SELECT address FROM tx_address
+                    SELECT address, request_log_id FROM tx_address
                     WHERE funded_by_address_id IS NULL
                       AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
                     ORDER BY id ASC
                     LIMIT %s
                 """
                 self.cursor.execute(query, (limit,))
-                return [row['address'] for row in self.cursor.fetchall()]
+                return [{'address': row['address'], 'request_log_id': row['request_log_id']}
+                        for row in self.cursor.fetchall()]
 
         worker = FileWorker(db_conn, solscan, args.tx_limit, args.dry_run, args.api_delay, args.batch_delay)
 
@@ -1395,8 +1460,8 @@ def main():
 
                 # Filter out known programs and skip prefixes
                 original_count = len(candidates)
-                skipped_addrs = [a for a in candidates if should_skip_address(a)]
-                candidates = [a for a in candidates if not should_skip_address(a)]
+                skipped_addrs = [c['address'] for c in candidates if should_skip_address(c['address'])]
+                candidates = [c for c in candidates if not should_skip_address(c['address'])]
 
                 # Mark skipped addresses so they don't appear again
                 if skipped_addrs and not args.dry_run:
@@ -1411,10 +1476,14 @@ def main():
                 print(f"\n{'='*60}")
                 print(f"Batch {batch_num}: Found {len(candidates)} candidates")
 
+                # Build address-to-request_log_id mapping for billing attribution
+                addr_to_request_log = {c['address']: c['request_log_id'] for c in candidates}
+                candidate_addresses = list(addr_to_request_log.keys())
+
                 # Atomically claim addresses
-                addresses_to_process = worker.claim_addresses(candidates)
-                if len(addresses_to_process) < len(candidates):
-                    skipped = len(candidates) - len(addresses_to_process)
+                addresses_to_process = worker.claim_addresses(candidate_addresses)
+                if len(addresses_to_process) < len(candidate_addresses):
+                    skipped = len(candidate_addresses) - len(addresses_to_process)
                     print(f"  Claimed: {len(addresses_to_process)} (skipped {skipped} claimed by others)")
 
                 if not addresses_to_process:
@@ -1431,23 +1500,32 @@ def main():
                     # In dry-run, simulate progress
                     worker.addresses_processed += len(addresses_to_process)
                 else:
-                    # Create daemon request_log entry for this batch (for billing)
-                    request_log_id = log_daemon_request(
-                        worker.cursor, worker.db_conn,
-                        worker='funder', action='discover',
-                        batch_size=len(addresses_to_process)
-                    )
+                    # Group addresses by their originating request_log_id for billing attribution
+                    # Addresses with request_log_id are billed to the original API request
+                    # Addresses without (legacy) are billed to a generic daemon request
+                    addrs_with_request = [(a, addr_to_request_log[a]) for a in addresses_to_process if addr_to_request_log.get(a)]
+                    addrs_without_request = [a for a in addresses_to_process if not addr_to_request_log.get(a)]
+
+                    # Create daemon request_log entry only for legacy addresses without original request
+                    daemon_request_log_id = None
+                    if addrs_without_request:
+                        daemon_request_log_id = log_daemon_request(
+                            worker.cursor, worker.db_conn,
+                            worker='funder', action='discover',
+                            batch_size=len(addrs_without_request)
+                        )
 
                     initialized = []
                     batch_funders_found = 0
                     batch_funders_not_found = 0
 
-                    for j, addr in enumerate(addresses_to_process):
-                        print(f"  [{j + 1}/{len(addresses_to_process)}] {addr[:20]}...", end='')
+                    # Process addresses with original request_log_id (billed to original API request)
+                    for j, (addr, orig_request_log_id) in enumerate(addrs_with_request):
+                        print(f"  [{j + 1}/{len(addresses_to_process)}] {addr[:20]}... (req:{orig_request_log_id})", end='')
                         funding_info = worker.find_funder_for_address(addr)
                         if funding_info:
                             print(f" -> funded by {funding_info['funder'][:16]}...")
-                            worker.save_funding_info(addr, funding_info, request_log_id)
+                            worker.save_funding_info(addr, funding_info, orig_request_log_id)
                             worker.funders_found += 1
                             batch_funders_found += 1
                         else:
@@ -1462,16 +1540,36 @@ def main():
                             print(f"\n  Reached limit of {args.limit} addresses")
                             break
 
-                    # Update daemon request_log entry with results
-                    update_daemon_request(
-                        worker.cursor, worker.db_conn, request_log_id,
-                        status='completed',
-                        result={
-                            'processed': len(initialized),
-                            'funders_found': batch_funders_found,
-                            'funders_not_found': batch_funders_not_found
-                        }
-                    )
+                    # Process legacy addresses without original request_log_id (billed to daemon)
+                    start_idx = len(addrs_with_request)
+                    for j, addr in enumerate(addrs_without_request):
+                        if worker.addresses_processed >= total_limit:
+                            break
+                        print(f"  [{start_idx + j + 1}/{len(addresses_to_process)}] {addr[:20]}... (daemon)", end='')
+                        funding_info = worker.find_funder_for_address(addr)
+                        if funding_info:
+                            print(f" -> funded by {funding_info['funder'][:16]}...")
+                            worker.save_funding_info(addr, funding_info, daemon_request_log_id)
+                            worker.funders_found += 1
+                            batch_funders_found += 1
+                        else:
+                            print(f" -> no funder found")
+                            worker.funders_not_found += 1
+                            batch_funders_not_found += 1
+                        initialized.append(addr)
+                        worker.addresses_processed += 1
+
+                    # Update daemon request_log entry with results (only if we had legacy addresses)
+                    if daemon_request_log_id:
+                        update_daemon_request(
+                            worker.cursor, worker.db_conn, daemon_request_log_id,
+                            status='completed',
+                            result={
+                                'processed': len(addrs_without_request),
+                                'funders_found': batch_funders_found,
+                                'funders_not_found': batch_funders_not_found
+                            }
+                        )
 
                     worker.mark_addresses_initialized(initialized)
 

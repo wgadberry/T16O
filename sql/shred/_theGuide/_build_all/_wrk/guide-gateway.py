@@ -496,6 +496,26 @@ def log_request(
         # Ensure correlation_id is set (default to request_id for REST requests)
         effective_correlation_id = correlation_id if correlation_id else request_id
 
+        # Check if request already exists (for idempotent handling of retries)
+        if api_key_id is not None:
+            cursor.execute("""
+                SELECT id, status, result FROM tx_request_log
+                WHERE request_id = %s AND target_worker = %s AND api_key_id = %s
+            """, (request_id, target_worker, api_key_id))
+        else:
+            cursor.execute("""
+                SELECT id, status, result FROM tx_request_log
+                WHERE request_id = %s AND target_worker = %s AND api_key_id IS NULL
+            """, (request_id, target_worker))
+
+        existing = cursor.fetchone()
+        if existing:
+            print(f"[LOG] Request {request_id[:8]} already exists (id: {existing['id']}, status: {existing['status']})", flush=True)
+            cursor.close()
+            conn.close()
+            # Return negative ID to indicate duplicate (caller can check and handle appropriately)
+            return -existing['id']
+
         cursor.execute("""
             INSERT INTO tx_request_log
             (request_id, correlation_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
@@ -1189,6 +1209,17 @@ def create_app():
                 'request_id': request_id,
                 'correlation_id': correlation_id
             }), 500
+
+        # Handle duplicate request_id (negative value indicates existing record)
+        if request_log_id < 0:
+            existing_id = -request_log_id
+            return jsonify({
+                'success': False,
+                'error': f'Request ID already exists (use a unique request_id)',
+                'request_id': request_id,
+                'correlation_id': correlation_id,
+                'existing_log_id': existing_id
+            }), 409  # 409 Conflict
 
         result = process_request(
             worker=worker,
