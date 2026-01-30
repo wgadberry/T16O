@@ -75,6 +75,43 @@ TX_STATE_DECODED = 8  # Will be fetched from config table
 
 
 # =============================================================================
+# Request Logging (for billing tracking)
+# =============================================================================
+
+def log_worker_request(cursor, conn, request_id: str, correlation_id: str,
+                       worker: str, action: str, batch_num: int = 0,
+                       batch_size: int = 0, priority: int = 5) -> int:
+    """
+    Create a request_log entry for worker activity.
+    Returns the request_log.id for tracking.
+    """
+    payload_summary = json.dumps({
+        'batch_num': batch_num,
+        'batch_size': batch_size,
+        'source': 'queue'
+    })
+
+    cursor.execute("""
+        INSERT INTO tx_request_log
+        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, status, payload_summary)
+        VALUES (%s, %s, NULL, 'queue', %s, %s, %s, 'processing', %s)
+    """, (request_id, correlation_id, worker, action, priority, payload_summary))
+    conn.commit()
+    return cursor.lastrowid
+
+
+def update_worker_request(cursor, conn, log_id: int, status: str, result: dict = None):
+    """Update worker request_log entry with completion status and results."""
+    result_summary = json.dumps(result) if result else None
+    cursor.execute("""
+        UPDATE tx_request_log
+        SET status = %s, result_summary = %s, completed_at = NOW()
+        WHERE id = %s
+    """, (status, result_summary, log_id))
+    conn.commit()
+
+
+# =============================================================================
 # Solscan API
 # =============================================================================
 
@@ -319,6 +356,7 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
             print(f"[OK] Connected, waiting for requests...")
 
             def callback(ch, method, properties, body):
+                worker_log_id = None
                 try:
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
@@ -338,8 +376,17 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                     signatures = batch_data.get('signatures', [])
                     batch_num = batch_data.get('batch_num', 0)
 
+                    # Log this worker's request for billing tracking
+                    worker_log_id = log_worker_request(
+                        processor.cursor, processor.db_conn,
+                        request_id, correlation_id, 'decoder', 'decode',
+                        batch_num, len(signatures), priority
+                    )
+
                     if not signatures:
                         print(f"  No signatures in batch")
+                        update_worker_request(processor.cursor, processor.db_conn, worker_log_id, 'completed',
+                                            {'processed': 0, 'message': 'No signatures provided'})
                         publish_response(gateway_channel, request_id, correlation_id, 'completed',
                                        {'processed': 0, 'message': 'No signatures provided'}, batch_num)
                         ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -364,6 +411,9 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                             'skipped': result['skipped']
                         }
 
+                    # Update worker request_log with results
+                    update_worker_request(processor.cursor, processor.db_conn, worker_log_id, status, response_data)
+
                     publish_response(gateway_channel, request_id, correlation_id, status, response_data, batch_num)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -375,6 +425,15 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                     print(f"[ERROR] Failed to process message: {e}")
                     import traceback
                     traceback.print_exc()
+                    # Try to update worker log with error
+                    if worker_log_id and db_state.get('conn'):
+                        try:
+                            processor = db_state.get('processor')
+                            if processor:
+                                update_worker_request(processor.cursor, processor.db_conn,
+                                                    worker_log_id, 'failed', {'error': str(e)})
+                        except:
+                            pass
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             gateway_channel.basic_consume(queue=RABBITMQ_REQUEST_QUEUE, on_message_callback=callback)
