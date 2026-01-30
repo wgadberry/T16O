@@ -1109,9 +1109,6 @@ Examples:
                     if not args.quiet:
                         print(f"[{timestamp}] Running sync...")
 
-                    # Create daemon request_log entry for billing
-                    request_log_id = log_daemon_request(cursor, conn, 'aggregator', 'sync', operations)
-
                     stats = run_sync(cursor, conn, operations,
                                     args.batch_size, args.guide_batch_size,
                                     args.max_batches, verbose=not args.quiet)
@@ -1121,14 +1118,16 @@ Examples:
                             stats['tokens']['rows'] +
                             stats['bmap']['rows'])
 
-                    # Update daemon request_log with results
-                    update_daemon_request(cursor, conn, request_log_id, 'completed', {
-                        'guide_edges': stats['guide']['edges'],
-                        'funding_rows': stats['funding']['rows'],
-                        'token_rows': stats['tokens']['rows'],
-                        'bmap_rows': stats['bmap']['rows'],
-                        'total': total
-                    })
+                    # Only log if there were actual changes (avoid cluttering request_log)
+                    if total > 0:
+                        request_log_id = log_daemon_request(cursor, conn, 'aggregator', 'sync', operations)
+                        update_daemon_request(cursor, conn, request_log_id, 'completed', {
+                            'guide_edges': stats['guide']['edges'],
+                            'funding_rows': stats['funding']['rows'],
+                            'token_rows': stats['tokens']['rows'],
+                            'bmap_rows': stats['bmap']['rows'],
+                            'total': total
+                        })
 
                     if args.json:
                         print(json.dumps(stats))
