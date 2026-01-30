@@ -233,32 +233,32 @@ BEGIN
 
         UNION
 
-        -- Token account 1_1 from activities (ata)
-        SELECT a.token_account_1_1, 'ata'
+        -- Token account 1_1 from activities (vault - pool liquidity account)
+        SELECT a.token_account_1_1, 'vault'
         FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
             token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1'
         )) a WHERE a.token_account_1_1 IS NOT NULL AND a.token_account_1_1 != 'null'
 
         UNION
 
-        -- Token account 1_2 from activities (ata)
-        SELECT a.token_account_1_2, 'ata'
+        -- Token account 1_2 from activities (vault - pool liquidity account)
+        SELECT a.token_account_1_2, 'vault'
         FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
             token_account_1_2 VARCHAR(44) PATH '$.data.token_account_1_2'
         )) a WHERE a.token_account_1_2 IS NOT NULL AND a.token_account_1_2 != 'null'
 
         UNION
 
-        -- Token account 2_1 from activities (ata)
-        SELECT a.token_account_2_1, 'ata'
+        -- Token account 2_1 from activities (vault - pool liquidity account)
+        SELECT a.token_account_2_1, 'vault'
         FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
             token_account_2_1 VARCHAR(44) PATH '$.data.token_account_2_1'
         )) a WHERE a.token_account_2_1 IS NOT NULL AND a.token_account_2_1 != 'null'
 
         UNION
 
-        -- Token account 2_2 from activities (ata)
-        SELECT a.token_account_2_2, 'ata'
+        -- Token account 2_2 from activities (vault - pool liquidity account)
+        SELECT a.token_account_2_2, 'vault'
         FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
             token_account_2_2 VARCHAR(44) PATH '$.data.token_account_2_2'
         )) a WHERE a.token_account_2_2 IS NOT NULL AND a.token_account_2_2 != 'null'
@@ -287,6 +287,32 @@ BEGIN
     -- =========================================================================
     -- PHASE 1d: Pre-populate tx_pool for all pools
     -- =========================================================================
+    INSERT IGNORE INTO tx_pool (pool_address_id)
+    SELECT a.id
+    FROM tx_address a
+    WHERE a.address_type = 'pool'
+      AND NOT EXISTS (SELECT 1 FROM tx_pool p WHERE p.pool_address_id = a.id);
+
+    -- =========================================================================
+    -- PHASE 1e: Reclassify owner_2 addresses as pools when amm_id is present
+    -- In swap activities, owner_2 alongside amm_id indicates a pool address
+    -- =========================================================================
+    UPDATE tx_address a
+    SET a.address_type = 'pool'
+    WHERE a.address_type = 'wallet'
+      AND a.address IN (
+        SELECT DISTINCT j.owner_2
+        FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
+            owner_2 VARCHAR(44) PATH '$.data.owner_2',
+            amm_id VARCHAR(44) PATH '$.data.amm_id'
+        )) j
+        WHERE j.owner_2 IS NOT NULL
+          AND j.amm_id IS NOT NULL
+          AND j.owner_2 != 'null'
+          AND j.amm_id != 'null'
+      );
+
+    -- Also insert any newly reclassified pools into tx_pool
     INSERT IGNORE INTO tx_pool (pool_address_id)
     SELECT a.id
     FROM tx_address a
