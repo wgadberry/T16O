@@ -145,20 +145,22 @@ class DecoderProcessor:
             self._tx_state_decoded = row[0] if row else TX_STATE_DECODED
         return self._tx_state_decoded
 
-    def insert_staging(self, decoded_response: dict, priority: int = 5, correlation_id: str = None, sig_hash: str = None) -> int:
+    def insert_staging(self, decoded_response: dict, priority: int = 5, correlation_id: str = None,
+                        sig_hash: str = None, request_log_id: int = None) -> int:
         """Insert decoded JSON into staging table, return staging_id"""
         tx_state = self.get_tx_state_decoded()
 
         self.cursor.execute(f"""
-            INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE} (txs, tx_state, priority, correlation_id, sig_hash)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (json.dumps(decoded_response), tx_state, priority, correlation_id, sig_hash))
+            INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE} (txs, tx_state, priority, correlation_id, sig_hash, request_log_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (json.dumps(decoded_response), tx_state, priority, correlation_id, sig_hash, request_log_id))
 
         staging_id = self.cursor.lastrowid
         self.db_conn.commit()
         return staging_id
 
-    def process_signatures(self, signatures: list, priority: int = 5, correlation_id: str = None, sig_hash: str = None) -> dict:
+    def process_signatures(self, signatures: list, priority: int = 5, correlation_id: str = None,
+                          sig_hash: str = None, request_log_id: int = None) -> dict:
         """Core processing logic for a batch of signatures"""
         result = {
             'processed': 0,
@@ -216,7 +218,7 @@ class DecoderProcessor:
 
         # Phase 2: Insert into staging table
         staging_start = time.time()
-        staging_id = self.insert_staging(decoded_response, priority, correlation_id, sig_hash)
+        staging_id = self.insert_staging(decoded_response, priority, correlation_id, sig_hash, request_log_id)
         staging_time = time.time() - staging_start
 
         result['staging_id'] = staging_id
@@ -321,6 +323,7 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
                     correlation_id = message.get('correlation_id', request_id)
+                    request_log_id = message.get('request_log_id')  # For billing linkage
                     sig_hash = message.get('sig_hash')  # For pairing with detailer
                     batch_data = message.get('batch', {})
                     priority = message.get('priority', 5)
@@ -343,7 +346,7 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                         return
 
                     print(f"  Processing {len(signatures)} signatures (batch {batch_num})...")
-                    result = processor.process_signatures(signatures, priority, correlation_id, sig_hash)
+                    result = processor.process_signatures(signatures, priority, correlation_id, sig_hash, request_log_id)
 
                     # Build response
                     if result.get('error'):

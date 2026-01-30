@@ -459,7 +459,7 @@ def log_request(
     correlation_id: Optional[str] = None,
     status: str = 'queued',
     error: Optional[str] = None
-) -> bool:
+) -> Optional[int]:
     """Log a request to tx_request_log
 
     Args:
@@ -468,9 +468,12 @@ def log_request(
                        For cascades, this is the original parent's request_id.
         status: Request status (queued, rejected, failed, completed)
         error: Error message if status is rejected/failed
+
+    Returns:
+        The inserted tx_request_log.id, or None on failure
     """
     if not HAS_MYSQL:
-        return True
+        return 0  # Return 0 instead of None when MySQL not available
 
     try:
         conn = get_db_connection()
@@ -509,14 +512,15 @@ def log_request(
             json.dumps(payload_summary) if payload_summary else None,
             status
         ))
-        print(f"[LOG] Request {request_id[:8]} logged as {status} (correlation: {effective_correlation_id[:8]})", flush=True)
+        inserted_id = cursor.lastrowid
+        print(f"[LOG] Request {request_id[:8]} logged as {status} (id: {inserted_id}, correlation: {effective_correlation_id[:8]})", flush=True)
         conn.commit()
         cursor.close()
         conn.close()
-        return True
+        return inserted_id
     except Exception as e:
         print(f"[ERROR] Failed to log request: {e}", flush=True)
-        return False
+        return None
 
 
 def update_request_status(
@@ -872,7 +876,8 @@ def process_request(
     api_key: str,
     source: str = 'rest',
     correlation_id: Optional[str] = None,
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None,
+    request_log_id: Optional[int] = None
 ) -> Dict:
     """Process a request: validate, log, and route to worker
 
@@ -881,6 +886,8 @@ def process_request(
                        For cascades, this is passed from parent to track the original request.
         request_id: Optional request ID to use. If not provided, a new UUID is generated.
                    This allows queue messages to preserve their original request_id.
+        request_log_id: The tx_request_log.id of the "gateway" record for billing.
+                       This is passed through the cascade chain to link tx records.
     """
     if not request_id:
         request_id = str(uuid.uuid4())
@@ -914,6 +921,7 @@ def process_request(
     message = {
         'request_id': request_id,
         'correlation_id': effective_correlation_id,  # Pass through cascade chain
+        'request_log_id': request_log_id,  # For billing - links tx records to gateway request
         'api_key': api_key,
         'priority': priority,
         'timestamp': timestamp,
@@ -921,7 +929,7 @@ def process_request(
         'batch': payload.get('batch', {})
     }
 
-    # Log request
+    # Log request for this worker (not the gateway record)
     log_request(
         request_id=request_id,
         api_key_id=key_info.get('id'),
@@ -939,6 +947,7 @@ def process_request(
             'success': True,
             'request_id': request_id,
             'correlation_id': effective_correlation_id,
+            'request_log_id': request_log_id,
             'worker': worker,
             'action': action,
             'queued_at': timestamp
@@ -959,11 +968,13 @@ def process_cascade(message: Dict) -> List[Dict]:
     The original request_id from the calling API is preserved throughout the cascade chain.
     The target_worker field differentiates stages, and batch info is stored in payload_summary.
     This allows the caller to query /api/status/{request_id} and see progress across all workers.
+    The request_log_id (gateway record) is also passed through for billing linkage.
     """
     results = []
     source_worker = message.get('source_worker')
     source_request_id = message.get('source_request_id')
     correlation_id = message.get('correlation_id')  # Preserve original request chain
+    request_log_id = message.get('request_log_id')  # Preserve for billing
     targets = message.get('targets', [])
     batch = message.get('batch', {})
     api_key = message.get('api_key', 'internal_cascade_key')
@@ -990,7 +1001,8 @@ def process_cascade(message: Dict) -> List[Dict]:
             api_key=api_key,
             source='cascade',
             correlation_id=correlation_id,  # Pass through cascade chain
-            request_id=source_request_id  # Preserve original request_id for status queries
+            request_id=source_request_id,  # Preserve original request_id for status queries
+            request_log_id=request_log_id  # Preserve for billing linkage
         )
         results.append({
             'worker': target,
@@ -1155,6 +1167,28 @@ def create_app():
         priority = payload.get('priority', REST_API_DEFAULT_PRIORITY)
         payload['priority'] = priority
 
+        # Create "gateway" record as the billing anchor
+        # This is the canonical record that tx records will link back to
+        request_log_id = log_request(
+            request_id=request_id,
+            api_key_id=key_info.get('id'),
+            source='rest',
+            target_worker='gateway',
+            action=action,
+            priority=priority,
+            payload=payload,
+            correlation_id=correlation_id,
+            status='queued'
+        )
+
+        if not request_log_id:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create request log',
+                'request_id': request_id,
+                'correlation_id': correlation_id
+            }), 500
+
         result = process_request(
             worker=worker,
             action=action,
@@ -1162,7 +1196,8 @@ def create_app():
             api_key=api_key,
             source='rest',
             correlation_id=correlation_id,
-            request_id=request_id
+            request_id=request_id,
+            request_log_id=request_log_id  # Pass gateway record ID for billing
         )
 
         # Add rate limit headers to successful responses
@@ -1480,6 +1515,7 @@ def run_response_consumer(ready_event: threading.Event = None):
                                     'source_worker': worker,
                                     'source_request_id': request_id,
                                     'correlation_id': correlation_id,
+                                    'request_log_id': response.get('request_log_id'),  # For billing linkage
                                     'targets': targets,
                                     'batch': cascade_batch,
                                     'api_key': response.get('api_key') or 'internal_cascade_key',

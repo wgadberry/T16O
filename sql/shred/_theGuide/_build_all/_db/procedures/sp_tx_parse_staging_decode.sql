@@ -17,6 +17,7 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_parse_staging_decode`(
 BEGIN
     DECLARE v_txs_json JSON;
     DECLARE v_shredded_state INT;
+    DECLARE v_request_log_id BIGINT UNSIGNED;
 
     SET p_tx_count = 0;
     SET p_transfer_count = 0;
@@ -26,8 +27,8 @@ BEGIN
 
     SET v_shredded_state = CAST(fn_get_config('tx_state', 'shredded') AS UNSIGNED);
 
-    -- Get the staging JSON
-    SELECT txs INTO v_txs_json
+    -- Get the staging JSON and request_log_id for billing linkage
+    SELECT txs, request_log_id INTO v_txs_json, v_request_log_id
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
 
@@ -47,8 +48,9 @@ BEGIN
     -- =========================================================================
     -- PHASE 2: Bulk insert all transactions
     -- Creates tmp_batch_tx_signatures with (idx, signature, tx_id, is_new)
+    -- request_log_id links new tx records to the gateway request for billing
     -- =========================================================================
-    CALL sp_tx_insert_txs_batch(v_txs_json, p_tx_count, p_skipped_count);
+    CALL sp_tx_insert_txs_batch(v_txs_json, v_request_log_id, p_tx_count, p_skipped_count);
 
     -- =========================================================================
     -- PHASE 3: Batch insert all child tables (NO LOOP!)

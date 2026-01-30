@@ -1,5 +1,6 @@
 -- sp_tx_insert_txs_batch: Bulk insert transactions using JSON_TABLE
 -- Uses JOINs only (no fn_tx_ensure_* calls) - requires sp_tx_prepopulate_lookups first
+-- p_request_log_id links new tx records to the gateway request for billing
 
 DELIMITER ;;
 
@@ -7,6 +8,7 @@ DROP PROCEDURE IF EXISTS `sp_tx_insert_txs_batch`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_txs_batch`(
     IN p_txs_json JSON,
+    IN p_request_log_id BIGINT UNSIGNED,
     OUT p_inserted_count INT,
     OUT p_skipped_count INT
 )
@@ -33,6 +35,7 @@ BEGIN
     SET v_total_count = ROW_COUNT();
 
     -- Main tx insert with JOINs (addresses already populated by sp_tx_prepopulate_lookups)
+    -- request_log_id is set for billing - only new records get this value
     INSERT IGNORE INTO tx (
         signature,
         block_id,
@@ -52,7 +55,8 @@ BEGIN
         agg_fee_amount,
         agg_fee_token_id,
         tx_json,
-        tx_state
+        tx_state,
+        request_log_id
     )
     SELECT
         t.tx_hash,
@@ -75,7 +79,8 @@ BEGIN
         CASE WHEN t.activity_type = 'ACTIVITY_TOKEN_SWAP' THEN t.fee_amount ELSE NULL END,
         CASE WHEN t.activity_type = 'ACTIVITY_TOKEN_SWAP' THEN fee_tok.id ELSE NULL END,
         t.tx_json,
-        8
+        8,
+        p_request_log_id
     FROM JSON_TABLE(
         p_txs_json,
         '$.data[*]' COLUMNS (

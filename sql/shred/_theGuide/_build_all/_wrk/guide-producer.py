@@ -182,11 +182,13 @@ def setup_gateway_rabbitmq():
     return connection, channel
 
 
-def publish_response(channel, request_id: str, correlation_id: str, status: str, result: dict, priority: int = 5, api_key: str = None, error: str = None):
+def publish_response(channel, request_id: str, correlation_id: str, status: str, result: dict,
+                     priority: int = 5, api_key: str = None, request_log_id: int = None, error: str = None):
     """Publish response to gateway response queue"""
     response = {
         'request_id': request_id,
         'correlation_id': correlation_id,
+        'request_log_id': request_log_id,  # For billing linkage
         'worker': 'producer',
         'status': status,
         'priority': priority,  # Pass through for cascade priority inheritance
@@ -239,7 +241,8 @@ def filter_existing_signatures(db_cursor, signatures: list) -> tuple:
 
 def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
                                 signatures: list, batch_num: int,
-                                total_batches: int, priority: int = 5) -> bool:
+                                total_batches: int, priority: int = 5,
+                                request_log_id: int = None) -> bool:
     """Publish a batch of signatures to both decoder and detailer queues in parallel"""
     # Compute sig_hash for pairing decoder and detailer batches
     sig_hash = compute_sig_hash(signatures)
@@ -247,6 +250,7 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
     cascade_msg = {
         'request_id': f"{request_id}-batch{batch_num}",
         'correlation_id': correlation_id,
+        'request_log_id': request_log_id,  # For billing linkage
         'sig_hash': sig_hash,
         'parent_request_id': request_id,
         'action': 'cascade',
@@ -283,7 +287,8 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
 def process_multiple_addresses(
     message: dict, addresses: list, rpc_session, gateway_channel, db_cursor,
     request_id: str, correlation_id: str, priority: int,
-    max_signatures: int, request_before: str, request_until: str
+    max_signatures: int, request_before: str, request_until: str,
+    request_log_id: int = None
 ) -> dict:
     """Process multiple addresses in a single request, aggregating results"""
     print(f"[{request_id[:8]}] Processing {len(addresses)} addresses (correlation: {correlation_id[:8]})")
@@ -301,6 +306,7 @@ def process_multiple_addresses(
         sub_message = {
             'request_id': f"{request_id}-addr{idx}",
             'correlation_id': correlation_id,
+            'request_log_id': request_log_id,  # For billing linkage
             'priority': priority,
             'batch': {
                 'filters': {
@@ -340,6 +346,7 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
     """Process a single address - extracted from process_gateway_request for reuse"""
     request_id = message.get('request_id', 'unknown')
     correlation_id = message.get('correlation_id', request_id)
+    request_log_id = message.get('request_log_id')  # For billing linkage
     batch = message.get('batch', {})
     priority = message.get('priority', 5)
 
@@ -449,7 +456,8 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
                 if new_sigs:
                     total_batched += 1
                     if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
-                                                    new_sigs, total_batched, estimated_batches, priority):
+                                                    new_sigs, total_batched, estimated_batches, priority,
+                                                    request_log_id):
                         skip_info = f", skipped {skipped}" if skipped > 0 else ""
                         print(f"    [CASCADE] Batch {total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
 
@@ -461,7 +469,8 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
             if new_sigs:
                 total_batched += 1
                 if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
-                                                new_sigs, total_batched, total_batched, priority):
+                                                new_sigs, total_batched, total_batched, priority,
+                                                request_log_id):
                     skip_info = f", skipped {skipped}" if skipped > 0 else ""
                     print(f"    [CASCADE] Batch {total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
 
@@ -476,6 +485,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     """Process a request from the gateway with parallel cascade to decoder + detailer"""
     request_id = message.get('request_id', 'unknown')
     correlation_id = message.get('correlation_id', request_id)
+    request_log_id = message.get('request_log_id')  # For billing linkage
     batch = message.get('batch', {})
     priority = message.get('priority', 5)
 
@@ -500,7 +510,8 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     if len(addresses) > 1:
         return process_multiple_addresses(
             message, addresses, rpc_session, gateway_channel, db_cursor,
-            request_id, correlation_id, priority, max_signatures, request_before, request_until
+            request_id, correlation_id, priority, max_signatures, request_before, request_until,
+            request_log_id
         )
 
     # Single address processing - delegate to process_single_address
@@ -511,6 +522,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     single_message = {
         'request_id': request_id,
         'correlation_id': correlation_id,
+        'request_log_id': request_log_id,  # For billing linkage
         'priority': priority,
         'batch': {
             'filters': {
@@ -602,6 +614,7 @@ def run_queue_consumer(prefetch: int = 1):
                     message['_addresses'] = addresses
 
                     correlation_id = message.get('correlation_id', request_id)
+                    request_log_id = message.get('request_log_id')  # For billing linkage
                     priority = message.get('priority', 5)
                     api_key = message.get('api_key')
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (corr: {correlation_id[:8]}, pri: {priority})")
@@ -609,7 +622,8 @@ def run_queue_consumer(prefetch: int = 1):
                     db_cursor = ensure_db_connection()
                     result = process_gateway_request(message, rpc_session, gateway_channel, db_cursor)
                     status = 'completed' if result.get('errors', 0) == 0 else 'partial'
-                    publish_response(gateway_channel, request_id, correlation_id, status, result, priority=priority, api_key=api_key)
+                    publish_response(gateway_channel, request_id, correlation_id, status, result,
+                                   priority=priority, api_key=api_key, request_log_id=request_log_id)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
                 except json.JSONDecodeError as e:
