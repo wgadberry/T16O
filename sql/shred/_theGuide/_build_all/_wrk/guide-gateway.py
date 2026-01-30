@@ -559,33 +559,116 @@ def update_request_status(
 
 
 def get_request_status(request_id: str) -> Optional[Dict]:
-    """Get request status from tx_request_log"""
+    """Get request status from tx_request_log, aggregated by worker
+
+    Since a single request_id can have multiple records (one per worker in the cascade),
+    this returns an aggregated view with per-worker status.
+    """
     if not HAS_MYSQL:
         return None
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
+
+        # Get all records for this request_id
         cursor.execute("""
             SELECT request_id, correlation_id, source, target_worker, action, priority,
                    status, error_message, created_at, started_at, completed_at,
-                   duration_ms, result
+                   duration_ms, result, payload_summary
             FROM tx_request_log
             WHERE request_id = %s
+            ORDER BY created_at ASC
         """, (request_id,))
-        result = cursor.fetchone()
+        rows = cursor.fetchall()
         cursor.close()
         conn.close()
 
-        if result:
-            # Convert datetime objects to strings
-            for key in ['created_at', 'started_at', 'completed_at']:
-                if result.get(key):
-                    result[key] = result[key].isoformat()
-            if result.get('result'):
-                result['result'] = json.loads(result['result']) if isinstance(result['result'], str) else result['result']
+        if not rows:
+            return None
 
-        return result
+        # Build aggregated response
+        first_row = rows[0]
+        workers = {}
+        overall_status = 'completed'
+        total_pending = 0
+        total_failed = 0
+
+        for row in rows:
+            worker = row['target_worker']
+
+            # Convert datetime objects
+            for key in ['created_at', 'started_at', 'completed_at']:
+                if row.get(key):
+                    row[key] = row[key].isoformat()
+
+            # Parse result JSON
+            result_data = None
+            if row.get('result'):
+                result_data = json.loads(row['result']) if isinstance(row['result'], str) else row['result']
+
+            # Parse payload_summary for batch info
+            batch_num = None
+            if row.get('payload_summary'):
+                summary = json.loads(row['payload_summary']) if isinstance(row['payload_summary'], str) else row['payload_summary']
+                batch_info = summary.get('filters', {})
+                if isinstance(batch_info, dict):
+                    batch_num = batch_info.get('batch_num')
+
+            # Track per-worker status
+            if worker not in workers:
+                workers[worker] = {
+                    'status': row['status'],
+                    'source': row['source'],
+                    'action': row['action'],
+                    'records': [],
+                    'completed': 0,
+                    'failed': 0,
+                    'pending': 0
+                }
+
+            workers[worker]['records'].append({
+                'status': row['status'],
+                'batch_num': batch_num,
+                'created_at': row['created_at'],
+                'completed_at': row['completed_at'],
+                'duration_ms': row['duration_ms'],
+                'error_message': row.get('error_message'),
+                'result': result_data
+            })
+
+            # Update counts
+            if row['status'] == 'completed':
+                workers[worker]['completed'] += 1
+            elif row['status'] == 'failed':
+                workers[worker]['failed'] += 1
+                total_failed += 1
+            elif row['status'] in ('queued', 'processing'):
+                workers[worker]['pending'] += 1
+                total_pending += 1
+
+            # Update worker-level status
+            if row['status'] == 'failed':
+                workers[worker]['status'] = 'failed'
+            elif row['status'] in ('queued', 'processing') and workers[worker]['status'] != 'failed':
+                workers[worker]['status'] = 'processing'
+
+        # Determine overall status
+        if total_pending > 0:
+            overall_status = 'processing'
+        elif total_failed > 0:
+            overall_status = 'partial'
+        else:
+            overall_status = 'completed'
+
+        return {
+            'request_id': request_id,
+            'correlation_id': first_row['correlation_id'],
+            'priority': first_row['priority'],
+            'overall_status': overall_status,
+            'created_at': first_row['created_at'] if isinstance(first_row['created_at'], str) else first_row['created_at'].isoformat() if first_row['created_at'] else None,
+            'workers': workers
+        }
     except Exception as e:
         print(f"[ERROR] Failed to get request status: {e}")
         return None
@@ -871,7 +954,12 @@ def process_request(
 
 
 def process_cascade(message: Dict) -> List[Dict]:
-    """Process a cascade message from a worker, route to downstream workers"""
+    """Process a cascade message from a worker, route to downstream workers
+
+    The original request_id from the calling API is preserved throughout the cascade chain.
+    The target_worker field differentiates stages, and batch info is stored in payload_summary.
+    This allows the caller to query /api/status/{request_id} and see progress across all workers.
+    """
     results = []
     source_worker = message.get('source_worker')
     source_request_id = message.get('source_request_id')
@@ -881,9 +969,6 @@ def process_cascade(message: Dict) -> List[Dict]:
     api_key = message.get('api_key', 'internal_cascade_key')
     priority = message.get('priority', 5)
 
-    # Extract batch number for request_id derivation
-    batch_num = batch.get('batch_num', 0)
-
     for target in targets:
         if target not in WORKER_REGISTRY:
             results.append({
@@ -892,16 +977,6 @@ def process_cascade(message: Dict) -> List[Dict]:
                 'error': 'Unknown worker'
             })
             continue
-
-        # Derive cascade request_id from source_request_id for traceability
-        # Format: {source_request_id}-{target} or {source_request_id}-batch{N}-{target}
-        if source_request_id:
-            if batch_num:
-                cascade_request_id = f"{source_request_id}-batch{batch_num}-{target}"
-            else:
-                cascade_request_id = f"{source_request_id}-{target}"
-        else:
-            cascade_request_id = None  # Will generate UUID as fallback
 
         result = process_request(
             worker=target,
@@ -915,7 +990,7 @@ def process_cascade(message: Dict) -> List[Dict]:
             api_key=api_key,
             source='cascade',
             correlation_id=correlation_id,  # Pass through cascade chain
-            request_id=cascade_request_id  # Derive from parent for traceability
+            request_id=source_request_id  # Preserve original request_id for status queries
         )
         results.append({
             'worker': target,
