@@ -725,8 +725,9 @@ def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
         ensure_queues_exist(channel)
 
         queue_name = WORKER_REGISTRY[worker]['request_queue']
-        # Extract correlation_id from message for RabbitMQ header
+        # Extract IDs from message for RabbitMQ headers
         correlation_id = message.get('correlation_id')
+        request_id = message.get('request_id')
 
         channel.basic_publish(
             exchange='',
@@ -736,7 +737,8 @@ def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
                 delivery_mode=2,  # persistent
                 content_type='application/json',
                 priority=priority,
-                correlation_id=correlation_id  # RabbitMQ standard property for tracing
+                correlation_id=correlation_id,  # RabbitMQ standard property for tracing
+                message_id=request_id  # RabbitMQ standard property for request tracking
             )
         )
         conn.close()
@@ -753,8 +755,9 @@ def publish_to_gateway(message: Dict, priority: int = 5) -> bool:
         channel = conn.channel()
         ensure_queues_exist(channel)
 
-        # Extract correlation_id from message for RabbitMQ header
+        # Extract IDs from message for RabbitMQ headers
         correlation_id = message.get('correlation_id')
+        request_id = message.get('request_id')
 
         channel.basic_publish(
             exchange='',
@@ -764,7 +767,8 @@ def publish_to_gateway(message: Dict, priority: int = 5) -> bool:
                 delivery_mode=2,
                 content_type='application/json',
                 priority=priority,
-                correlation_id=correlation_id  # RabbitMQ standard property for tracing
+                correlation_id=correlation_id,  # RabbitMQ standard property for tracing
+                message_id=request_id  # RabbitMQ standard property for request tracking
             )
         )
         conn.close()
@@ -920,7 +924,7 @@ def create_app():
     def add_cors_headers(response):
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-Correlation-Id'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-Correlation-Id, X-Request-Id'
         response.headers['Access-Control-Expose-Headers'] = 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After'
         return response
 
@@ -1014,12 +1018,19 @@ def create_app():
                 'error': 'Missing X-Correlation-Id header'
             }), 400
 
+        # Get request ID from header (required for request tracking)
+        request_id = request.headers.get('X-Request-Id')
+        if not request_id:
+            return jsonify({
+                'success': False,
+                'error': 'Missing X-Request-Id header'
+            }), 400
+
         # Check rate limit
         rate_limit = key_info.get('rate_limit', 0)
         allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
         if not allowed:
-            # Log rate-limited request
-            request_id = str(uuid.uuid4())
+            # Log rate-limited request (use caller's request_id)
             payload = request.get_json() or {}
             log_request(
                 request_id=request_id,
@@ -1061,7 +1072,8 @@ def create_app():
             payload=payload,
             api_key=api_key,
             source='rest',
-            correlation_id=correlation_id
+            correlation_id=correlation_id,
+            request_id=request_id
         )
 
         # Add rate limit headers to successful responses

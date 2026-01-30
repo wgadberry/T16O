@@ -185,13 +185,17 @@
             <div class="row">
                 <div class="col">
                     <label>API Key</label>
-                    <input type="text" id="apiKey" value="admin_master_key">
+                    <input type="text" id="apiKey" value="cfuck-api-key">
                 </div>
                 <div class="col">
                     <label>Correlation ID (required)</label>
-                    <input type="text" id="correlationId" value="" placeholder="your-session-id-123">
+                    <input type="text" id="correlationId" value="" placeholder="cfuck-session-00001">
                 </div>
-                <button class="btn btn-secondary" style="align-self: flex-end; margin-bottom: 0;" onclick="generateCorrelationId()">Generate</button>
+                <div class="col">
+                    <label>Request ID (required)</label>
+                    <input type="text" id="requestId" value="" placeholder="req-00001">
+                </div>
+                <button class="btn btn-secondary" style="align-self: flex-end; margin-bottom: 0;" onclick="generateIds()">Generate IDs</button>
             </div>
 
             <div class="row">
@@ -199,7 +203,7 @@
                     <label>Request Body (JSON)</label>
                     <textarea id="body">{
   "batch": {
-    "addresses": ["ErmAd9aCjPmYUwPvAqTuYyFWJe6WRZpKr2cCFEbZ4gvY"]
+    "addresses": [""]
   }
 }</textarea>
                 </div>
@@ -242,7 +246,7 @@
                 url: 'http://localhost:5100/api/trigger/funder',
                 body: JSON.stringify({
                     batch: {
-                        addresses: ["ErmAd9aCjPmYUwPvAqTuYyFWJe6WRZpKr2cCFEbZ4gvY"]
+                        addresses: [""]
                     }
                 }, null, 2)
             },
@@ -252,7 +256,7 @@
                 body: JSON.stringify({
                     priority: 10,
                     batch: {
-                        addresses: ["ErmAd9aCjPmYUwPvAqTuYyFWJe6WRZpKr2cCFEbZ4gvY"]
+                        addresses: [""]
                     }
                 }, null, 2)
             },
@@ -262,7 +266,7 @@
                 body: JSON.stringify({
                     batch: {
                         filters: {
-                            addresses: ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+                            addresses: [""]
                         },
                         size: 50
                     }
@@ -339,9 +343,13 @@
             document.getElementById('responseHeaders').innerHTML = '';
         }
 
-        function generateCorrelationId() {
-            const id = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-            document.getElementById('correlationId').value = id;
+        let requestCounter = 1;
+
+        function generateIds() {
+            const timestamp = Date.now();
+            const rand = Math.random().toString(36).substr(2, 6);
+            document.getElementById('correlationId').value = 'session-' + timestamp + '-' + rand;
+            document.getElementById('requestId').value = 'req-' + timestamp + '-' + (requestCounter++);
         }
 
         async function sendRequest() {
@@ -349,6 +357,7 @@
             const url = document.getElementById('url').value;
             const apiKey = document.getElementById('apiKey').value;
             const correlationId = document.getElementById('correlationId').value;
+            const requestId = document.getElementById('requestId').value;
             const body = document.getElementById('body').value;
 
             const responseEl = document.getElementById('response');
@@ -370,6 +379,9 @@
                 }
                 if (correlationId) {
                     headers['X-Correlation-Id'] = correlationId;
+                }
+                if (requestId) {
+                    headers['X-Request-Id'] = requestId;
                 }
 
                 const options = {
