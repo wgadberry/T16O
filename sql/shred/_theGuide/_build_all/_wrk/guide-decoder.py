@@ -84,8 +84,25 @@ def log_worker_request(cursor, conn, request_id: str, correlation_id: str,
                        api_key_id: int = None) -> int:
     """
     Create a request_log entry for worker activity.
-    Returns the request_log.id for tracking.
+    Returns the request_log.id for tracking (existing or newly created).
     """
+    # Check if record already exists (for retry scenarios)
+    if api_key_id is not None:
+        cursor.execute("""
+            SELECT id FROM tx_request_log
+            WHERE request_id = %s AND target_worker = %s AND api_key_id = %s
+        """, (request_id, worker, api_key_id))
+    else:
+        cursor.execute("""
+            SELECT id FROM tx_request_log
+            WHERE request_id = %s AND target_worker = %s AND api_key_id IS NULL
+        """, (request_id, worker))
+
+    existing = cursor.fetchone()
+    if existing:
+        return existing[0]
+
+    # Insert new record
     payload_summary = json.dumps({
         'batch_num': batch_num,
         'batch_size': batch_size,
