@@ -881,6 +881,9 @@ def process_cascade(message: Dict) -> List[Dict]:
     api_key = message.get('api_key', 'internal_cascade_key')
     priority = message.get('priority', 5)
 
+    # Extract batch number for request_id derivation
+    batch_num = batch.get('batch_num', 0)
+
     for target in targets:
         if target not in WORKER_REGISTRY:
             results.append({
@@ -889,6 +892,16 @@ def process_cascade(message: Dict) -> List[Dict]:
                 'error': 'Unknown worker'
             })
             continue
+
+        # Derive cascade request_id from source_request_id for traceability
+        # Format: {source_request_id}-{target} or {source_request_id}-batch{N}-{target}
+        if source_request_id:
+            if batch_num:
+                cascade_request_id = f"{source_request_id}-batch{batch_num}-{target}"
+            else:
+                cascade_request_id = f"{source_request_id}-{target}"
+        else:
+            cascade_request_id = None  # Will generate UUID as fallback
 
         result = process_request(
             worker=target,
@@ -901,7 +914,8 @@ def process_cascade(message: Dict) -> List[Dict]:
             },
             api_key=api_key,
             source='cascade',
-            correlation_id=correlation_id  # Pass through cascade chain
+            correlation_id=correlation_id,  # Pass through cascade chain
+            request_id=cascade_request_id  # Derive from parent for traceability
         )
         results.append({
             'worker': target,
