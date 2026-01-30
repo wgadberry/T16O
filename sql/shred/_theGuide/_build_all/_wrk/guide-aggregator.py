@@ -32,6 +32,7 @@ import random
 import os
 import json
 import functools
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Callable, List, Tuple
@@ -159,6 +160,41 @@ def execute_with_deadlock_retry(cursor, conn, query: str, params: tuple = None,
             else:
                 raise
     return 0
+
+
+# =============================================================================
+# Daemon Request Logging (for billing)
+# =============================================================================
+
+def log_daemon_request(cursor, conn, worker: str, action: str, operations: list = None) -> int:
+    """
+    Create a request_log entry for daemon activity.
+    Returns the request_log_id for billing linkage.
+    """
+    request_id = f"daemon-{worker}-{uuid.uuid4().hex[:12]}"
+    payload_summary = json.dumps({
+        'operations': operations or [],
+        'mode': 'daemon'
+    })
+
+    cursor.execute("""
+        INSERT INTO tx_request_log
+        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, status, payload_summary)
+        VALUES (%s, %s, NULL, 'daemon', %s, %s, 5, 'processing', %s)
+    """, (request_id, request_id, worker, action, payload_summary))
+    conn.commit()
+    return cursor.lastrowid
+
+
+def update_daemon_request(cursor, conn, request_log_id: int, status: str, result: dict = None):
+    """Update daemon request_log entry with completion status and results."""
+    result_summary = json.dumps(result) if result else None
+    cursor.execute("""
+        UPDATE tx_request_log
+        SET status = %s, result_summary = %s, completed_at = NOW()
+        WHERE id = %s
+    """, (status, result_summary, request_log_id))
+    conn.commit()
 
 
 # =============================================================================
@@ -755,7 +791,8 @@ def setup_gateway_rabbitmq():
     return connection, channel
 
 
-def publish_response(channel, request_id: str, status: str, result: dict, error: str = None):
+def publish_response(channel, request_id: str, status: str, result: dict,
+                     error: str = None, request_log_id: int = None):
     """Publish response to gateway response queue"""
     response = {
         'request_id': request_id,
@@ -766,6 +803,8 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
     }
     if error:
         response['error'] = error
+    if request_log_id:
+        response['request_log_id'] = request_log_id
 
     channel.basic_publish(
         exchange='',
@@ -776,7 +815,8 @@ def publish_response(channel, request_id: str, status: str, result: dict, error:
 
 
 def publish_cascade_to_enricher(channel, request_id: str, correlation_id: str,
-                                 result: dict, priority: int = 5) -> bool:
+                                 result: dict, priority: int = 5,
+                                 request_log_id: int = None) -> bool:
     """Publish cascade directly to enricher request queue (incremental cascade)"""
     cascade_msg = {
         'request_id': f"{request_id}-enricher",
@@ -791,6 +831,8 @@ def publish_cascade_to_enricher(channel, request_id: str, correlation_id: str,
             'source_processed': result.get('processed', 0)
         }
     }
+    if request_log_id:
+        cascade_msg['request_log_id'] = request_log_id
 
     try:
         channel.basic_publish(
@@ -871,10 +913,11 @@ def run_queue_consumer(prefetch: int = 1):
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
                     correlation_id = message.get('correlation_id', request_id)  # Track original request
+                    request_log_id = message.get('request_log_id')  # For billing linkage
                     batch = message.get('batch', {})
                     priority = message.get('priority', 5)
 
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (correlation: {correlation_id[:8]})")
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (correlation: {correlation_id[:8]}, log_id: {request_log_id or 'N/A'})")
 
                     # Ensure DB connection is alive
                     cursor, conn = ensure_db_connection()
@@ -917,11 +960,13 @@ def run_queue_consumer(prefetch: int = 1):
                         status = 'failed'
 
                     # Publish response
-                    publish_response(gateway_channel, request_id, status, result)
+                    publish_response(gateway_channel, request_id, status, result,
+                                    request_log_id=request_log_id)
 
                     # Cascade to enricher if we processed data
                     if status == 'completed' and result.get('processed', 0) > 0:
-                        publish_cascade_to_enricher(gateway_channel, request_id, correlation_id, result, priority)
+                        publish_cascade_to_enricher(gateway_channel, request_id, correlation_id, result,
+                                                   priority, request_log_id)
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -1058,22 +1103,36 @@ Examples:
             print("Press Ctrl+C to stop\n")
 
             while True:
+                request_log_id = None
                 try:
                     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                     if not args.quiet:
                         print(f"[{timestamp}] Running sync...")
 
+                    # Create daemon request_log entry for billing
+                    request_log_id = log_daemon_request(cursor, conn, 'aggregator', 'sync', operations)
+
                     stats = run_sync(cursor, conn, operations,
                                     args.batch_size, args.guide_batch_size,
                                     args.max_batches, verbose=not args.quiet)
 
+                    total = (stats['guide']['edges'] +
+                            stats['funding']['rows'] +
+                            stats['tokens']['rows'] +
+                            stats['bmap']['rows'])
+
+                    # Update daemon request_log with results
+                    update_daemon_request(cursor, conn, request_log_id, 'completed', {
+                        'guide_edges': stats['guide']['edges'],
+                        'funding_rows': stats['funding']['rows'],
+                        'token_rows': stats['tokens']['rows'],
+                        'bmap_rows': stats['bmap']['rows'],
+                        'total': total
+                    })
+
                     if args.json:
                         print(json.dumps(stats))
                     elif not args.quiet:
-                        total = (stats['guide']['edges'] +
-                                stats['funding']['rows'] +
-                                stats['tokens']['rows'] +
-                                stats['bmap']['rows'])
                         if total > 0:
                             print(f"[{timestamp}] Complete: {total:,} rows affected\n")
                         else:
@@ -1097,6 +1156,12 @@ Examples:
                     break
                 except Exception as e:
                     print(f"Error: {e}")
+                    # Update request_log with error if we have one
+                    if request_log_id:
+                        try:
+                            update_daemon_request(cursor, conn, request_log_id, 'failed', {'error': str(e)})
+                        except:
+                            pass
                     try:
                         cursor.close()
                         conn.close()
