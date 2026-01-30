@@ -236,7 +236,7 @@ WORKER_REGISTRY = {
         'response_queue': 'mq.guide.producer.response',
         'dlq': 'mq.guide.producer.dlq',
         'description': 'Fetches transaction signatures from RPC',
-        'cascade_to': ['decoder', 'detailer']  # Shredder polls staging table, not queue
+        'cascade_to': []  # Producer handles cascade to decoder/detailer directly
     },
     'decoder': {
         'request_queue': 'mq.guide.decoder.request',
