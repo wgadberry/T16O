@@ -249,12 +249,11 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
     sig_hash = compute_sig_hash(signatures)
 
     cascade_msg = {
-        'request_id': f"{request_id}-batch{batch_num}",
+        'request_id': request_id,  # Same request_id for all workers - correlation_id tracks the chain
         'correlation_id': correlation_id,
         'request_log_id': request_log_id,  # For billing linkage
         'api_key_id': api_key_id,  # For billing tracking
         'sig_hash': sig_hash,
-        'parent_request_id': request_id,
         'action': 'cascade',
         'source_worker': 'producer',
         'priority': priority,
