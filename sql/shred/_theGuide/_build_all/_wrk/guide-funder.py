@@ -332,13 +332,15 @@ def setup_gateway_rabbitmq():
     return connection, channel
 
 
-def publish_response(channel, request_id: str, status: str, result: Dict):
+def publish_response(channel, request_id: str, status: str, result: Dict,
+                     correlation_id: str = None, request_log_id: int = None):
     """Publish response message to gateway response queue"""
     from datetime import datetime
-    import uuid
 
     response = {
         'request_id': request_id,
+        'correlation_id': correlation_id or request_id,
+        'request_log_id': request_log_id,  # For billing linkage
         'worker': 'funder',
         'status': status,
         'timestamp': datetime.now().isoformat() + 'Z',
@@ -354,6 +356,48 @@ def publish_response(channel, request_id: str, status: str, result: Dict):
             content_type='application/json'
         )
     )
+
+
+# =============================================================================
+# Daemon Request Logging (for billing)
+# =============================================================================
+
+def log_daemon_request(cursor, db_conn, worker: str, action: str, batch_size: int = 0) -> int:
+    """
+    Create a request_log entry for daemon work cycle.
+    Returns the request_log_id for linking discovered addresses.
+    """
+    import uuid
+    from datetime import datetime
+
+    request_id = f"daemon-{worker}-{uuid.uuid4().hex[:12]}"
+    correlation_id = request_id
+
+    cursor.execute("""
+        INSERT INTO tx_request_log
+        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, status, payload_summary)
+        VALUES (%s, %s, NULL, 'daemon', %s, %s, 5, 'processing', %s)
+    """, (
+        request_id,
+        correlation_id,
+        worker,
+        action,
+        json.dumps({'batch_size': batch_size})
+    ))
+    request_log_id = cursor.lastrowid
+    db_conn.commit()
+    print(f"[DAEMON] Created request_log entry id={request_log_id} for {worker}/{action}")
+    return request_log_id
+
+
+def update_daemon_request(cursor, db_conn, request_log_id: int, status: str, result: Dict):
+    """Update a daemon request_log entry with completion status and results."""
+    cursor.execute("""
+        UPDATE tx_request_log
+        SET status = %s, completed_at = CURRENT_TIMESTAMP(3), result = %s
+        WHERE id = %s
+    """, (status, json.dumps(result), request_log_id))
+    db_conn.commit()
 
 
 def run_queue_consumer(args):
@@ -450,11 +494,13 @@ def run_queue_consumer(args):
         try:
             request = json.loads(body)
             request_id = request.get('request_id', str(uuid.uuid4()))
+            correlation_id = request.get('correlation_id', request_id)
+            request_log_id = request.get('request_log_id')  # For billing linkage
             action = request.get('action', 'process')
             batch = request.get('batch', {})
 
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]}...")
-            print(f"  Action: {action}")
+            print(f"  Action: {action}, request_log_id: {request_log_id}")
 
             # Ensure DB connection is alive
             worker, cursor = ensure_db_connection(channel)
@@ -478,7 +524,7 @@ def run_queue_consumer(args):
                     'processed': 0,
                     'funders_found': 0,
                     'funders_not_found': 0
-                })
+                }, correlation_id, request_log_id)
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
@@ -488,7 +534,7 @@ def run_queue_consumer(args):
             # For explicit API calls (action='process'), force re-lookup even if previously attempted
             # For cascades from other workers, respect init_tx_fetched to avoid duplicate work
             force_lookup = (action == 'process')
-            result = worker.process_addresses(addresses, force=force_lookup)
+            result = worker.process_addresses(addresses, force=force_lookup, request_log_id=request_log_id)
 
             elapsed = time.time() - start_time
 
@@ -505,7 +551,7 @@ def run_queue_consumer(args):
                     'elapsed_seconds': round(elapsed, 2)
                 }
 
-            publish_response(ch, request_id, status, response_data)
+            publish_response(ch, request_id, status, response_data, correlation_id, request_log_id)
 
             print(f"  Completed in {elapsed:.1f}s: {result['funders_found']} found, {result['funders_not_found']} not found")
             ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -520,10 +566,10 @@ def run_queue_consumer(args):
             import traceback
             traceback.print_exc()
 
-            request_id = request.get('request_id', 'unknown') if 'request' in dir() else 'unknown'
-            publish_response(ch, request_id, 'failed', {
-                'error': str(e)
-            })
+            req_id = request.get('request_id', 'unknown') if 'request' in dir() else 'unknown'
+            corr_id = request.get('correlation_id', req_id) if 'request' in dir() else req_id
+            req_log_id = request.get('request_log_id') if 'request' in dir() else None
+            publish_response(ch, req_id, 'failed', {'error': str(e)}, corr_id, req_log_id)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     channel.basic_consume(
@@ -667,11 +713,12 @@ class AddressHistoryWorker:
             """, values)
             self.db_conn.commit()
 
-    def save_funding_info(self, target_address: str, funding_info: Dict):
+    def save_funding_info(self, target_address: str, funding_info: Dict, request_log_id: int = None):
         """
         Save funding info to tx_address table and create tx_funding_edge.
         Also aggregates existing transfers from tx_guide for complete edge data.
         funding_info has: funder, signature, amount, block_time
+        request_log_id: Links discovered funder address to the request for billing
         """
         if self.dry_run:
             return
@@ -682,15 +729,16 @@ class AddressHistoryWorker:
 
         # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
         # Mark as init_tx_fetched=1 to prevent recursive funder lookups (we don't need to find the funder's funder)
+        # Set request_log_id for billing linkage (only on new addresses)
         self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
         funder_row = self.cursor.fetchone()
         if funder_row:
             funder_id = funder_row['id']
         else:
             self.cursor.execute("""
-                INSERT INTO tx_address (address, address_type, init_tx_fetched)
-                VALUES (%s, 'wallet', 1)
-            """, (funder,))
+                INSERT INTO tx_address (address, address_type, init_tx_fetched, request_log_id)
+                VALUES (%s, 'wallet', 1, %s)
+            """, (funder, request_log_id))
             funder_id = self.cursor.lastrowid
 
         # Get target address ID
@@ -783,7 +831,7 @@ class AddressHistoryWorker:
 
         return self.solscan.find_funding_wallet(address, data)
 
-    def process_addresses(self, addresses: List[str], force: bool = False) -> Dict:
+    def process_addresses(self, addresses: List[str], force: bool = False, request_log_id: int = None) -> Dict:
         """
         Core processing logic for a list of addresses.
         Returns dict with: processed, claimed, funders_found, funders_not_found
@@ -793,6 +841,7 @@ class AddressHistoryWorker:
         Args:
             addresses: List of addresses to process
             force: If True, re-process addresses even if init_tx_fetched=1 (for explicit API calls)
+            request_log_id: Links discovered funder addresses to the request for billing
         """
         result = {
             'processed': 0,
@@ -851,7 +900,7 @@ class AddressHistoryWorker:
 
             if funding_info:
                 print(f" -> funded by {funding_info['funder'][:16]}...")
-                self.save_funding_info(addr, funding_info)
+                self.save_funding_info(addr, funding_info, request_log_id)
                 result['funders_found'] += 1
                 self.funders_found += 1
             else:
@@ -1263,7 +1312,7 @@ def main():
                     return None
                 return self.solscan.find_funding_wallet(address, data)
 
-            def save_funding_info(self, target_address, funding_info):
+            def save_funding_info(self, target_address, funding_info, request_log_id=None):
                 if self.dry_run:
                     return
                 funder = funding_info['funder']
@@ -1272,14 +1321,16 @@ def main():
 
                 # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
                 # Mark as init_tx_fetched=1 to prevent recursive funder lookups
+                # Set request_log_id for billing linkage (only on new addresses)
                 self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
                 funder_row = self.cursor.fetchone()
                 if funder_row:
                     funder_id = funder_row['id']
                 else:
                     self.cursor.execute("""
-                        INSERT INTO tx_address (address, address_type, init_tx_fetched) VALUES (%s, 'wallet', 1)
-                    """, (funder,))
+                        INSERT INTO tx_address (address, address_type, init_tx_fetched, request_log_id)
+                        VALUES (%s, 'wallet', 1, %s)
+                    """, (funder, request_log_id))
                     funder_id = self.cursor.lastrowid
 
                 self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
@@ -1380,17 +1431,29 @@ def main():
                     # In dry-run, simulate progress
                     worker.addresses_processed += len(addresses_to_process)
                 else:
+                    # Create daemon request_log entry for this batch (for billing)
+                    request_log_id = log_daemon_request(
+                        worker.cursor, worker.db_conn,
+                        worker='funder', action='discover',
+                        batch_size=len(addresses_to_process)
+                    )
+
                     initialized = []
+                    batch_funders_found = 0
+                    batch_funders_not_found = 0
+
                     for j, addr in enumerate(addresses_to_process):
                         print(f"  [{j + 1}/{len(addresses_to_process)}] {addr[:20]}...", end='')
                         funding_info = worker.find_funder_for_address(addr)
                         if funding_info:
                             print(f" -> funded by {funding_info['funder'][:16]}...")
-                            worker.save_funding_info(addr, funding_info)
+                            worker.save_funding_info(addr, funding_info, request_log_id)
                             worker.funders_found += 1
+                            batch_funders_found += 1
                         else:
                             print(f" -> no funder found")
                             worker.funders_not_found += 1
+                            batch_funders_not_found += 1
                         initialized.append(addr)
                         worker.addresses_processed += 1
 
@@ -1398,6 +1461,17 @@ def main():
                         if worker.addresses_processed >= total_limit:
                             print(f"\n  Reached limit of {args.limit} addresses")
                             break
+
+                    # Update daemon request_log entry with results
+                    update_daemon_request(
+                        worker.cursor, worker.db_conn, request_log_id,
+                        status='completed',
+                        result={
+                            'processed': len(initialized),
+                            'funders_found': batch_funders_found,
+                            'funders_not_found': batch_funders_not_found
+                        }
+                    )
 
                     worker.mark_addresses_initialized(initialized)
 

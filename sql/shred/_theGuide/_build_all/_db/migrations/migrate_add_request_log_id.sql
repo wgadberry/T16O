@@ -32,6 +32,20 @@ COMMENT 'Links to tx_request_log.id - passed from gateway through pipeline';
 SELECT 'staging.txs table updated.' AS status;
 
 -- ============================================================================
+-- STEP 3: Add request_log_id to tx_address table (for funder discovery billing)
+-- ============================================================================
+SELECT 'Adding request_log_id to tx_address table...' AS status;
+
+ALTER TABLE tx_address
+ADD COLUMN request_log_id BIGINT UNSIGNED NULL
+COMMENT 'Links to tx_request_log.id - the request that caused this address to be discovered';
+
+ALTER TABLE tx_address
+ADD INDEX idx_tx_address_request_log_id (request_log_id);
+
+SELECT 'tx_address table updated.' AS status;
+
+-- ============================================================================
 -- STEP 3: Verify changes
 -- ============================================================================
 SELECT 'Verifying tx table columns...' AS status;
