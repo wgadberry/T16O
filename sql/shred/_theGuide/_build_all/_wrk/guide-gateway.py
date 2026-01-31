@@ -920,7 +920,8 @@ def process_request(
     source: str = 'rest',
     correlation_id: Optional[str] = None,
     request_id: Optional[str] = None,
-    request_log_id: Optional[int] = None
+    request_log_id: Optional[int] = None,
+    features: int = 0
 ) -> Dict:
     """Process a request: validate, log, and route to worker
 
@@ -931,6 +932,7 @@ def process_request(
                    This allows queue messages to preserve their original request_id.
         request_log_id: The tx_request_log.id of the "gateway" record for billing.
                        This is passed through the cascade chain to link tx records.
+        features: Bitmask of enabled features for this request.
     """
     if not request_id:
         request_id = str(uuid.uuid4())
@@ -967,6 +969,7 @@ def process_request(
         'request_log_id': request_log_id,  # For billing - links tx records to gateway request
         'api_key': api_key,
         'api_key_id': key_info.get('id'),  # For billing tracking through cascade
+        'features': features,  # Feature flags for data collection
         'priority': priority,
         'timestamp': timestamp,
         'action': action,
@@ -982,7 +985,8 @@ def process_request(
         action=action,
         priority=priority,
         payload=message,
-        correlation_id=effective_correlation_id
+        correlation_id=effective_correlation_id,
+        features=features
     )
 
     # Route to worker
@@ -1013,12 +1017,14 @@ def process_cascade(message: Dict) -> List[Dict]:
     The target_worker field differentiates stages, and batch info is stored in payload_summary.
     This allows the caller to query /api/status/{request_id} and see progress across all workers.
     The request_log_id (gateway record) is also passed through for billing linkage.
+    Features are also preserved through the cascade chain.
     """
     results = []
     source_worker = message.get('source_worker')
     source_request_id = message.get('source_request_id')
     correlation_id = message.get('correlation_id')  # Preserve original request chain
     request_log_id = message.get('request_log_id')  # Preserve for billing
+    features = message.get('features', 0)  # Preserve feature flags
     targets = message.get('targets', [])
     batch = message.get('batch', {})
     api_key = message.get('api_key', 'internal_cascade_key')
@@ -1040,10 +1046,12 @@ def process_cascade(message: Dict) -> List[Dict]:
                 'priority': priority,
                 'batch': batch,
                 'source_worker': source_worker,
-                'source_request_id': source_request_id
+                'source_request_id': source_request_id,
+                'features': features
             },
             api_key=api_key,
             source='cascade',
+            features=features,
             correlation_id=correlation_id,  # Pass through cascade chain
             request_id=source_request_id,  # Preserve original request_id for status queries
             request_log_id=request_log_id  # Preserve for billing linkage
@@ -1266,7 +1274,8 @@ def create_app():
             source='rest',
             correlation_id=correlation_id,
             request_id=request_id,
-            request_log_id=request_log_id  # Pass gateway record ID for billing
+            request_log_id=request_log_id,  # Pass gateway record ID for billing
+            features=features
         )
 
         # Add rate limit headers to successful responses
@@ -1367,6 +1376,7 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         source = message.get('source', 'queue')
                         request_id = message.get('request_id', str(uuid.uuid4()))
                         correlation_id = message.get('correlation_id')  # May be None for initial requests
+                        msg_features = message.get('features', 0)  # Feature flags from message
 
                         if not api_key:
                             print(f"[REJECT] Missing api_key in request {request_id}", flush=True)
@@ -1439,7 +1449,8 @@ def run_queue_consumer(ready_event: threading.Event = None):
                             api_key=api_key,
                             source=source,
                             correlation_id=correlation_id,
-                            request_id=request_id
+                            request_id=request_id,
+                            features=msg_features
                         )
                         print(f"[REQUEST] {target_worker}/{action}: {result.get('request_id', 'unknown')}")
 
