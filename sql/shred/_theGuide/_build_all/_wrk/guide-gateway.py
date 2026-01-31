@@ -135,41 +135,6 @@ FEATURE_TOKEN_METADATA    = 0x0020  # Token metadata enrichment (community)
 FEATURE_ADDRESS_LABELS    = 0x0040  # Address labels/tags (community)
 FEATURE_PROGRAM_DETAILS   = 0x0080  # Detailed program invocation data
 
-# Map feature names to bitmask values (for API accepting array of names)
-FEATURE_NAME_MAP = {
-    'balance_changes': FEATURE_BALANCE_CHANGES,
-    'all_addresses': FEATURE_ALL_ADDRESSES,
-    'swap_routing': FEATURE_SWAP_ROUTING,
-    'ata_mapping': FEATURE_ATA_MAPPING,
-    'funder_discovery': FEATURE_FUNDER_DISCOVERY,
-    'token_metadata': FEATURE_TOKEN_METADATA,
-    'address_labels': FEATURE_ADDRESS_LABELS,
-    'program_details': FEATURE_PROGRAM_DETAILS,
-}
-
-def parse_features(features_input) -> int:
-    """
-    Parse features input into bitmask integer.
-
-    Accepts:
-    - Integer: use as-is
-    - List of strings: convert feature names to bitmask
-    - None: return 0 (core only)
-    """
-    if features_input is None:
-        return 0
-
-    if isinstance(features_input, int):
-        return features_input
-
-    if isinstance(features_input, list):
-        mask = 0
-        for name in features_input:
-            if isinstance(name, str) and name.lower() in FEATURE_NAME_MAP:
-                mask |= FEATURE_NAME_MAP[name.lower()]
-        return mask
-
-    return 0
 
 def _get_or_create_tracker(correlation_id: str) -> Dict:
     """Get existing tracker or create a new one (must be called with lock held)"""
@@ -1243,15 +1208,9 @@ def create_app():
         priority = payload.get('priority', REST_API_DEFAULT_PRIORITY)
         payload['priority'] = priority
 
-        # Parse and validate features
-        # - Accept integer bitmask or array of feature names
-        # - Apply entitlement check: only allow features the API key has paid for
-        requested_features = parse_features(payload.get('features'))
-        entitled_features = key_info.get('feature_mask') or 0
-        effective_features = requested_features & entitled_features
-
-        # Store effective features in payload for downstream workers
-        payload['features'] = effective_features
+        # Get features from API key entitlement (no request parameter needed)
+        features = key_info.get('feature_mask') or 0
+        payload['features'] = features
 
         # Create "gateway" record as the billing anchor
         # This is the canonical record that tx records will link back to
@@ -1265,7 +1224,7 @@ def create_app():
             payload=payload,
             correlation_id=correlation_id,
             status='queued',
-            features=effective_features
+            features=features
         )
 
         if not request_log_id:
