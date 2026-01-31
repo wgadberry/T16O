@@ -153,11 +153,14 @@ class SolscanClient:
     def close(self):
         self.session.close()
 
-    def get_account_transfers(self, address: str, page_size: int = 20) -> Optional[Dict]:
+    def get_account_transfers(self, address: str, page_size: int = 20, token_filter: str = None) -> Optional[Dict]:
         """
         Get transfer history for a wallet address.
         /account/transfer - for wallet accounts
         Note: Solscan only accepts page_size of 10, 20, 30, 40, 60, or 100
+
+        Args:
+            token_filter: Optional token address to filter by (e.g., SOL_TOKEN for SOL-only)
         """
         # Solscan only accepts specific page_size values
         valid_sizes = [10, 20, 30, 40, 60, 100]
@@ -171,6 +174,9 @@ class SolscanClient:
             "sort_by": "block_time",
             "sort_order": "asc"
         }
+        if token_filter:
+            params["token"] = token_filter
+
         try:
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
@@ -868,15 +874,19 @@ class AddressHistoryWorker:
 
     def find_funder_for_address(self, address: str) -> Optional[Dict]:
         """
-        Fetch first transactions for address and find funding wallet.
+        Fetch first SOL transactions for address and find funding wallet.
         Returns funding info dict or None.
+
+        Uses SOL token filter to ensure we get native SOL transfers,
+        not just SPL token transfers which may appear earlier chronologically.
         """
         # Skip known programs and system addresses
         if should_skip_address(address):
             return None
 
         time.sleep(self.api_delay)
-        data = self.solscan.get_account_transfers(address, self.tx_limit)
+        # Filter for SOL transfers specifically to find the true funder
+        data = self.solscan.get_account_transfers(address, self.tx_limit, token_filter=SOL_TOKEN)
         if not data:
             return None
 
@@ -1370,7 +1380,8 @@ def main():
                 if should_skip_address(address):
                     return None
                 time.sleep(self.api_delay)
-                data = self.solscan.get_account_transfers(address, self.tx_limit)
+                # Filter for SOL transfers specifically to find the true funder
+                data = self.solscan.get_account_transfers(address, self.tx_limit, token_filter=SOL_TOKEN)
                 if not data:
                     return None
                 return self.solscan.find_funding_wallet(address, data)
