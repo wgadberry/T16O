@@ -62,6 +62,13 @@
             "default": 5,
             "description": "Request priority (1=lowest, 10=highest)"
           },
+          "features": {
+            "oneOf": [
+              { "type": "integer", "description": "Bitmask of enabled features" },
+              { "type": "array", "items": { "type": "string" }, "description": "Array of feature names" }
+            ],
+            "description": "Features to enable for this request. Integer bitmask or array of names: balance_changes(1), all_addresses(2), swap_routing(4), ata_mapping(8), funder_discovery(16), token_metadata(32), address_labels(64), program_details(128). Only features entitled by API key will be enabled."
+          },
           "action": {
             "type": "string",
             "default": "process",

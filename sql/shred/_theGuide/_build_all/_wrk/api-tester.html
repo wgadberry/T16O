@@ -165,6 +165,7 @@
                 <button class="btn btn-secondary" onclick="loadPreset('producer')">Producer Request</button>
                 <button class="btn btn-secondary" onclick="loadPreset('producer-time')">Producer (Time Range)</button>
                 <button class="btn btn-secondary" onclick="loadPreset('producer-slot')">Producer (Slot Range)</button>
+                <button class="btn btn-secondary" onclick="loadPreset('producer-features')">Producer (Features)</button>
                 <button class="btn btn-secondary" onclick="loadPreset('status')">Check Status</button>
             </div>
 
@@ -299,6 +300,32 @@
                             until: { block_id: 280000000 }
                         },
                         size: 100000
+                    }
+                }, null, 2)
+            },
+            'producer-features': {
+                method: 'POST',
+                url: 'http://localhost:5100/api/trigger/producer',
+                body: JSON.stringify({
+                    features: ["balance_changes", "all_addresses", "swap_routing"],
+                    batch: {
+                        filters: {
+                            addresses: [""]
+                        },
+                        size: 100
+                    }
+                }, null, 2)
+            },
+            'producer-features-mask': {
+                method: 'POST',
+                url: 'http://localhost:5100/api/trigger/producer',
+                body: JSON.stringify({
+                    features: 255,
+                    batch: {
+                        filters: {
+                            addresses: [""]
+                        },
+                        size: 100
                     }
                 }, null, 2)
             },

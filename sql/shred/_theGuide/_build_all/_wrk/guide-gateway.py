@@ -119,6 +119,58 @@ _tracker_lock = threading.Lock()
 # Shredder is the final stage - pipeline is complete when shredder finishes
 DEFAULT_DOWNSTREAM_WORKERS = ['decoder', 'detailer', 'shredder']
 
+# =============================================================================
+# Feature Flags (bitmask constants)
+# =============================================================================
+# These control what data is collected during transaction processing.
+# Core features (always collected) have no flag - they're the default.
+# These flags ENABLE additional data collection beyond core.
+
+FEATURE_BALANCE_CHANGES   = 0x0001  # All balance changes for all participants
+FEATURE_ALL_ADDRESSES     = 0x0002  # All addresses (ATAs, vaults, intermediate)
+FEATURE_SWAP_ROUTING      = 0x0004  # Full swap routing paths
+FEATURE_ATA_MAPPING       = 0x0008  # Associated token account mappings
+FEATURE_FUNDER_DISCOVERY  = 0x0010  # Solscan API funder lookups
+FEATURE_TOKEN_METADATA    = 0x0020  # Token metadata enrichment (community)
+FEATURE_ADDRESS_LABELS    = 0x0040  # Address labels/tags (community)
+FEATURE_PROGRAM_DETAILS   = 0x0080  # Detailed program invocation data
+
+# Map feature names to bitmask values (for API accepting array of names)
+FEATURE_NAME_MAP = {
+    'balance_changes': FEATURE_BALANCE_CHANGES,
+    'all_addresses': FEATURE_ALL_ADDRESSES,
+    'swap_routing': FEATURE_SWAP_ROUTING,
+    'ata_mapping': FEATURE_ATA_MAPPING,
+    'funder_discovery': FEATURE_FUNDER_DISCOVERY,
+    'token_metadata': FEATURE_TOKEN_METADATA,
+    'address_labels': FEATURE_ADDRESS_LABELS,
+    'program_details': FEATURE_PROGRAM_DETAILS,
+}
+
+def parse_features(features_input) -> int:
+    """
+    Parse features input into bitmask integer.
+
+    Accepts:
+    - Integer: use as-is
+    - List of strings: convert feature names to bitmask
+    - None: return 0 (core only)
+    """
+    if features_input is None:
+        return 0
+
+    if isinstance(features_input, int):
+        return features_input
+
+    if isinstance(features_input, list):
+        mask = 0
+        for name in features_input:
+            if isinstance(name, str) and name.lower() in FEATURE_NAME_MAP:
+                mask |= FEATURE_NAME_MAP[name.lower()]
+        return mask
+
+    return 0
+
 def _get_or_create_tracker(correlation_id: str) -> Dict:
     """Get existing tracker or create a new one (must be called with lock held)"""
     if correlation_id not in _correlation_tracker:
@@ -409,7 +461,7 @@ def validate_api_key(api_key: str) -> Optional[Dict]:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT id, name, permissions, rate_limit, active
+            SELECT id, name, permissions, rate_limit, active, feature_mask
             FROM tx_api_key
             WHERE api_key = %s AND active = 1
         """, (api_key,))
@@ -458,7 +510,8 @@ def log_request(
     payload: Optional[Dict] = None,
     correlation_id: Optional[str] = None,
     status: str = 'queued',
-    error: Optional[str] = None
+    error: Optional[str] = None,
+    features: int = 0
 ) -> Optional[int]:
     """Log a request to tx_request_log
 
@@ -468,6 +521,7 @@ def log_request(
                        For cascades, this is the original parent's request_id.
         status: Request status (queued, rejected, failed, completed)
         error: Error message if status is rejected/failed
+        features: Bitmask of enabled features for this request
 
     Returns:
         The inserted tx_request_log.id, or None on failure
@@ -518,8 +572,8 @@ def log_request(
 
         cursor.execute("""
             INSERT INTO tx_request_log
-            (request_id, correlation_id, api_key_id, source, target_worker, action, priority, payload_hash, payload_summary, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (request_id, correlation_id, api_key_id, source, target_worker, action, priority, features, payload_hash, payload_summary, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             request_id,
             effective_correlation_id,
@@ -528,6 +582,7 @@ def log_request(
             target_worker,
             action,
             priority,
+            features,
             payload_hash,
             json.dumps(payload_summary) if payload_summary else None,
             status
@@ -1188,6 +1243,16 @@ def create_app():
         priority = payload.get('priority', REST_API_DEFAULT_PRIORITY)
         payload['priority'] = priority
 
+        # Parse and validate features
+        # - Accept integer bitmask or array of feature names
+        # - Apply entitlement check: only allow features the API key has paid for
+        requested_features = parse_features(payload.get('features'))
+        entitled_features = key_info.get('feature_mask') or 0
+        effective_features = requested_features & entitled_features
+
+        # Store effective features in payload for downstream workers
+        payload['features'] = effective_features
+
         # Create "gateway" record as the billing anchor
         # This is the canonical record that tx records will link back to
         request_log_id = log_request(
@@ -1199,7 +1264,8 @@ def create_app():
             priority=priority,
             payload=payload,
             correlation_id=correlation_id,
-            status='queued'
+            status='queued',
+            features=effective_features
         )
 
         if not request_log_id:
