@@ -457,13 +457,11 @@ def resolve_boundary_to_signature(
 
     # Priority 2: Block ID (slot)
     if block_id:
-        # Try DB first
-        found_sig = find_signature_near_slot(db_cursor, block_id, direction)
-        if found_sig:
-            print(f"    [BOUNDARY] Resolved block_id {block_id} -> signature via DB")
-            return (found_sig, None, block_id)
+        # NOTE: DB lookup skipped - find_signature_near_slot doesn't filter by address,
+        # so it may return a signature from a different address which breaks RPC pagination.
+        # Instead, use RPC binary search (address-specific) or inline slot filter.
 
-        # Fallback to RPC binary search
+        # Try RPC binary search (address-specific)
         found_sig = binary_search_signature_by_slot(rpc_session, address, rpc_url, block_id, direction)
         if found_sig:
             return (found_sig, None, block_id)
@@ -473,13 +471,11 @@ def resolve_boundary_to_signature(
 
     # Priority 3: Block time
     if block_time:
-        # Try DB first
-        found_sig = find_signature_near_time(db_cursor, block_time, direction)
-        if found_sig:
-            print(f"    [BOUNDARY] Resolved block_time {block_time} -> signature via DB")
-            return (found_sig, block_time, None)
+        # NOTE: DB lookup skipped - find_signature_near_time doesn't filter by address,
+        # so it may return a signature from a different address which breaks RPC pagination.
+        # Instead, use RPC binary search (address-specific) or inline time filter.
 
-        # Fallback to RPC binary search
+        # Try RPC binary search (address-specific)
         found_sig = binary_search_signature_by_time(rpc_session, address, rpc_url, block_time, direction)
         if found_sig:
             return (found_sig, block_time, None)

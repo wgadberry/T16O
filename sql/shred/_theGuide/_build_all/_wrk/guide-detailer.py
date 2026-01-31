@@ -87,7 +87,7 @@ TX_STATE_DETAILED = 16  # Will be fetched from config table
 def log_worker_request(cursor, conn, request_id: str, correlation_id: str,
                        worker: str, action: str, batch_num: int = 0,
                        batch_size: int = 0, priority: int = 5,
-                       api_key_id: int = None) -> int:
+                       api_key_id: int = None, features: int = 0) -> int:
     """
     Create a request_log entry for worker activity.
     Returns the request_log.id for tracking (existing or newly created).
@@ -117,9 +117,9 @@ def log_worker_request(cursor, conn, request_id: str, correlation_id: str,
 
     cursor.execute("""
         INSERT INTO tx_request_log
-        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, status, payload_summary)
-        VALUES (%s, %s, %s, 'queue', %s, %s, %s, 'processing', %s)
-    """, (request_id, correlation_id, api_key_id, worker, action, priority, payload_summary))
+        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, features, status, payload_summary)
+        VALUES (%s, %s, %s, 'queue', %s, %s, %s, %s, 'processing', %s)
+    """, (request_id, correlation_id, api_key_id, worker, action, priority, features, payload_summary))
     conn.commit()
     return cursor.lastrowid
 
@@ -398,6 +398,7 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                     sig_hash = message.get('sig_hash')  # For pairing with decoder
                     batch_data = message.get('batch', {})
                     priority = message.get('priority', 5)
+                    features = message.get('features', 0)
 
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id[:8]} "
                           f"(correlation: {correlation_id[:8]}, sig_hash: {sig_hash[:8] if sig_hash else 'N/A'})")
@@ -413,7 +414,7 @@ def run_queue_consumer(prefetch: int = 1, dry_run: bool = False):
                     worker_log_id = log_worker_request(
                         processor.cursor, processor.db_conn,
                         request_id, correlation_id, 'detailer', 'detail',
-                        batch_num, len(signatures), priority, api_key_id
+                        batch_num, len(signatures), priority, api_key_id, features
                     )
 
                     if not signatures:
