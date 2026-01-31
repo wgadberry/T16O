@@ -1,5 +1,9 @@
--- sp_tx_insert_activities: Batch insert ALL activities from full staging JSON
+-- sp_tx_insert_activities: Batch insert activities from full staging JSON
 -- Uses JSON_TABLE with NESTED PATH to process all txs at once (no loop)
+--
+-- Feature flags:
+--   FEATURE_SWAP_ROUTING (4): When set, collect ALL activity records
+--                             When not set, only collect top-level activities (ins_index = outer_ins_index)
 
 DELIMITER ;;
 
@@ -7,9 +11,16 @@ DROP PROCEDURE IF EXISTS `sp_tx_insert_activities`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_activities`(
     IN p_txs_json JSON,
+    IN p_features INT UNSIGNED,
     OUT p_count INT
 )
 BEGIN
+    -- Feature flag constant
+    DECLARE FEATURE_SWAP_ROUTING INT UNSIGNED DEFAULT 4;
+    DECLARE v_collect_all_activities BOOLEAN;
+
+    SET v_collect_all_activities = (p_features & FEATURE_SWAP_ROUTING) = FEATURE_SWAP_ROUTING;
+
     INSERT IGNORE INTO tx_activity (
         tx_id,
         ins_index,
@@ -59,7 +70,9 @@ BEGIN
     LEFT JOIN tx_address outer_prog_addr ON outer_prog_addr.address = a.outer_program_id
     LEFT JOIN tx_program outer_prog ON outer_prog.program_address_id = outer_prog_addr.id
     LEFT JOIN tx_address account_addr ON account_addr.address = COALESCE(a.account, a.source, a.new_account, a.init_account)
-    WHERE a.ins_index IS NOT NULL;  -- Filter out txs with no activities
+    WHERE a.ins_index IS NOT NULL  -- Filter out txs with no activities
+      -- Filter: collect all activities OR only top-level (not nested)
+      AND (v_collect_all_activities OR a.ins_index = a.outer_ins_index);
 
     SET p_count = ROW_COUNT();
 END;;

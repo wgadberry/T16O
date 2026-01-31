@@ -1,5 +1,9 @@
--- sp_tx_insert_swaps: Batch insert ALL swaps from full staging JSON
+-- sp_tx_insert_swaps: Batch insert swaps from full staging JSON
 -- Uses JSON_TABLE with NESTED PATH to process all txs at once (no loop)
+--
+-- Feature flags:
+--   FEATURE_SWAP_ROUTING (4): When set, collect ALL swap hops
+--                             When not set, only collect top-level swaps (ins_index = outer_ins_index)
 
 DELIMITER ;;
 
@@ -7,9 +11,16 @@ DROP PROCEDURE IF EXISTS `sp_tx_insert_swaps`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_swaps`(
     IN p_txs_json JSON,
+    IN p_features INT UNSIGNED,
     OUT p_count INT
 )
 BEGIN
+    -- Feature flag constant
+    DECLARE FEATURE_SWAP_ROUTING INT UNSIGNED DEFAULT 4;
+    DECLARE v_collect_all_hops BOOLEAN;
+
+    SET v_collect_all_hops = (p_features & FEATURE_SWAP_ROUTING) = FEATURE_SWAP_ROUTING;
+
     INSERT IGNORE INTO tx_swap (
         tx_id,
         ins_index,
@@ -113,7 +124,9 @@ BEGIN
     LEFT JOIN tx_address owner2 ON owner2.address = a.owner_2
     LEFT JOIN tx_address fee_tok_addr ON fee_tok_addr.address = a.fee_token
     LEFT JOIN tx_token fee_tok ON fee_tok.mint_address_id = fee_tok_addr.id
-    WHERE a.activity_type = 'ACTIVITY_TOKEN_SWAP';
+    WHERE a.activity_type = 'ACTIVITY_TOKEN_SWAP'
+      -- Filter: collect all hops OR only top-level swaps (not nested)
+      AND (v_collect_all_hops OR a.ins_index = a.outer_ins_index);
 
     SET p_count = ROW_COUNT();
 END;;

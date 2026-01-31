@@ -3,7 +3,9 @@
 -- FULLY BATCH - no loops, all operations use JSON_TABLE
 --
 -- Feature flags are retrieved from tx_request_log.features (linked via request_log_id)
--- and passed to sp_tx_prepopulate_lookups to control address collection behavior
+-- and control data collection behavior:
+--   FEATURE_ALL_ADDRESSES (2): Collect extended addresses (ATAs, vaults, pools)
+--   FEATURE_SWAP_ROUTING (4): Collect all swap hops vs only top-level swaps
 
 DELIMITER ;;
 
@@ -71,11 +73,11 @@ BEGIN
     -- Insert ALL transfers from ALL new transactions in one query
     CALL sp_tx_insert_transfers(v_txs_json, p_transfer_count);
 
-    -- Insert ALL swaps from ALL new transactions in one query
-    CALL sp_tx_insert_swaps(v_txs_json, p_swap_count);
+    -- Insert swaps (filtered by FEATURE_SWAP_ROUTING)
+    CALL sp_tx_insert_swaps(v_txs_json, v_features, p_swap_count);
 
-    -- Insert ALL activities from ALL new transactions in one query
-    CALL sp_tx_insert_activities(v_txs_json, p_activity_count);
+    -- Insert activities (filtered by FEATURE_SWAP_ROUTING for consistency)
+    CALL sp_tx_insert_activities(v_txs_json, v_features, p_activity_count);
 
     -- =========================================================================
     -- PHASE 4: Batch updates
