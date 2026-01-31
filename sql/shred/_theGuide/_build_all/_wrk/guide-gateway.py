@@ -1212,6 +1212,15 @@ def create_app():
         features = key_info.get('feature_mask') or 0
         payload['features'] = features
 
+        # Check feature requirements for specific workers
+        if worker == 'funder' and not (features & FEATURE_FUNDER_DISCOVERY):
+            return jsonify({
+                'success': False,
+                'error': 'Funder discovery feature not enabled for this API key',
+                'request_id': request_id,
+                'correlation_id': correlation_id
+            }), 403
+
         # Create "gateway" record as the billing anchor
         # This is the canonical record that tx records will link back to
         request_log_id = log_request(
