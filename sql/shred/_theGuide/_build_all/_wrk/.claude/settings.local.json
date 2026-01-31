@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(sc query:*)",
+      "Bash(findstr:*)",
+      "Bash(sc qc T16OExchange.Guide.Funder)",
+      "Bash(./nssm.exe get:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python guide-funder.py:*)",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" log --oneline -5)",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" diff _db/procedures/sp_tx_prepopulate_lookups.sql)",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" add \"_db/procedures/sp_tx_prepopulate_lookups.sql\" \"_db/migrations/migrate_fix_address_types.sql\")",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" commit -m \"$\\(cat <<''EOF''\nFix address_type classification for pool vaults and pools\n\n- Reclassify token_account_X_X fields as ''vault'' instead of ''ata''\n  \\(these are pool liquidity accounts, not user ATAs\\)\n- Add PHASE 1e to reclassify owner_2 as ''pool'' when amm_id is present\n- Add migration script to fix existing misclassified addresses\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" push)",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" diff _wrk/guide-gateway.py)",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" add _wrk/guide-gateway.py)",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" commit -m \"$\\(cat <<''EOF''\nFix cascade request_id to derive from parent for traceability\n\nCascade requests now derive request_id from source_request_id instead\nof generating new UUIDs. Format: {source_request_id}-batch{N}-{target}\n\nThis enables full request chain tracing in tx_request_log.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" commit -m \"$\\(cat <<''EOF''\nPreserve original request_id through cascade chain\n\n- Cascade requests now use the original source_request_id instead of\n  generating derived IDs, allowing callers to query status by their\n  original request_id\n- Updated /api/status/{request_id} to aggregate results by worker,\n  returning per-worker status, counts, and individual batch records\n- The target_worker field differentiates stages in the pipeline\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\T16O\\\\sql\\\\shred\\\\_theGuide\\\\_build_all\" status)",
+      "Bash(git -C:*)",
+      "Bash(mysql:*)",
+      "Bash(curl -s -u admin:admin123 \"http://localhost:15692/api/queues/t16o_mq\")",
+      "Bash(python:*)"
+    ]
+  }
+}

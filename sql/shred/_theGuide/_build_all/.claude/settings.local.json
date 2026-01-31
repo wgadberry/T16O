@@ -56,7 +56,11 @@
       "Bash(docker exec:*)",
       "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" add docker/docker-compose.v1.yml)",
       "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" commit -m \"$\\(cat <<''EOF''\nReduce MySQL binlog retention from 3 days to 6 hours\n\nPrevents disk space exhaustion from binlog accumulation.\nPrevious setting was causing ~14GB of binlog files.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(docker system:*)"
+      "Bash(docker system:*)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" add sql/shred/_theGuide/_build_all/_wrk/guide-gateway.py sql/shred/_theGuide/_build_all/_wrk/guide-publish.py)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" commit -m \"$\\(cat <<''EOF''\nFix rejected request logging in gateway\n\n- Add flush=True to daemon thread print statements for visibility\n- Change guide-publish.py source from ''guide-publish-cli'' to ''queue''\n  to match tx_request_log source enum values\n- Verified rejected requests now log correctly with error details\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" add sql/shred/_theGuide/_build_all/_wrk/guide-enricher.py)",
+      "Bash(git -C \"C:/Users/wgadb/source/repos/T16O\" commit -m \"$\\(cat <<''EOF''\nFix pool enricher attempt_cnt reset logic\n\nOnly reset attempt_cnt to 0 when we have ALL required data\n\\(token_account1_id AND pool_label\\). Previously it reset on every\nsuccessful API call, causing infinite retry loops for pools where\nthe API returns partial data.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   }
 }
