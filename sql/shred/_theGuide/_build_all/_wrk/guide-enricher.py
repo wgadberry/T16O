@@ -211,14 +211,20 @@ def get_tokens_needing_metadata(cursor, limit: int, max_attempts: int = 3) -> Li
 
 
 def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
-                          icon: str, decimals: int) -> bool:
+                          icon: str, decimals: int, token_json: dict = None) -> bool:
     """Update token with fetched metadata.
 
     Only resets attempt_cnt if we got meaningful data (non-empty name or symbol).
     Otherwise increments attempt_cnt to prevent infinite retry loops.
+
+    Args:
+        token_json: Complete API response to store for reference
     """
     # Check if we got meaningful metadata (not just decimals)
     has_meaningful_data = bool(name and name.strip()) or bool(symbol and symbol.strip())
+
+    # Serialize JSON if provided
+    token_json_str = json.dumps(token_json) if token_json else None
 
     if has_meaningful_data:
         # Got real data - update and reset attempt counter
@@ -228,9 +234,10 @@ def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
                 token_symbol = COALESCE(%s, token_symbol),
                 token_icon = COALESCE(%s, token_icon),
                 decimals = COALESCE(%s, decimals),
+                token_json = COALESCE(%s, token_json),
                 attempt_cnt = 0
             WHERE id = %s
-        """, (name, symbol, icon, decimals, token_id))
+        """, (name, symbol, icon, decimals, token_json_str, token_id))
     else:
         # No meaningful data - update what we have but increment attempt counter
         cursor.execute("""
@@ -239,9 +246,10 @@ def update_token_metadata(cursor, conn, token_id: int, name: str, symbol: str,
                 token_symbol = COALESCE(%s, token_symbol),
                 token_icon = COALESCE(%s, token_icon),
                 decimals = COALESCE(%s, decimals),
+                token_json = COALESCE(%s, token_json),
                 attempt_cnt = COALESCE(attempt_cnt, 0) + 1
             WHERE id = %s
-        """, (name, symbol, icon, decimals, token_id))
+        """, (name, symbol, icon, decimals, token_json_str, token_id))
 
     conn.commit()
     return has_meaningful_data
@@ -287,7 +295,7 @@ def enrich_tokens(session, cursor, conn, limit: int, max_attempts: int,
                 decimals = response.get('decimals')
 
                 if name or symbol or decimals is not None:
-                    if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals):
+                    if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals, response):
                         if verbose:
                             print(f"{symbol or 'unnamed'} ({decimals} dec)")
                         stats['updated'] += 1
