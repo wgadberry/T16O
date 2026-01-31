@@ -73,6 +73,25 @@
           }
         }
       },
+      "Boundary": {
+        "type": "object",
+        "description": "Flexible boundary specification. Provide ONE of: signature, block_id, or block_time. Priority: signature > block_id > block_time",
+        "properties": {
+          "signature": {
+            "type": "string",
+            "description": "Transaction signature to use as boundary"
+          },
+          "block_id": {
+            "type": "integer",
+            "description": "Slot number to use as boundary"
+          },
+          "block_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 datetime to use as boundary (UTC)"
+          }
+        }
+      },
       "ProducerBatch": {
         "type": "object",
         "properties": {
@@ -84,6 +103,20 @@
                 "items": { "type": "string" },
                 "description": "Solana addresses to fetch signatures for",
                 "example": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
+              },
+              "before": {
+                "oneOf": [
+                  { "type": "string", "description": "Legacy: signature string" },
+                  { "$ref": "#/components/schemas/Boundary" }
+                ],
+                "description": "Start fetching from this point (exclusive, going backwards)"
+              },
+              "until": {
+                "oneOf": [
+                  { "type": "string", "description": "Legacy: signature string" },
+                  { "$ref": "#/components/schemas/Boundary" }
+                ],
+                "description": "Stop fetching at this point (exclusive)"
               }
             }
           },
@@ -235,7 +268,7 @@
       "post": {
         "operationId": "triggerProducer",
         "summary": "Trigger Producer",
-        "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing",
+        "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing\n\n## Boundary Options\nUse `before` and `until` to control the range of signatures fetched:\n- **signature**: Direct transaction signature\n- **block_id**: Slot number (resolved to nearest signature)\n- **block_time**: ISO 8601 datetime (resolved to nearest signature)\n\nYou can mix boundary types (e.g., before=signature, until=block_time).",
         "tags": ["Workers"],
         "requestBody": {
           "required": true,
@@ -264,6 +297,54 @@
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
                       },
                       "size": 10
+                    }
+                  }
+                },
+                "fetchByTimeRange": {
+                  "summary": "Fetch signatures within a time range",
+                  "value": {
+                    "request_id": "prod-002",
+                    "correlation_id": "session-001",
+                    "priority": 5,
+                    "batch": {
+                      "filters": {
+                        "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
+                        "before": { "block_time": "2025-01-20T00:00:00Z" },
+                        "until": { "block_time": "2025-01-01T00:00:00Z" }
+                      },
+                      "size": 100000
+                    }
+                  }
+                },
+                "fetchBySlotRange": {
+                  "summary": "Fetch signatures within a slot range",
+                  "value": {
+                    "request_id": "prod-003",
+                    "correlation_id": "session-001",
+                    "priority": 5,
+                    "batch": {
+                      "filters": {
+                        "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
+                        "before": { "block_id": 285000000 },
+                        "until": { "block_id": 280000000 }
+                      },
+                      "size": 100000
+                    }
+                  }
+                },
+                "fetchMixedBoundaries": {
+                  "summary": "Mix boundary types (signature + time)",
+                  "value": {
+                    "request_id": "prod-004",
+                    "correlation_id": "session-001",
+                    "priority": 5,
+                    "batch": {
+                      "filters": {
+                        "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
+                        "before": { "signature": "5abc123..." },
+                        "until": { "block_time": "2025-01-01T00:00:00Z" }
+                      },
+                      "size": 100000
                     }
                   }
                 }

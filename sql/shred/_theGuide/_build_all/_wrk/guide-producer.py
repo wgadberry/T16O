@@ -16,8 +16,8 @@ import json
 import os
 import requests
 import time
-from typing import Optional, List, Generator
-from datetime import datetime
+from typing import Optional, List, Generator, Dict, Any, Tuple
+from datetime import datetime, timezone
 
 try:
     import pika
@@ -147,6 +147,415 @@ def fetch_all_signatures(
             if skip_failed and sig.get('err') is not None:
                 continue
             yield sig
+
+        total_fetched += len(signatures)
+        before = signatures[-1].get('signature') if signatures else None
+
+        if len(signatures) < fetch_limit:
+            break
+
+        if delay > 0:
+            time.sleep(delay)
+
+
+# =============================================================================
+# Boundary Resolution (before/until with signature, block_id, or block_time)
+# =============================================================================
+
+def parse_iso_datetime(dt_str: str) -> Optional[int]:
+    """Parse ISO datetime string to Unix timestamp"""
+    if not dt_str:
+        return None
+    try:
+        # Handle various ISO formats
+        dt_str = dt_str.replace('Z', '+00:00')
+        if '.' in dt_str and '+' in dt_str:
+            # Has microseconds and timezone
+            dt = datetime.fromisoformat(dt_str)
+        elif '+' in dt_str or '-' in dt_str[-6:]:
+            dt = datetime.fromisoformat(dt_str)
+        else:
+            # Assume UTC if no timezone
+            dt = datetime.fromisoformat(dt_str).replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_boundary(boundary: Any) -> Dict[str, Any]:
+    """
+    Parse a boundary specification into normalized form.
+
+    Accepts:
+    - String: treated as signature (legacy format)
+    - Dict with keys: signature, block_id, block_time
+
+    Returns dict with parsed values (signature, block_id, block_time as unix timestamp)
+    Priority: signature > block_id > block_time
+    """
+    if boundary is None:
+        return {'signature': None, 'block_id': None, 'block_time': None}
+
+    if isinstance(boundary, str):
+        # Legacy format - raw signature string
+        return {'signature': boundary, 'block_id': None, 'block_time': None}
+
+    if isinstance(boundary, dict):
+        sig = boundary.get('signature')
+        block_id = boundary.get('block_id')
+        block_time = boundary.get('block_time')
+
+        # Parse block_time if it's a string
+        if isinstance(block_time, str):
+            block_time = parse_iso_datetime(block_time)
+        elif isinstance(block_time, (int, float)):
+            block_time = int(block_time)
+
+        # Parse block_id
+        if isinstance(block_id, str):
+            try:
+                block_id = int(block_id)
+            except ValueError:
+                block_id = None
+
+        return {'signature': sig, 'block_id': block_id, 'block_time': block_time}
+
+    return {'signature': None, 'block_id': None, 'block_time': None}
+
+
+def find_signature_near_time(db_cursor, target_time: int, direction: str = 'before') -> Optional[str]:
+    """
+    Find ANY signature in the database near the target unix timestamp.
+
+    direction='before': find signature at or before target_time (for use as 'before' param)
+    direction='after': find signature at or after target_time (for use as 'until' param)
+
+    Returns signature string or None if no data near that time.
+    """
+    if not db_cursor or not target_time:
+        return None
+
+    try:
+        if direction == 'before':
+            # Find signature at or just before target time
+            db_cursor.execute(
+                "SELECT signature FROM tx WHERE block_time <= %s ORDER BY block_time DESC LIMIT 1",
+                (target_time,)
+            )
+        else:
+            # Find signature at or just after target time
+            db_cursor.execute(
+                "SELECT signature FROM tx WHERE block_time >= %s ORDER BY block_time ASC LIMIT 1",
+                (target_time,)
+            )
+
+        row = db_cursor.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"  [WARN] DB lookup for time {target_time} failed: {e}")
+        return None
+
+
+def find_signature_near_slot(db_cursor, target_slot: int, direction: str = 'before') -> Optional[str]:
+    """
+    Find ANY signature in the database near the target slot (block_id).
+
+    direction='before': find signature at or before target_slot
+    direction='after': find signature at or after target_slot
+    """
+    if not db_cursor or not target_slot:
+        return None
+
+    try:
+        if direction == 'before':
+            db_cursor.execute(
+                "SELECT signature FROM tx WHERE block_id <= %s ORDER BY block_id DESC LIMIT 1",
+                (target_slot,)
+            )
+        else:
+            db_cursor.execute(
+                "SELECT signature FROM tx WHERE block_id >= %s ORDER BY block_id ASC LIMIT 1",
+                (target_slot,)
+            )
+
+        row = db_cursor.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"  [WARN] DB lookup for slot {target_slot} failed: {e}")
+        return None
+
+
+def binary_search_signature_by_time(
+    rpc_session, address: str, rpc_url: str,
+    target_time: int, direction: str = 'before'
+) -> Optional[str]:
+    """
+    Binary search via RPC to find a signature near target_time.
+    Used as fallback when DB has no data.
+
+    Returns the signature closest to target_time in the specified direction.
+    """
+    print(f"    [SEARCH] Binary search for signature at time {target_time} ({direction})...")
+
+    checkpoints = []  # List of (signature, slot, block_time)
+    current_before = None
+
+    # Phase 1: Exponential probing to find bounds
+    probe_size = 100
+    max_probes = 20
+
+    for probe_num in range(max_probes):
+        try:
+            response = fetch_signatures_rpc(
+                rpc_session, address, rpc_url,
+                limit=probe_size, before=current_before
+            )
+        except Exception as e:
+            print(f"    [SEARCH] RPC error during probe: {e}")
+            break
+
+        if 'error' in response or not response.get('result'):
+            break
+
+        sigs = response['result']
+        if not sigs:
+            break
+
+        # Check if we've passed our target
+        oldest_in_batch = sigs[-1]
+        oldest_time = oldest_in_batch.get('blockTime', 0)
+        newest_time = sigs[0].get('blockTime', 0)
+
+        # Store checkpoint
+        checkpoints.append({
+            'signature': oldest_in_batch['signature'],
+            'block_time': oldest_time,
+            'slot': oldest_in_batch.get('slot'),
+            'batch': sigs
+        })
+
+        if direction == 'before':
+            # Looking for sig at or before target_time
+            # Check if any sig in this batch is at or before target
+            for sig in sigs:
+                sig_time = sig.get('blockTime', 0)
+                if sig_time and sig_time <= target_time:
+                    print(f"    [SEARCH] Found signature at time {sig_time} (target: {target_time})")
+                    return sig['signature']
+        else:
+            # Looking for sig at or after target_time (for until)
+            # If oldest in batch is still after target, we've gone too far
+            if oldest_time and oldest_time < target_time:
+                # Target is somewhere in this batch or previous
+                for sig in reversed(sigs):
+                    sig_time = sig.get('blockTime', 0)
+                    if sig_time and sig_time >= target_time:
+                        print(f"    [SEARCH] Found signature at time {sig_time} (target: {target_time})")
+                        return sig['signature']
+
+        # Continue probing
+        current_before = oldest_in_batch['signature']
+
+        # Exponentially increase probe size
+        probe_size = min(probe_size * 2, 1000)
+
+        # Small delay to avoid rate limiting
+        time.sleep(0.1)
+
+    print(f"    [SEARCH] Could not find signature for time {target_time}")
+    return None
+
+
+def binary_search_signature_by_slot(
+    rpc_session, address: str, rpc_url: str,
+    target_slot: int, direction: str = 'before'
+) -> Optional[str]:
+    """
+    Binary search via RPC to find a signature near target_slot.
+    Used as fallback when DB has no data.
+    """
+    print(f"    [SEARCH] Binary search for signature at slot {target_slot} ({direction})...")
+
+    current_before = None
+    probe_size = 100
+    max_probes = 20
+
+    for probe_num in range(max_probes):
+        try:
+            response = fetch_signatures_rpc(
+                rpc_session, address, rpc_url,
+                limit=probe_size, before=current_before
+            )
+        except Exception as e:
+            print(f"    [SEARCH] RPC error during probe: {e}")
+            break
+
+        if 'error' in response or not response.get('result'):
+            break
+
+        sigs = response['result']
+        if not sigs:
+            break
+
+        oldest_in_batch = sigs[-1]
+        oldest_slot = oldest_in_batch.get('slot', 0)
+
+        if direction == 'before':
+            for sig in sigs:
+                sig_slot = sig.get('slot', 0)
+                if sig_slot and sig_slot <= target_slot:
+                    print(f"    [SEARCH] Found signature at slot {sig_slot} (target: {target_slot})")
+                    return sig['signature']
+        else:
+            if oldest_slot and oldest_slot < target_slot:
+                for sig in reversed(sigs):
+                    sig_slot = sig.get('slot', 0)
+                    if sig_slot and sig_slot >= target_slot:
+                        print(f"    [SEARCH] Found signature at slot {sig_slot} (target: {target_slot})")
+                        return sig['signature']
+
+        current_before = oldest_in_batch['signature']
+        probe_size = min(probe_size * 2, 1000)
+        time.sleep(0.1)
+
+    print(f"    [SEARCH] Could not find signature for slot {target_slot}")
+    return None
+
+
+def resolve_boundary_to_signature(
+    boundary: Dict[str, Any],
+    direction: str,
+    db_cursor,
+    rpc_session,
+    address: str,
+    rpc_url: str
+) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+    """
+    Resolve a boundary specification to a signature for RPC pagination.
+
+    Args:
+        boundary: Parsed boundary dict with signature, block_id, block_time
+        direction: 'before' or 'until' - affects search direction
+        db_cursor: Database cursor for fast lookups
+        rpc_session: RPC session for fallback binary search
+        address: Address being queried (for RPC fallback)
+        rpc_url: RPC URL
+
+    Returns:
+        Tuple of (signature, block_time_filter, block_id_filter)
+        - signature: The resolved signature for RPC before/until param
+        - block_time_filter: If set, filter results by this time during pagination
+        - block_id_filter: If set, filter results by this slot during pagination
+    """
+    sig = boundary.get('signature')
+    block_id = boundary.get('block_id')
+    block_time = boundary.get('block_time')
+
+    # Priority 1: Direct signature - use as-is
+    if sig:
+        return (sig, None, None)
+
+    # Priority 2: Block ID (slot)
+    if block_id:
+        # Try DB first
+        found_sig = find_signature_near_slot(db_cursor, block_id, direction)
+        if found_sig:
+            print(f"    [BOUNDARY] Resolved block_id {block_id} -> signature via DB")
+            return (found_sig, None, block_id)
+
+        # Fallback to RPC binary search
+        found_sig = binary_search_signature_by_slot(rpc_session, address, rpc_url, block_id, direction)
+        if found_sig:
+            return (found_sig, None, block_id)
+
+        # If no signature found, return filter for inline checking
+        return (None, None, block_id)
+
+    # Priority 3: Block time
+    if block_time:
+        # Try DB first
+        found_sig = find_signature_near_time(db_cursor, block_time, direction)
+        if found_sig:
+            print(f"    [BOUNDARY] Resolved block_time {block_time} -> signature via DB")
+            return (found_sig, block_time, None)
+
+        # Fallback to RPC binary search
+        found_sig = binary_search_signature_by_time(rpc_session, address, rpc_url, block_time, direction)
+        if found_sig:
+            return (found_sig, block_time, None)
+
+        # If no signature found, return filter for inline checking
+        return (None, block_time, None)
+
+    return (None, None, None)
+
+
+def fetch_all_signatures_with_filters(
+    session: requests.Session,
+    address: str,
+    rpc_url: str,
+    max_signatures: float = float('inf'),
+    before: Optional[str] = None,
+    until: Optional[str] = None,
+    until_block_time: Optional[int] = None,
+    until_block_id: Optional[int] = None,
+    delay: float = 0.2,
+    skip_failed: bool = True
+) -> Generator[dict, None, None]:
+    """
+    Generator that fetches signatures with support for time/slot-based until filtering.
+
+    Extends fetch_all_signatures with inline filtering for until_block_time and until_block_id.
+    This allows stopping pagination when we reach a certain time or slot, even if we don't
+    have an exact signature for that boundary.
+    """
+    total_fetched = 0
+
+    while total_fetched < max_signatures:
+        remaining = max_signatures - total_fetched
+        fetch_limit = min(1000, int(remaining) if remaining != float('inf') else 1000)
+
+        try:
+            response = fetch_signatures_rpc(
+                session, address, rpc_url,
+                limit=fetch_limit, before=before, until=until
+            )
+        except requests.RequestException as e:
+            print(f"  [!] RPC Error: {e}")
+            break
+
+        if 'error' in response:
+            print(f"  [!] RPC returned error: {response['error']}")
+            break
+
+        signatures = response.get('result', [])
+        if not signatures:
+            break
+
+        stop_pagination = False
+
+        for sig in signatures:
+            if skip_failed and sig.get('err') is not None:
+                continue
+
+            # Check until_block_time filter
+            if until_block_time:
+                sig_time = sig.get('blockTime', 0)
+                if sig_time and sig_time < until_block_time:
+                    stop_pagination = True
+                    break
+
+            # Check until_block_id filter
+            if until_block_id:
+                sig_slot = sig.get('slot', 0)
+                if sig_slot and sig_slot < until_block_id:
+                    stop_pagination = True
+                    break
+
+            yield sig
+
+        if stop_pagination:
+            break
 
         total_fetched += len(signatures)
         before = signatures[-1].get('signature') if signatures else None
@@ -368,11 +777,40 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
     estimated_batches = (max_signatures + batch_size - 1) // batch_size
 
     try:
-        until_sig = request_until
-        before_sig = request_before
+        # Parse boundary specifications (support both legacy string and new dict format)
+        before_boundary = parse_boundary(request_before)
+        until_boundary = parse_boundary(request_until)
+
+        # Check if explicit boundaries were provided
+        has_explicit_before = before_boundary.get('signature') or before_boundary.get('block_id') or before_boundary.get('block_time')
+        has_explicit_until = until_boundary.get('signature') or until_boundary.get('block_id') or until_boundary.get('block_time')
+
+        # Resolve boundaries to signatures
+        before_sig = None
+        until_sig = None
+        until_block_time = None
+        until_block_id = None
+
+        if has_explicit_before:
+            before_sig, _, _ = resolve_boundary_to_signature(
+                before_boundary, 'before', db_cursor, rpc_session, address, CHAINSTACK_RPC_URL
+            )
+            if before_sig:
+                print(f"    [BOUNDARY] before -> {before_sig[:20]}...")
+
+        if has_explicit_until:
+            until_sig, until_block_time, until_block_id = resolve_boundary_to_signature(
+                until_boundary, 'until', db_cursor, rpc_session, address, CHAINSTACK_RPC_URL
+            )
+            if until_sig:
+                print(f"    [BOUNDARY] until -> {until_sig[:20]}...")
+            elif until_block_time:
+                print(f"    [BOUNDARY] until_block_time -> {until_block_time} (inline filter)")
+            elif until_block_id:
+                print(f"    [BOUNDARY] until_block_id -> {until_block_id} (inline filter)")
 
         # Smart sync if DB available and no explicit pagination
-        if db_cursor and not request_before and not request_until:
+        if db_cursor and not has_explicit_before and not has_explicit_until:
             db_cursor.execute("SELECT id, address_type FROM tx_address WHERE address = %s", (address,))
             addr_row = db_cursor.fetchone()
             if addr_row:
@@ -440,9 +878,10 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
         signatures = []
         total_skipped = 0
 
-        for sig_obj in fetch_all_signatures(
+        for sig_obj in fetch_all_signatures_with_filters(
             rpc_session, address, CHAINSTACK_RPC_URL,
-            max_signatures=max_signatures, until=until_sig, before=before_sig
+            max_signatures=max_signatures, until=until_sig, before=before_sig,
+            until_block_time=until_block_time, until_block_id=until_block_id
         ):
             sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
             if sig_str:
@@ -495,6 +934,9 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
     filters = batch.get('filters', {})
     max_signatures = batch.get('size', 100)
+
+    # Support both legacy string format and new object format for before/until
+    # New format: {"signature": "...", "block_id": 123, "block_time": "2025-01-15T10:00:00Z"}
     request_before = filters.get('before')
     request_until = filters.get('until')
 
