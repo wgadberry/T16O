@@ -1,5 +1,9 @@
--- sp_tx_insert_sol_balance: Batch insert ALL SOL balance changes from full staging JSON
+-- sp_tx_insert_sol_balance: Batch insert SOL balance changes from full staging JSON
 -- Uses JSON_TABLE with NESTED PATH to process all txs at once (no loop)
+--
+-- Feature flags:
+--   FEATURE_BALANCE_CHANGES (1): When set, collect ALL balance changes
+--                                When not set, only collect for searched addresses
 
 DELIMITER ;;
 
@@ -7,9 +11,17 @@ DROP PROCEDURE IF EXISTS `sp_tx_insert_sol_balance`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_sol_balance`(
     IN p_txs_json JSON,
+    IN p_features INT UNSIGNED,
+    IN p_searched_addresses JSON,
     OUT p_count INT
 )
 BEGIN
+    -- Feature flag constant
+    DECLARE FEATURE_BALANCE_CHANGES INT UNSIGNED DEFAULT 1;
+    DECLARE v_collect_all_balances BOOLEAN;
+
+    SET v_collect_all_balances = (p_features & FEATURE_BALANCE_CHANGES) = FEATURE_BALANCE_CHANGES;
+
     -- Note: No DELETE needed - we only process new txs that don't have balance records yet
 
     INSERT IGNORE INTO tx_sol_balance_change (
@@ -42,7 +54,11 @@ BEGIN
     -- Join to get address_id
     JOIN tx_address addr ON addr.address = b.address
     WHERE b.address IS NOT NULL
-      AND CAST(b.change_amount AS SIGNED) != 0;
+      AND CAST(b.change_amount AS SIGNED) != 0
+      -- Filter: collect all OR address is in searched list
+      AND (v_collect_all_balances
+           OR p_searched_addresses IS NULL
+           OR JSON_CONTAINS(p_searched_addresses, JSON_QUOTE(b.address)));
 
     SET p_count = ROW_COUNT();
 END;;

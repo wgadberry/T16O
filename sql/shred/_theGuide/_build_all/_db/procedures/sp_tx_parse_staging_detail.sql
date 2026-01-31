@@ -1,6 +1,9 @@
 -- sp_tx_parse_staging_detail stored procedure
 -- Processes detailed (tx_state=16) staging data into balance change tables
 -- FULLY BATCH - no loops, all operations use JSON_TABLE
+--
+-- Feature flags control what balance data is collected:
+--   FEATURE_BALANCE_CHANGES (1): Collect ALL balance changes vs only searched addresses
 
 DELIMITER ;;
 
@@ -17,6 +20,9 @@ BEGIN
     DECLARE v_txs_json JSON;
     DECLARE v_shredded_state INT;
     DECLARE v_total_txs INT;
+    DECLARE v_request_log_id BIGINT UNSIGNED;
+    DECLARE v_features INT UNSIGNED DEFAULT 0;
+    DECLARE v_searched_addresses JSON DEFAULT NULL;
 
     SET p_tx_count = 0;
     SET p_sol_balance_count = 0;
@@ -25,10 +31,20 @@ BEGIN
 
     SET v_shredded_state = CAST(fn_get_config('tx_state', 'shredded') AS UNSIGNED);
 
-    -- Get the staging JSON
-    SELECT txs INTO v_txs_json
+    -- Get the staging JSON and request_log_id
+    SELECT txs, request_log_id INTO v_txs_json, v_request_log_id
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
+
+    -- Get features and searched addresses from tx_request_log (if linked)
+    IF v_request_log_id IS NOT NULL THEN
+        SELECT
+            COALESCE(features, 0),
+            JSON_EXTRACT(payload_summary, '$.filters.addresses')
+        INTO v_features, v_searched_addresses
+        FROM tx_request_log
+        WHERE id = v_request_log_id;
+    END IF;
 
     IF v_txs_json IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Staging row not found';
@@ -57,13 +73,14 @@ BEGIN
 
     -- =========================================================================
     -- PHASE 2: Batch insert all balance changes (NO LOOP!)
+    -- Features control whether ALL balances or only searched addresses are collected
     -- =========================================================================
 
-    -- Insert ALL SOL balance changes from ALL transactions in one query
-    CALL sp_tx_insert_sol_balance(v_txs_json, p_sol_balance_count);
+    -- Insert SOL balance changes (filtered by feature flag)
+    CALL sp_tx_insert_sol_balance(v_txs_json, v_features, v_searched_addresses, p_sol_balance_count);
 
-    -- Insert ALL token balance changes from ALL transactions in one query
-    CALL sp_tx_insert_token_balance(v_txs_json, p_token_balance_count);
+    -- Insert token balance changes (filtered by feature flag)
+    CALL sp_tx_insert_token_balance(v_txs_json, v_features, v_searched_addresses, p_token_balance_count);
 
     -- =========================================================================
     -- PHASE 3: Batch update tx_state for processed transactions
