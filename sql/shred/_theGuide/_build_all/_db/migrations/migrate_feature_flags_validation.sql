@@ -10,16 +10,19 @@
 -- FEATURE FLAG REFERENCE
 -- ============================================================================
 --
--- | Feature Name      | Bit | Mask | Billable | Description                                    |
--- |-------------------|-----|------|----------|------------------------------------------------|
--- | balance_changes   |  0  | 0x01 | Yes      | Collect ALL balance changes vs searched only   |
--- | all_addresses     |  1  | 0x02 | Yes      | Collect ATAs, vaults, pools (extended)         |
--- | swap_routing      |  2  | 0x04 | Yes      | Collect all swap hops vs top-level only        |
--- | ata_mapping       |  3  | 0x08 | Yes      | Collect ATA-to-owner mappings (future)         |
--- | funder_discovery  |  4  | 0x10 | Yes      | Enable Solscan funder wallet lookups           |
--- | token_metadata    |  5  | 0x20 | No       | Token metadata enrichment (community service)  |
--- | address_labels    |  6  | 0x40 | No       | Address labels/tags (community service)        |
--- | program_details   |  7  | 0x80 | Yes      | Detailed program invocation data (future)      |
+-- BILLABLE FEATURES (à la carte):
+-- | Feature Name      | Bit | Mask | Description                                    |
+-- |-------------------|-----|------|------------------------------------------------|
+-- | balance_changes   |  0  | 0x01 | Collect ALL balance changes vs searched only   |
+-- | all_addresses     |  1  | 0x02 | Collect ATAs, vaults, pools (extended)         |
+-- | swap_routing      |  2  | 0x04 | Collect all swap hops vs top-level only        |
+-- | ata_mapping       |  3  | 0x08 | Collect ATA-to-owner mappings (future)         |
+-- | funder_discovery  |  4  | 0x10 | Enable Solscan funder wallet lookups           |
+--
+-- CORE FEATURES (always enabled, not gated):
+-- - Token metadata enrichment (background daemon via guide-enricher.py)
+-- - Address labels/tags (background enrichment)
+-- - Program details (collected in activities by default)
 --
 -- ============================================================================
 -- IMPLEMENTATION STATUS
@@ -48,18 +51,6 @@
 --     - Implemented in: guide-gateway.py (trigger_worker)
 --     - When SET: Allow requests to funder worker
 --     - When NOT SET: Reject funder requests with 403
---
--- [ ] FEATURE_TOKEN_METADATA (0x20)
---     - NOT YET IMPLEMENTED (community service, non-billable)
---     - Future: Enable token metadata enrichment
---
--- [ ] FEATURE_ADDRESS_LABELS (0x40)
---     - NOT YET IMPLEMENTED (community service, non-billable)
---     - Future: Enable address label/tag enrichment
---
--- [ ] FEATURE_PROGRAM_DETAILS (0x80)
---     - NOT YET IMPLEMENTED
---     - Future: Collect detailed program invocation data
 
 SELECT '=== Feature Flag Validation ===' AS status;
 
@@ -139,14 +130,11 @@ SELECT
     name,
     feature_mask,
     CONCAT('0x', LPAD(HEX(COALESCE(feature_mask, 0)), 2, '0')) AS hex_mask,
-    CASE WHEN feature_mask & 0x01 THEN 'Y' ELSE '-' END AS balance_changes,
-    CASE WHEN feature_mask & 0x02 THEN 'Y' ELSE '-' END AS all_addresses,
-    CASE WHEN feature_mask & 0x04 THEN 'Y' ELSE '-' END AS swap_routing,
-    CASE WHEN feature_mask & 0x08 THEN 'Y' ELSE '-' END AS ata_mapping,
-    CASE WHEN feature_mask & 0x10 THEN 'Y' ELSE '-' END AS funder_discovery,
-    CASE WHEN feature_mask & 0x20 THEN 'Y' ELSE '-' END AS token_metadata,
-    CASE WHEN feature_mask & 0x40 THEN 'Y' ELSE '-' END AS address_labels,
-    CASE WHEN feature_mask & 0x80 THEN 'Y' ELSE '-' END AS program_details,
+    CASE WHEN feature_mask & 0x01 THEN 'Y' ELSE '-' END AS bal_chg,
+    CASE WHEN feature_mask & 0x02 THEN 'Y' ELSE '-' END AS all_addr,
+    CASE WHEN feature_mask & 0x04 THEN 'Y' ELSE '-' END AS swap_rt,
+    CASE WHEN feature_mask & 0x08 THEN 'Y' ELSE '-' END AS ata_map,
+    CASE WHEN feature_mask & 0x10 THEN 'Y' ELSE '-' END AS funder,
     active
 FROM tx_api_key
 ORDER BY id;
@@ -158,18 +146,13 @@ ORDER BY id;
 -- -- Enable all billable features (0x1F = 31)
 -- UPDATE tx_api_key SET feature_mask = 0x1F WHERE name = 'premium-key';
 --
--- -- Enable only basic features (balance + addresses)
--- UPDATE tx_api_key SET feature_mask = 0x03 WHERE name = 'basic-key';
+-- -- Enable only basic features (balance + addresses + swap routing)
+-- UPDATE tx_api_key SET feature_mask = 0x07 WHERE name = 'basic-key';
 --
--- -- Enable all features including community services (0xFF = 255)
--- UPDATE tx_api_key SET feature_mask = 0xFF WHERE name = 'full-access-key';
+-- -- Enable core data features without funder (0x0F = 15)
+-- UPDATE tx_api_key SET feature_mask = 0x0F WHERE name = 'data-only-key';
 --
--- -- Check what features are enabled for a key
--- SELECT
---     name,
---     CASE WHEN feature_mask & 0x01 THEN 'balance_changes ' ELSE '' END,
---     CASE WHEN feature_mask & 0x02 THEN 'all_addresses ' ELSE '' END,
---     -- etc.
--- FROM tx_api_key WHERE name = 'my-key';
+-- -- Minimum viable (just balance changes for searched addresses)
+-- UPDATE tx_api_key SET feature_mask = 0x00 WHERE name = 'minimal-key';
 
 SELECT '=== Validation Complete ===' AS status;

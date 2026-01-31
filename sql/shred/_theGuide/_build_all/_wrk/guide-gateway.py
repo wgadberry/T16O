@@ -126,14 +126,17 @@ DEFAULT_DOWNSTREAM_WORKERS = ['decoder', 'detailer', 'shredder']
 # Core features (always collected) have no flag - they're the default.
 # These flags ENABLE additional data collection beyond core.
 
+# Billable feature flags (à la carte)
 FEATURE_BALANCE_CHANGES   = 0x0001  # All balance changes for all participants
 FEATURE_ALL_ADDRESSES     = 0x0002  # All addresses (ATAs, vaults, intermediate)
 FEATURE_SWAP_ROUTING      = 0x0004  # Full swap routing paths
 FEATURE_ATA_MAPPING       = 0x0008  # Associated token account mappings
 FEATURE_FUNDER_DISCOVERY  = 0x0010  # Solscan API funder lookups
-FEATURE_TOKEN_METADATA    = 0x0020  # Token metadata enrichment (community)
-FEATURE_ADDRESS_LABELS    = 0x0040  # Address labels/tags (community)
-FEATURE_PROGRAM_DETAILS   = 0x0080  # Detailed program invocation data
+
+# Core features (always enabled, not gated):
+# - Token metadata enrichment (background daemon)
+# - Address labels/tags (background enrichment)
+# - Program details (collected in activities)
 
 
 def _get_or_create_tracker(correlation_id: str) -> Dict:
