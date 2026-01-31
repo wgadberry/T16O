@@ -1,6 +1,9 @@
 -- sp_tx_parse_staging_decode stored procedure
 -- Processes decoded (tx_state=8) staging data into tx tables
 -- FULLY BATCH - no loops, all operations use JSON_TABLE
+--
+-- Feature flags are retrieved from tx_request_log.features (linked via request_log_id)
+-- and passed to sp_tx_prepopulate_lookups to control address collection behavior
 
 DELIMITER ;;
 
@@ -18,6 +21,7 @@ BEGIN
     DECLARE v_txs_json JSON;
     DECLARE v_shredded_state INT;
     DECLARE v_request_log_id BIGINT UNSIGNED;
+    DECLARE v_features INT UNSIGNED DEFAULT 0;
 
     SET p_tx_count = 0;
     SET p_transfer_count = 0;
@@ -32,6 +36,13 @@ BEGIN
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
 
+    -- Get features from tx_request_log (if linked)
+    IF v_request_log_id IS NOT NULL THEN
+        SELECT COALESCE(features, 0) INTO v_features
+        FROM tx_request_log
+        WHERE id = v_request_log_id;
+    END IF;
+
     IF v_txs_json IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Staging row not found';
     END IF;
@@ -42,8 +53,9 @@ BEGIN
 
     -- =========================================================================
     -- PHASE 1: Pre-populate all lookup tables (addresses, tokens, programs, pools)
+    -- Features control which address types are collected (CORE vs EXTENDED)
     -- =========================================================================
-    CALL sp_tx_prepopulate_lookups(v_txs_json, v_request_log_id);
+    CALL sp_tx_prepopulate_lookups(v_txs_json, v_request_log_id, v_features);
 
     -- =========================================================================
     -- PHASE 2: Bulk insert all transactions
