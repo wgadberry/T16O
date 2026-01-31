@@ -163,6 +163,8 @@
                 <button class="btn btn-secondary" onclick="loadPreset('funder')">Funder Request</button>
                 <button class="btn btn-secondary" onclick="loadPreset('funder-priority')">Funder (Priority 10)</button>
                 <button class="btn btn-secondary" onclick="loadPreset('producer')">Producer Request</button>
+                <button class="btn btn-secondary" onclick="loadPreset('producer-time')">Producer (Time Range)</button>
+                <button class="btn btn-secondary" onclick="loadPreset('producer-slot')">Producer (Slot Range)</button>
                 <button class="btn btn-secondary" onclick="loadPreset('status')">Check Status</button>
             </div>
 
@@ -268,7 +270,35 @@
                         filters: {
                             addresses: [""]
                         },
-                        size: 50
+                        size: 10
+                    }
+                }, null, 2)
+            },
+            'producer-time': {
+                method: 'POST',
+                url: 'http://localhost:5100/api/trigger/producer',
+                body: JSON.stringify({
+                    batch: {
+                        filters: {
+                            addresses: [""],
+                            before: { block_time: "2025-01-31T00:00:00Z" },
+                            until: { block_time: "2025-01-01T00:00:00Z" }
+                        },
+                        size: 100000
+                    }
+                }, null, 2)
+            },
+            'producer-slot': {
+                method: 'POST',
+                url: 'http://localhost:5100/api/trigger/producer',
+                body: JSON.stringify({
+                    batch: {
+                        filters: {
+                            addresses: [""],
+                            before: { block_id: 285000000 },
+                            until: { block_id: 280000000 }
+                        },
+                        size: 100000
                     }
                 }, null, 2)
             },
