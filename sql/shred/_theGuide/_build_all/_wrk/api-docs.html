@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Guide Gateway API</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { margin: 0; }
+    </style>
+</head>
+<body>
+    <script
+      id="api-reference"
+      type="application/json"
+      data-proxy-url="https://proxy.scalar.com"
+    >
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Guide Gateway API",
+    "version": "1.0.0",
+    "description": "Transaction processing pipeline for Solana blockchain data.\n\n## Workers\n- **producer** - Fetches transaction signatures from RPC\n- **decoder** - Decodes raw transactions via Shyft API\n- **detailer** - Enriches transactions with additional data\n- **funder** - Discovers funding wallets for addresses\n\n## Authentication\nAll endpoints require an API key passed via the `X-API-Key` header."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5100",
+      "description": "Local Development"
+    }
+  ],
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key for authentication"
+      }
+    },
+    "schemas": {
+      "TriggerRequest": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "description": "Unique request identifier (auto-generated if not provided)",
+            "example": "my-request-001"
+          },
+          "correlation_id": {
+            "type": "string",
+            "description": "Session/correlation identifier for tracking related requests",
+            "example": "my-session-001"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 5,
+            "description": "Request priority (1=lowest, 10=highest)"
+          },
+          "action": {
+            "type": "string",
+            "default": "process",
+            "description": "Action to perform"
+          },
+          "batch": {
+            "type": "object",
+            "description": "Batch parameters for the worker"
+          }
+        }
+      },
+      "ProducerBatch": {
+        "type": "object",
+        "properties": {
+          "filters": {
+            "type": "object",
+            "properties": {
+              "addresses": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Solana addresses to fetch signatures for",
+                "example": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
+              }
+            }
+          },
+          "size": {
+            "type": "integer",
+            "default": 10,
+            "description": "Number of signatures to fetch per address"
+          }
+        }
+      },
+      "FunderBatch": {
+        "type": "object",
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Wallet addresses to find funders for",
+            "example": ["5amFbzL4b2MHP8m1BSj5CFdoo7zJefw3qWtqw9jqj2h7"]
+          }
+        }
+      },
+      "DecoderBatch": {
+        "type": "object",
+        "properties": {
+          "signatures": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Transaction signatures to decode"
+          }
+        }
+      },
+      "TriggerResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean" },
+          "request_id": { "type": "string" },
+          "correlation_id": { "type": "string" },
+          "worker": { "type": "string" },
+          "status": { "type": "string", "enum": ["queued", "completed", "failed"] },
+          "result": { "type": "object" }
+        }
+      },
+      "WorkerInfo": {
+        "type": "object",
+        "properties": {
+          "description": { "type": "string" },
+          "request_queue": { "type": "string" },
+          "response_queue": { "type": "string" }
+        }
+      },
+      "RequestStatus": {
+        "type": "object",
+        "properties": {
+          "request_id": { "type": "string" },
+          "correlation_id": { "type": "string" },
+          "target_worker": { "type": "string" },
+          "status": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": "string", "format": "date-time" },
+          "result": { "type": "object" }
+        }
+      },
+      "PipelineStatus": {
+        "type": "object",
+        "properties": {
+          "correlation_id": { "type": "string" },
+          "requests": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RequestStatus" }
+          },
+          "overall_status": { "type": "string" }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["healthy", "degraded", "unhealthy"] },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "rabbitmq": { "type": "string" },
+              "mysql": { "type": "string" }
+            }
+          },
+          "timestamp": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean", "example": false },
+          "error": { "type": "string" },
+          "request_id": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "healthCheck",
+        "summary": "Health Check",
+        "description": "Check gateway health including RabbitMQ and MySQL connectivity",
+        "tags": ["System"],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "System is healthy",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "System is degraded or unhealthy"
+          }
+        }
+      }
+    },
+    "/api/workers": {
+      "get": {
+        "operationId": "listWorkers",
+        "summary": "List Workers",
+        "description": "Get list of available workers and their configurations",
+        "tags": ["System"],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Worker list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "workers": {
+                      "type": "object",
+                      "additionalProperties": { "$ref": "#/components/schemas/WorkerInfo" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trigger/producer": {
+      "post": {
+        "operationId": "triggerProducer",
+        "summary": "Trigger Producer",
+        "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing",
+        "tags": ["Workers"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/TriggerRequest" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "batch": { "$ref": "#/components/schemas/ProducerBatch" }
+                    }
+                  }
+                ]
+              },
+              "examples": {
+                "fetchByAddress": {
+                  "summary": "Fetch signatures for a token mint",
+                  "value": {
+                    "request_id": "prod-001",
+                    "correlation_id": "session-001",
+                    "priority": 10,
+                    "batch": {
+                      "filters": {
+                        "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
+                      },
+                      "size": 10
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request processed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TriggerResponse" }
+              }
+            }
+          },
+          "400": { "description": "Invalid request" },
+          "401": { "description": "Invalid API key" },
+          "409": { "description": "Duplicate request_id" }
+        }
+      }
+    },
+    "/api/trigger/decoder": {
+      "post": {
+        "operationId": "triggerDecoder",
+        "summary": "Trigger Decoder",
+        "description": "Decode raw transaction data via Shyft API.\n\nTypically triggered automatically by producer cascade.",
+        "tags": ["Workers"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/TriggerRequest" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "batch": { "$ref": "#/components/schemas/DecoderBatch" }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request processed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TriggerResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trigger/detailer": {
+      "post": {
+        "operationId": "triggerDetailer",
+        "summary": "Trigger Detailer",
+        "description": "Enrich decoded transactions with additional metadata.\n\nTypically triggered automatically by decoder cascade.",
+        "tags": ["Workers"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TriggerRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request processed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TriggerResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/trigger/funder": {
+      "post": {
+        "operationId": "triggerFunder",
+        "summary": "Trigger Funder",
+        "description": "Discover funding wallets for addresses.\n\nFor each address, queries Solscan API to find the first SOL inflow and identifies the funding wallet.",
+        "tags": ["Workers"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  { "$ref": "#/components/schemas/TriggerRequest" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "batch": { "$ref": "#/components/schemas/FunderBatch" }
+                    }
+                  }
+                ]
+              },
+              "examples": {
+                "findFunder": {
+                  "summary": "Find funder for a wallet",
+                  "value": {
+                    "request_id": "funder-001",
+                    "correlation_id": "session-001",
+                    "priority": 10,
+                    "batch": {
+                      "addresses": ["5amFbzL4b2MHP8m1BSj5CFdoo7zJefw3qWtqw9jqj2h7"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request processed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TriggerResponse" },
+                "example": {
+                  "success": true,
+                  "request_id": "funder-001",
+                  "correlation_id": "session-001",
+                  "worker": "funder",
+                  "status": "completed",
+                  "result": {
+                    "processed": 1,
+                    "funders_found": 1,
+                    "funders_not_found": 0,
+                    "elapsed_seconds": 1.23
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/status/{request_id}": {
+      "get": {
+        "operationId": "getRequestStatus",
+        "summary": "Get Request Status",
+        "description": "Get the status of a single request by its request_id",
+        "tags": ["Status"],
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "example": "my-request-001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RequestStatus" }
+              }
+            }
+          },
+          "404": { "description": "Request not found" }
+        }
+      }
+    },
+    "/api/pipeline/{correlation_id}": {
+      "get": {
+        "operationId": "getPipelineStatus",
+        "summary": "Get Pipeline Status",
+        "description": "Get aggregated status of all requests in a pipeline by correlation_id.\n\nReturns all worker requests (gateway, producer, decoder, detailer, funder) that share the same correlation_id.",
+        "tags": ["Status"],
+        "parameters": [
+          {
+            "name": "correlation_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "example": "my-session-001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pipeline status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PipelineStatus" }
+              }
+            }
+          },
+          "404": { "description": "Correlation not found" }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "System",
+      "description": "Health and configuration endpoints"
+    },
+    {
+      "name": "Workers",
+      "description": "Trigger worker processing"
+    },
+    {
+      "name": "Status",
+      "description": "Request and pipeline status"
+    }
+  ]
+}
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>
