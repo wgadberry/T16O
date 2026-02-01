@@ -231,6 +231,177 @@
 .legend-dot.zero-balance { background: #666666; }
 .legend-dot.funder { background: #a855f7; }
 
+/* Bubble Map Wrapper */
+.bubble-map-wrapper {
+  position: relative;
+}
+
+/* Node Details Panel */
+.node-details-panel {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 320px;
+  background: rgba(15, 15, 25, 0.3);
+  border: 1px solid rgba(100, 100, 150, 0.4);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 1px solid rgba(100, 100, 150, 0.3);
+}
+
+.details-header h4 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.details-content {
+  padding: 1rem;
+}
+
+.detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+}
+
+.detail-row:last-child {
+  margin-bottom: 0;
+}
+
+.detail-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888;
+}
+
+.detail-value {
+  font-size: 0.9rem;
+  color: #e0e0e0;
+}
+
+.type-badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  width: fit-content;
+}
+
+.address-value {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.address-text {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #aaa;
+  word-break: break-all;
+  flex: 1;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.copy-btn:hover {
+  opacity: 1;
+}
+
+.balance-value {
+  color: #22c55e;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.usd-value {
+  color: #f59e0b;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.funded-by-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.funder-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(168, 85, 247, 0.1);
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+}
+
+.funder-address {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #a855f7;
+  flex: 1;
+}
+
+.no-data {
+  color: #666;
+  font-style: italic;
+}
+
+.connections-section {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(100, 100, 150, 0.3);
+}
+
+.connections-section h5 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888;
+}
+
+.connection-stats {
+  display: flex;
+  gap: 1rem;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.stat-item.incoming {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.stat-item.outgoing {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .cluster-maps-layout {
@@ -239,5 +410,10 @@
 
   .sidebar-panel {
     width: 100%;
+  }
+
+  .node-details-panel {
+    width: calc(100% - 40px);
+    max-width: 320px;
   }
 }

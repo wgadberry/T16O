@@ -6,6 +6,7 @@ import { BubbleMapResponse, BubbleMapNode, BubbleMapEdge } from '../../../models
 interface D3Node extends d3.SimulationNodeDatum {
   id: string;
   label: string;
+  name: string;
   balance: number;
   balanceUsd: number;
   isPool: boolean;
@@ -49,6 +50,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   errorMessage = '';
   currentData: BubbleMapResponse | null = null;
   showLabels = true;
+  selectedNode: D3Node | null = null;
 
   // Mascot image for larger bubbles
   private readonly mascotImagePath = 'images/cfuck_mascot.jpg';
@@ -197,7 +199,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('class', 'node-tooltip')
       .style('position', 'absolute')
       .style('visibility', 'hidden')
-      .style('background', 'rgba(15, 15, 25, 0.95)')
+      .style('background', 'rgba(15, 15, 25, 0.5)')
       .style('border', '1px solid rgba(100, 100, 150, 0.5)')
       .style('border-radius', '8px')
       .style('padding', '12px 16px')
@@ -231,7 +233,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .style('height', '0')
       .style('border-top', '8px solid transparent')
       .style('border-bottom', '8px solid transparent')
-      .style('border-right', '8px solid rgba(15, 15, 25, 0.95)');
+      .style('border-right', '8px solid rgba(15, 15, 25, 0.5)');
   }
 
   private createNodeGradient(defs: d3.Selection<SVGDefsElement, unknown, null, undefined>, id: string, color: string): void {
@@ -358,7 +360,9 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('filter', 'url(#glow)')
       .style('cursor', 'pointer')
       .on('mouseover', (event, d) => this.onNodeHover(event, d, true))
-      .on('mouseout', (event, d) => this.onNodeHover(event, d, false));
+      .on('mousemove', (event, d) => this.onNodeMouseMove(event))
+      .on('mouseout', (event, d) => this.onNodeHover(event, d, false))
+      .on('click', (event, d) => this.onNodeClick(event, d));
 
     // Add mascot images to larger bubbles
     const defs = this.svg.select('defs');
@@ -453,9 +457,26 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
           ? [node.funded_by]
           : [];
 
+      // Determine node type label
+      let typeLabel: string;
+      if (isPool) {
+        typeLabel = 'Pool';
+      } else if (isMint) {
+        typeLabel = 'Mint';
+      } else if (isProgram) {
+        typeLabel = 'Program';
+      } else if (node.address_type === 'wallet' || node.label === 'wallet') {
+        typeLabel = 'Wallet';
+      } else if (node.address_type === 'unknown' || !node.address_type) {
+        typeLabel = 'Under Investigation';
+      } else {
+        typeLabel = node.address_type;
+      }
+
       return {
         id: node.address,
-        label: node.pool_label || node.token_name || node.label || `${node.address.slice(0, 4)}...${node.address.slice(-4)}`,
+        label: typeLabel,
+        name: node.pool_label || node.token_name || node.label || `${node.address.slice(0, 4)}...${node.address.slice(-4)}`,
         balance: balance,
         balanceUsd: balanceUsd,
         isPool: isPool,
@@ -518,20 +539,19 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     // Show/hide tooltip
     if (this.tooltip) {
       if (isHover) {
-        const nodeType = d.isPool ? 'Pool' : d.isProgram ? 'Program' : 'Wallet';
         const fundedByText = d.fundedBy.length > 0
           ? d.fundedBy.map(f => `${f.slice(0, 4)}...${f.slice(-4)}`).join(', ')
-          : 'Unknown';
+          : 'Under Investigation';
 
         this.tooltip
           .style('visibility', 'visible')
           .html(`
             <div style="margin-bottom: 8px; font-weight: 600; color: ${d.color}; font-size: 14px;">
-              ${d.label}
+              ${d.name}
             </div>
             <div style="margin-bottom: 6px;">
               <span style="color: #888;">Type:</span>
-              <span style="color: #fff;">${nodeType}</span>
+              <span style="color: #fff;">${d.label}</span>
             </div>
             <div style="margin-bottom: 6px;">
               <span style="color: #888;">Address:</span>
@@ -553,18 +573,48 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
             </div>
           `);
 
-        // Position tooltip right at the cursor
-        const containerRect = this.containerRef.nativeElement.getBoundingClientRect();
-        const tooltipX = event.clientX - containerRect.left + 0;
-        const tooltipY = event.clientY - containerRect.top + 0;
-
-        this.tooltip
-          .style('left', `${tooltipX}px`)
-          .style('top', `${tooltipY}px`);
+        this.updateTooltipPosition(event);
       } else {
         this.tooltip.style('visibility', 'hidden');
       }
     }
+  }
+
+  private onNodeMouseMove(event: MouseEvent): void {
+    if (this.tooltip) {
+      this.updateTooltipPosition(event);
+    }
+  }
+
+  private onNodeClick(event: MouseEvent, d: D3Node): void {
+    event.stopPropagation();
+    this.selectedNode = d;
+  }
+
+  closeDetailsPanel(): void {
+    this.selectedNode = null;
+  }
+
+  copyToClipboard(text: string): void {
+    navigator.clipboard.writeText(text);
+  }
+
+  getNodeConnections(node: D3Node): { incoming: D3Link[], outgoing: D3Link[] } {
+    const incoming = this.links.filter(l => (l.target as D3Node).id === node.id);
+    const outgoing = this.links.filter(l => (l.source as D3Node).id === node.id);
+    return { incoming, outgoing };
+  }
+
+  private updateTooltipPosition(event: MouseEvent): void {
+    if (!this.tooltip) return;
+
+    const containerRect = this.containerRef.nativeElement.getBoundingClientRect();
+    const tooltipX = event.clientX - containerRect.left;
+    const tooltipY = event.clientY - containerRect.top;
+
+    this.tooltip
+      .style('left', `${tooltipX}px`)
+      .style('top', `${tooltipY}px`);
   }
 
   resetZoom(): void {
