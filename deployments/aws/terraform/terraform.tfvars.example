@@ -1,0 +1,95 @@
+# T16O API Gateway - Example Terraform Variables
+# Copy this file to terraform.tfvars and fill in your values
+
+# =============================================================================
+# AWS Configuration
+# =============================================================================
+
+aws_region  = "us-east-1"
+environment = "prod"
+name_prefix = "t16o"
+
+# =============================================================================
+# VPC Configuration (Required)
+# =============================================================================
+
+# Your existing VPC ID
+vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
+
+# VPC CIDR block (e.g., "10.0.0.0/16")
+vpc_cidr = "10.0.0.0/16"
+
+# Private subnet IDs for the NLB (at least 2 subnets in different AZs recommended)
+subnet_ids = [
+  "subnet-xxxxxxxxxxxxxxxxx",
+  "subnet-yyyyyyyyyyyyyyyyy"
+]
+
+# =============================================================================
+# EC2 Instance IDs (Required)
+# =============================================================================
+
+# EC2 instances running the Guide Gateway Flask API
+guide_gateway_instance_ids = [
+  "i-xxxxxxxxxxxxxxxxx"
+]
+
+# EC2 instances running the Site API (C# API)
+site_api_instance_ids = [
+  "i-yyyyyyyyyyyyyyyyy"
+]
+
+# EC2 instances running the Cluster Map APIs
+cluster_apis_instance_ids = [
+  "i-zzzzzzzzzzzzzzzzz"
+]
+
+# =============================================================================
+# Service Ports
+# =============================================================================
+
+# Port for Guide Gateway Flask API
+guide_gateway_port = 5100
+
+# Port for Site API (C#)
+site_api_port = 5000
+
+# Port for Cluster Map APIs
+cluster_apis_port = 5100
+
+# =============================================================================
+# API Gateway Configuration
+# =============================================================================
+
+# Stage name (e.g., "dev", "staging", "prod")
+stage_name = "prod"
+
+# Rate limiting (requests per second)
+rate_limit  = 100
+burst_limit = 200
+
+# Quota (requests per period)
+quota_limit  = 10000
+quota_period = "DAY"  # DAY, WEEK, or MONTH
+
+# CloudWatch log retention (days)
+log_retention_days = 30
+
+# Enable detailed request/response logging (may expose sensitive data in logs)
+enable_data_trace = false
+
+# =============================================================================
+# Protection Settings
+# =============================================================================
+
+# Enable deletion protection for NLB (recommended for production)
+enable_deletion_protection = false
+
+# =============================================================================
+# Tags
+# =============================================================================
+
+tags = {
+  Team    = "Platform"
+  Service = "API"
+}
