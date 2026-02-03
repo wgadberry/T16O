@@ -129,6 +129,38 @@ SKIP_PREFIXES = (
 API_DELAY = 0.30  # seconds between API calls
 
 
+def get_db_batch_size(cursor) -> int:
+    """
+    Get batch size from database config table using sp_config_get.
+    This is runtime_editable, so should be checked each iteration.
+
+    Args:
+        cursor: Database cursor (dictionary=True)
+
+    Returns:
+        int: The configured batch size (or default_value from proc)
+    """
+    try:
+        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', 'funder_batch_size'))
+        result = cursor.fetchone()
+        # Consume any additional result sets from the stored procedure
+        try:
+            while cursor.nextset():
+                pass
+        except:
+            pass
+
+        if result:
+            # Use config_value if set, otherwise fall back to default_value from proc
+            value = result.get('config_value') or result.get('default_value')
+            if value:
+                return int(value)
+        return 10  # Fallback if proc returns nothing
+    except Exception as e:
+        print(f"    [!] Failed to get batch size from config: {e}")
+        return 10
+
+
 def should_skip_address(address: str) -> bool:
     """Check if address should be skipped (programs, system addresses, etc.)"""
     if address in KNOWN_PROGRAMS:
@@ -180,21 +212,22 @@ class SolscanClient:
             print(f"    [!] account/metadata error for {address[:12]}...: {e}")
             return None
 
-    def get_account_metadata_multi(self, addresses: List[str]) -> Dict[str, Dict]:
+    def get_account_metadata_multi(self, addresses: List[str], limit: int = 50) -> Dict[str, Dict]:
         """
         Get account metadata for multiple addresses in a single call.
         /account/metadata/multi - batch endpoint using address[] query params
 
         Args:
-            addresses: List of addresses (max 50)
+            addresses: List of addresses
+            limit: Max addresses per call (default 50, Solscan API max)
 
         Returns dict mapping address -> metadata dict
         """
         if not addresses:
             return {}
 
-        # Limit to 50 addresses per call
-        addresses = addresses[:10]
+        # Apply limit
+        addresses = addresses[:limit]
 
         # Build URL with address[] params
         url = f"{SOLSCAN_API_BASE}/account/metadata/multi"
@@ -1127,9 +1160,10 @@ class AddressHistoryWorker:
             self.db_conn.commit()
             print(f"  Updated {self.cursor.rowcount} addresses with request_log_id={request_log_id}")
 
-        # Step 5: Find funders using batch API (50 addresses per call)
+        # Step 5: Find funders using batch API
+        # Get batch_size from config table (runtime_editable, checked each iteration)
         initialized_addresses = []
-        batch_size = 10
+        batch_size = get_db_batch_size(self.cursor)
         total_claimed = len(claimed)
 
         for batch_start in range(0, total_claimed, batch_size):
@@ -1746,16 +1780,16 @@ def main():
 
         # SYNC-DB-MISSING MODE: Query DB in batches until exhausted
         if args.sync_db_missing:
-            batch_size = args.prefetch
             total_limit = args.limit if args.limit > 0 else float('inf')
             batch_num = 0
 
             print(f"Sync DB Missing Mode")
-            print(f"  Batch size: {batch_size}")
             print(f"  Limit: {args.limit if args.limit > 0 else 'unlimited'}")
             print()
 
             while worker.addresses_processed < total_limit:
+                # Get batch_size from config each iteration (runtime_editable)
+                batch_size = get_db_batch_size(worker.cursor)
                 remaining = int(min(batch_size, total_limit - worker.addresses_processed))
                 candidates = worker.get_missing_addresses(remaining)
 
@@ -1816,8 +1850,8 @@ def main():
                     batch_funders_found = 0
                     batch_funders_not_found = 0
 
-                    # Use batch API (50 addresses per call, 1 sec between calls)
-                    api_batch_size = 10
+                    # Use batch API - get batch_size from config (runtime_editable)
+                    api_batch_size = get_db_batch_size(worker.cursor)
                     total_to_process = len(addresses_to_process)
 
                     for api_batch_start in range(0, total_to_process, api_batch_size):
