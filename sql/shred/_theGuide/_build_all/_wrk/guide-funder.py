@@ -126,7 +126,7 @@ SKIP_PREFIXES = (
 )
 
 # Rate limiting
-API_DELAY = 0.15  # seconds between API calls
+API_DELAY = 0.30  # seconds between API calls
 
 
 def should_skip_address(address: str) -> bool:
@@ -152,6 +152,71 @@ class SolscanClient:
 
     def close(self):
         self.session.close()
+
+    def get_account_metadata(self, address: str) -> Optional[Dict]:
+        """
+        Get account metadata including funder info, label, tags, and type.
+        /account/metadata - single call for comprehensive account info
+
+        Returns dict with:
+        - account_address: The address
+        - account_label: Human-readable name (e.g., "Raydium (WSOL-USDC) Pool 1")
+        - account_tags: Array of tags (e.g., ["raydium", "pool"])
+        - account_type: "address", "token_account", "mint"
+        - funded_by: {funded_by, tx_hash, block_time}
+        - active_age: Days since first activity
+        """
+        url = f"{SOLSCAN_API_BASE}/account/metadata"
+        params = {"address": address}
+
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            if result.get('success') and result.get('data'):
+                return result['data']
+            return None
+        except Exception as e:
+            print(f"    [!] account/metadata error for {address[:12]}...: {e}")
+            return None
+
+    def get_account_metadata_multi(self, addresses: List[str]) -> Dict[str, Dict]:
+        """
+        Get account metadata for multiple addresses in a single call.
+        /account/metadata/multi - batch endpoint using address[] query params
+
+        Args:
+            addresses: List of addresses (max 50)
+
+        Returns dict mapping address -> metadata dict
+        """
+        if not addresses:
+            return {}
+
+        # Limit to 50 addresses per call
+        addresses = addresses[:50]
+
+        # Build URL with address[] params
+        url = f"{SOLSCAN_API_BASE}/account/metadata/multi"
+        params = [('address[]', addr) for addr in addresses]
+
+        try:
+            response = self.session.get(url, params=params, timeout=60)
+            response.raise_for_status()
+            result = response.json()
+
+            # Build address -> metadata map
+            metadata_map = {}
+            if result.get('success') and result.get('data'):
+                for item in result['data']:
+                    addr = item.get('account_address')
+                    if addr:
+                        metadata_map[addr] = item
+
+            return metadata_map
+        except Exception as e:
+            print(f"    [!] account/metadata/multi error: {e}")
+            return {}
 
     def get_account_transfers(self, address: str, page_size: int = 20, token_filter: str = None) -> Optional[Dict]:
         """
@@ -774,15 +839,19 @@ class AddressHistoryWorker:
         """
         Save funding info to tx_address table and create tx_funding_edge.
         Also aggregates existing transfers from tx_guide for complete edge data.
-        funding_info has: funder, signature, amount, block_time
+        funding_info has: funder, signature, amount, block_time, label, tags, account_type, active_age
         request_log_id: Links discovered funder address to the request for billing
         """
         if self.dry_run:
             return
 
         funder = funding_info['funder']
-        amount = funding_info['amount']
-        block_time = funding_info['block_time']
+        amount = funding_info.get('amount')
+        block_time = funding_info.get('block_time')
+        label = funding_info.get('label')
+        tags = funding_info.get('tags')
+        account_type = funding_info.get('account_type')
+        active_age = funding_info.get('active_age')
 
         # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
         # Mark as init_tx_fetched=1 to prevent recursive funder lookups (we don't need to find the funder's funder)
@@ -803,14 +872,83 @@ class AddressHistoryWorker:
         target_row = self.cursor.fetchone()
         target_id = target_row['id'] if target_row else None
 
-        # Update target address with funding info (no tx record creation)
-        self.cursor.execute("""
+        # Build dynamic UPDATE with available metadata fields
+        update_fields = ["funded_by_address_id = %s"]
+        update_values = [funder_id]
+
+        if amount is not None:
+            update_fields.append("funding_amount = %s")
+            update_values.append(amount)
+
+        if block_time is not None:
+            update_fields.append("first_seen_block_time = %s")
+            update_values.append(block_time)
+
+        if label is not None:
+            update_fields.append("label = COALESCE(label, %s)")  # Don't overwrite existing labels
+            update_values.append(label)
+
+        if tags is not None:
+            update_fields.append("account_tags = %s")
+            update_values.append(json.dumps(tags) if tags else None)
+
+            # Derive address_type from account_tags (more specific than account_type)
+            tags_lower = [t.lower() for t in tags] if tags else []
+            mapped_type = None
+
+            # Priority order: most specific first
+            if 'pool' in tags_lower:
+                mapped_type = 'pool'
+            elif 'market' in tags_lower:
+                mapped_type = 'market'
+            elif 'vault' in tags_lower:
+                mapped_type = 'vault'
+            elif 'lptoken' in tags_lower:
+                mapped_type = 'lptoken'
+            elif 'dex_wallet' in tags_lower:
+                mapped_type = 'dex_wallet'
+            elif 'fee_vault' in tags_lower:
+                mapped_type = 'fee_vault'
+            elif 'arbitrage_bot' in tags_lower:
+                mapped_type = 'bot'
+            elif 'token_creator' in tags_lower:
+                mapped_type = 'token_creator'
+            elif 'memecoin' in tags_lower:
+                mapped_type = 'mint'
+            elif account_type == 'token_account':
+                mapped_type = 'ata'
+            elif account_type == 'mint':
+                mapped_type = 'mint'
+            elif account_type == 'address':
+                mapped_type = 'wallet'
+
+            if mapped_type:
+                # Override unknown, wallet, and ata (ata is often incorrectly assigned)
+                update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata') THEN %s ELSE address_type END")
+                update_values.append(mapped_type)
+
+        elif account_type is not None:
+            # Fallback: use account_type if no tags
+            mapped_type = account_type
+            if account_type == 'token_account':
+                mapped_type = 'ata'
+            elif account_type == 'address':
+                mapped_type = 'wallet'
+            update_fields.append("address_type = CASE WHEN address_type = 'unknown' THEN %s ELSE address_type END")
+            update_values.append(mapped_type)
+
+        if active_age is not None:
+            update_fields.append("active_age_days = %s")
+            update_values.append(active_age)
+
+        update_values.append(target_address)
+
+        # Execute update with all available fields
+        self.cursor.execute(f"""
             UPDATE tx_address
-            SET funded_by_address_id = %s,
-                funding_amount = %s,
-                first_seen_block_time = %s
+            SET {', '.join(update_fields)}
             WHERE address = %s AND funded_by_address_id IS NULL
-        """, (funder_id, amount, block_time, target_address))
+        """, update_values)
 
         # Create tx_funding_edge record with full details
         # Amount from Solscan is in lamports, convert to SOL
@@ -874,23 +1012,48 @@ class AddressHistoryWorker:
 
     def find_funder_for_address(self, address: str) -> Optional[Dict]:
         """
-        Fetch first SOL transactions for address and find funding wallet.
-        Returns funding info dict or None.
+        Get funding info for an address using /account/metadata API.
+        Falls back to /account/transfer if metadata doesn't have funder info.
 
-        Uses SOL token filter to ensure we get native SOL transfers,
-        not just SPL token transfers which may appear earlier chronologically.
+        Returns dict with: funder, signature, block_time, label, tags, account_type, active_age
         """
         # Skip known programs and system addresses
         if should_skip_address(address):
             return None
 
         time.sleep(self.api_delay)
-        # Filter for SOL transfers specifically to find the true funder
+
+        # Primary: Use /account/metadata API (single call for all info)
+        metadata = self.solscan.get_account_metadata(address)
+        if metadata:
+            funded_by = metadata.get('funded_by', {})
+            if funded_by and funded_by.get('funded_by'):
+                return {
+                    'funder': funded_by['funded_by'],
+                    'signature': funded_by.get('tx_hash'),
+                    'amount': None,  # Metadata API doesn't provide amount
+                    'block_time': funded_by.get('block_time'),
+                    # Bonus metadata fields
+                    'label': metadata.get('account_label'),
+                    'tags': metadata.get('account_tags'),
+                    'account_type': metadata.get('account_type'),
+                    'active_age': metadata.get('active_age')
+                }
+
+        # Fallback: Use /account/transfer API if metadata didn't have funder
+        time.sleep(self.api_delay)
         data = self.solscan.get_account_transfers(address, self.tx_limit, token_filter=SOL_TOKEN)
         if not data:
             return None
 
-        return self.solscan.find_funding_wallet(address, data)
+        result = self.solscan.find_funding_wallet(address, data)
+        if result and metadata:
+            # Enrich with metadata fields if we have them
+            result['label'] = metadata.get('account_label')
+            result['tags'] = metadata.get('account_tags')
+            result['account_type'] = metadata.get('account_type')
+            result['active_age'] = metadata.get('active_age')
+        return result
 
     def process_addresses(self, addresses: List[str], force: bool = False, request_log_id: int = None) -> Dict:
         """
@@ -964,26 +1127,61 @@ class AddressHistoryWorker:
             self.db_conn.commit()
             print(f"  Updated {self.cursor.rowcount} addresses with request_log_id={request_log_id}")
 
-        # Step 5: Find funders for each address
+        # Step 5: Find funders using batch API (50 addresses per call)
         initialized_addresses = []
-        for i, addr in enumerate(claimed):
-            print(f"  [{i+1}/{len(claimed)}] {addr[:20]}...", end='')
+        batch_size = 50
+        total_claimed = len(claimed)
 
-            funding_info = self.find_funder_for_address(addr)
+        for batch_start in range(0, total_claimed, batch_size):
+            batch = claimed[batch_start:batch_start + batch_size]
+            batch_num = batch_start // batch_size + 1
+            total_batches = (total_claimed + batch_size - 1) // batch_size
 
-            if funding_info:
-                print(f" -> funded by {funding_info['funder'][:16]}...")
-                self.save_funding_info(addr, funding_info, request_log_id)
-                result['funders_found'] += 1
-                self.funders_found += 1
-            else:
-                print(f" -> no funder found")
-                result['funders_not_found'] += 1
-                self.funders_not_found += 1
+            print(f"  Batch {batch_num}/{total_batches}: Fetching metadata for {len(batch)} addresses...")
 
-            initialized_addresses.append(addr)
-            result['processed'] += 1
-            self.addresses_processed += 1
+            # Call batch API
+            metadata_map = self.solscan.get_account_metadata_multi(batch)
+            print(f"    Got metadata for {len(metadata_map)} addresses")
+
+            # Process each address in batch
+            for i, addr in enumerate(batch):
+                idx = batch_start + i + 1
+                print(f"  [{idx}/{total_claimed}] {addr[:20]}...", end='')
+
+                metadata = metadata_map.get(addr)
+                funding_info = None
+
+                if metadata:
+                    funded_by = metadata.get('funded_by', {})
+                    if funded_by and funded_by.get('funded_by'):
+                        funding_info = {
+                            'funder': funded_by['funded_by'],
+                            'signature': funded_by.get('tx_hash'),
+                            'amount': None,
+                            'block_time': funded_by.get('block_time'),
+                            'label': metadata.get('account_label'),
+                            'tags': metadata.get('account_tags'),
+                            'account_type': metadata.get('account_type'),
+                            'active_age': metadata.get('active_age')
+                        }
+
+                if funding_info:
+                    print(f" -> funded by {funding_info['funder'][:16]}...")
+                    self.save_funding_info(addr, funding_info, request_log_id)
+                    result['funders_found'] += 1
+                    self.funders_found += 1
+                else:
+                    print(f" -> no funder found")
+                    result['funders_not_found'] += 1
+                    self.funders_not_found += 1
+
+                initialized_addresses.append(addr)
+                result['processed'] += 1
+                self.addresses_processed += 1
+
+            # 1 second delay between batch API calls
+            if batch_start + batch_size < total_claimed:
+                time.sleep(1.0)
 
         # Step 6: Mark addresses as processed
         if initialized_addresses:
@@ -1377,21 +1575,50 @@ def main():
                 return claimed
 
             def find_funder_for_address(self, address):
+                """Use /account/metadata API first, fall back to /account/transfer"""
                 if should_skip_address(address):
                     return None
                 time.sleep(self.api_delay)
-                # Filter for SOL transfers specifically to find the true funder
+
+                # Primary: Use /account/metadata API
+                metadata = self.solscan.get_account_metadata(address)
+                if metadata:
+                    funded_by = metadata.get('funded_by', {})
+                    if funded_by and funded_by.get('funded_by'):
+                        return {
+                            'funder': funded_by['funded_by'],
+                            'signature': funded_by.get('tx_hash'),
+                            'amount': None,
+                            'block_time': funded_by.get('block_time'),
+                            'label': metadata.get('account_label'),
+                            'tags': metadata.get('account_tags'),
+                            'account_type': metadata.get('account_type'),
+                            'active_age': metadata.get('active_age')
+                        }
+
+                # Fallback: Use /account/transfer API
+                time.sleep(self.api_delay)
                 data = self.solscan.get_account_transfers(address, self.tx_limit, token_filter=SOL_TOKEN)
                 if not data:
                     return None
-                return self.solscan.find_funding_wallet(address, data)
+                result = self.solscan.find_funding_wallet(address, data)
+                if result and metadata:
+                    result['label'] = metadata.get('account_label')
+                    result['tags'] = metadata.get('account_tags')
+                    result['account_type'] = metadata.get('account_type')
+                    result['active_age'] = metadata.get('active_age')
+                return result
 
             def save_funding_info(self, target_address, funding_info, request_log_id=None):
                 if self.dry_run:
                     return
                 funder = funding_info['funder']
-                amount = funding_info['amount']
-                block_time = funding_info['block_time']
+                amount = funding_info.get('amount')
+                block_time = funding_info.get('block_time')
+                label = funding_info.get('label')
+                tags = funding_info.get('tags')
+                account_type = funding_info.get('account_type')
+                active_age = funding_info.get('active_age')
 
                 # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
                 # Mark as init_tx_fetched=1 to prevent recursive funder lookups
@@ -1411,12 +1638,79 @@ def main():
                 target_row = self.cursor.fetchone()
                 target_id = target_row['id'] if target_row else None
 
-                # Update target address with funding info (no tx record creation)
-                self.cursor.execute("""
+                # Build dynamic UPDATE with available metadata fields
+                update_fields = ["funded_by_address_id = %s"]
+                update_values = [funder_id]
+
+                if amount is not None:
+                    update_fields.append("funding_amount = %s")
+                    update_values.append(amount)
+
+                if block_time is not None:
+                    update_fields.append("first_seen_block_time = %s")
+                    update_values.append(block_time)
+
+                if label is not None:
+                    update_fields.append("label = COALESCE(label, %s)")
+                    update_values.append(label)
+
+                if tags is not None:
+                    update_fields.append("account_tags = %s")
+                    update_values.append(json.dumps(tags) if tags else None)
+
+                    # Derive address_type from account_tags
+                    tags_lower = [t.lower() for t in tags] if tags else []
+                    mapped_type = None
+
+                    if 'pool' in tags_lower:
+                        mapped_type = 'pool'
+                    elif 'market' in tags_lower:
+                        mapped_type = 'market'
+                    elif 'vault' in tags_lower:
+                        mapped_type = 'vault'
+                    elif 'lptoken' in tags_lower:
+                        mapped_type = 'lptoken'
+                    elif 'dex_wallet' in tags_lower:
+                        mapped_type = 'dex_wallet'
+                    elif 'fee_vault' in tags_lower:
+                        mapped_type = 'fee_vault'
+                    elif 'arbitrage_bot' in tags_lower:
+                        mapped_type = 'bot'
+                    elif 'token_creator' in tags_lower:
+                        mapped_type = 'token_creator'
+                    elif 'memecoin' in tags_lower:
+                        mapped_type = 'mint'
+                    elif account_type == 'token_account':
+                        mapped_type = 'ata'
+                    elif account_type == 'mint':
+                        mapped_type = 'mint'
+                    elif account_type == 'address':
+                        mapped_type = 'wallet'
+
+                    if mapped_type:
+                        update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata') THEN %s ELSE address_type END")
+                        update_values.append(mapped_type)
+
+                elif account_type is not None:
+                    mapped_type = account_type
+                    if account_type == 'token_account':
+                        mapped_type = 'ata'
+                    elif account_type == 'address':
+                        mapped_type = 'wallet'
+                    update_fields.append("address_type = CASE WHEN address_type = 'unknown' THEN %s ELSE address_type END")
+                    update_values.append(mapped_type)
+
+                if active_age is not None:
+                    update_fields.append("active_age_days = %s")
+                    update_values.append(active_age)
+
+                update_values.append(target_address)
+
+                self.cursor.execute(f"""
                     UPDATE tx_address
-                    SET funded_by_address_id = %s, funding_amount = %s, first_seen_block_time = %s
+                    SET {', '.join(update_fields)}
                     WHERE address = %s AND funded_by_address_id IS NULL
-                """, (funder_id, amount, block_time, target_address))
+                """, update_values)
 
                 sol_amount = float(amount) / 1e9 if amount else 0
                 if funder_id and target_id:
@@ -1511,76 +1805,90 @@ def main():
                     # In dry-run, simulate progress
                     worker.addresses_processed += len(addresses_to_process)
                 else:
-                    # Group addresses by their originating request_log_id for billing attribution
-                    # Addresses with request_log_id are billed to the original API request
-                    # Addresses without (legacy) are billed to a generic daemon request
-                    addrs_with_request = [(a, addr_to_request_log[a]) for a in addresses_to_process if addr_to_request_log.get(a)]
-                    addrs_without_request = [a for a in addresses_to_process if not addr_to_request_log.get(a)]
-
-                    # Create daemon request_log entry only for legacy addresses without original request
-                    daemon_request_log_id = None
-                    if addrs_without_request:
-                        daemon_request_log_id = log_daemon_request(
-                            worker.cursor, worker.db_conn,
-                            worker='funder', action='discover',
-                            batch_size=len(addrs_without_request)
-                        )
+                    # Create daemon request_log entry for billing
+                    daemon_request_log_id = log_daemon_request(
+                        worker.cursor, worker.db_conn,
+                        worker='funder', action='discover',
+                        batch_size=len(addresses_to_process)
+                    )
 
                     initialized = []
                     batch_funders_found = 0
                     batch_funders_not_found = 0
 
-                    # Process addresses with original request_log_id (billed to original API request)
-                    for j, (addr, orig_request_log_id) in enumerate(addrs_with_request):
-                        print(f"  [{j + 1}/{len(addresses_to_process)}] {addr[:20]}... (req:{orig_request_log_id})", end='')
-                        funding_info = worker.find_funder_for_address(addr)
-                        if funding_info:
-                            print(f" -> funded by {funding_info['funder'][:16]}...")
-                            worker.save_funding_info(addr, funding_info, orig_request_log_id)
-                            worker.funders_found += 1
-                            batch_funders_found += 1
-                        else:
-                            print(f" -> no funder found")
-                            worker.funders_not_found += 1
-                            batch_funders_not_found += 1
-                        initialized.append(addr)
-                        worker.addresses_processed += 1
+                    # Use batch API (50 addresses per call, 1 sec between calls)
+                    api_batch_size = 50
+                    total_to_process = len(addresses_to_process)
 
-                        # Check limit
+                    for api_batch_start in range(0, total_to_process, api_batch_size):
+                        api_batch = addresses_to_process[api_batch_start:api_batch_start + api_batch_size]
+                        api_batch_num = api_batch_start // api_batch_size + 1
+                        total_api_batches = (total_to_process + api_batch_size - 1) // api_batch_size
+
+                        print(f"    API batch {api_batch_num}/{total_api_batches}: Fetching metadata for {len(api_batch)} addresses...")
+
+                        # Call batch API
+                        metadata_map = solscan.get_account_metadata_multi(api_batch)
+                        print(f"      Got metadata for {len(metadata_map)} addresses")
+
+                        # Process each address in API batch
+                        for j, addr in enumerate(api_batch):
+                            if worker.addresses_processed >= total_limit:
+                                break
+
+                            idx = api_batch_start + j + 1
+                            request_log_id = addr_to_request_log.get(addr) or daemon_request_log_id
+                            print(f"  [{idx}/{total_to_process}] {addr[:20]}...", end='')
+
+                            metadata = metadata_map.get(addr)
+                            funding_info = None
+
+                            if metadata:
+                                funded_by = metadata.get('funded_by', {})
+                                if funded_by and funded_by.get('funded_by'):
+                                    funding_info = {
+                                        'funder': funded_by['funded_by'],
+                                        'signature': funded_by.get('tx_hash'),
+                                        'amount': None,
+                                        'block_time': funded_by.get('block_time'),
+                                        'label': metadata.get('account_label'),
+                                        'tags': metadata.get('account_tags'),
+                                        'account_type': metadata.get('account_type'),
+                                        'active_age': metadata.get('active_age')
+                                    }
+
+                            if funding_info:
+                                print(f" -> funded by {funding_info['funder'][:16]}...")
+                                worker.save_funding_info(addr, funding_info, request_log_id)
+                                worker.funders_found += 1
+                                batch_funders_found += 1
+                            else:
+                                print(f" -> no funder found")
+                                worker.funders_not_found += 1
+                                batch_funders_not_found += 1
+
+                            initialized.append(addr)
+                            worker.addresses_processed += 1
+
+                        # Check limit after each API batch
                         if worker.addresses_processed >= total_limit:
                             print(f"\n  Reached limit of {args.limit} addresses")
                             break
 
-                    # Process legacy addresses without original request_log_id (billed to daemon)
-                    start_idx = len(addrs_with_request)
-                    for j, addr in enumerate(addrs_without_request):
-                        if worker.addresses_processed >= total_limit:
-                            break
-                        print(f"  [{start_idx + j + 1}/{len(addresses_to_process)}] {addr[:20]}... (daemon)", end='')
-                        funding_info = worker.find_funder_for_address(addr)
-                        if funding_info:
-                            print(f" -> funded by {funding_info['funder'][:16]}...")
-                            worker.save_funding_info(addr, funding_info, daemon_request_log_id)
-                            worker.funders_found += 1
-                            batch_funders_found += 1
-                        else:
-                            print(f" -> no funder found")
-                            worker.funders_not_found += 1
-                            batch_funders_not_found += 1
-                        initialized.append(addr)
-                        worker.addresses_processed += 1
+                        # 1 second delay between API batch calls
+                        if api_batch_start + api_batch_size < total_to_process:
+                            time.sleep(1.0)
 
-                    # Update daemon request_log entry with results (only if we had legacy addresses)
-                    if daemon_request_log_id:
-                        update_daemon_request(
-                            worker.cursor, worker.db_conn, daemon_request_log_id,
-                            status='completed',
-                            result={
-                                'processed': len(addrs_without_request),
-                                'funders_found': batch_funders_found,
-                                'funders_not_found': batch_funders_not_found
-                            }
-                        )
+                    # Update daemon request_log entry with results
+                    update_daemon_request(
+                        worker.cursor, worker.db_conn, daemon_request_log_id,
+                        status='completed',
+                        result={
+                            'processed': len(initialized),
+                            'funders_found': batch_funders_found,
+                            'funders_not_found': batch_funders_not_found
+                        }
+                    )
 
                     worker.mark_addresses_initialized(initialized)
 

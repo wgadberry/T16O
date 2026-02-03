@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple Flask API to call sp_tx_bmap_get_token_state
+Simple Flask API to call sp_tx_bmap_get
 Run: python bmap-api.py
 Access: http://localhost:5050
 """
@@ -43,22 +43,20 @@ def index():
 @app.route('/api/bmap', methods=['GET'])
 def get_bmap():
     """
-    Call sp_tx_bmap_get_token_state with query parameters:
-    - token_name: Token name (optional)
-    - token_symbol: Token symbol (optional)
+    Call sp_tx_bmap_get with query parameters:
     - mint_address: Token mint address (optional)
+    - token_symbol: Token symbol (optional)
     - signature: Transaction signature (optional)
     - block_time: Unix timestamp (optional)
-    - tx_limit: Transaction window size (10, 20, 50, 100) - default 10
+    - limit: Navigation limit (default 5)
     """
-    token_name = request.args.get('token_name') or None
-    token_symbol = request.args.get('token_symbol') or None
     mint_address = request.args.get('mint_address') or None
+    token_symbol = request.args.get('token_symbol') or None
     signature = request.args.get('signature') or None
     block_time = request.args.get('block_time')
     block_time = int(block_time) if block_time else None
-    tx_limit = request.args.get('tx_limit')
-    tx_limit = int(tx_limit) if tx_limit else None
+    limit = request.args.get('limit') or request.args.get('tx_limit')
+    limit = int(limit) if limit else None
 
     last_error = None
     for attempt in range(MAX_RETRIES):
@@ -68,13 +66,12 @@ def get_bmap():
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor()
 
-            cursor.callproc('sp_tx_bmap_get_token_state', [
-                token_name,
-                token_symbol,
+            cursor.callproc('sp_tx_bmap_get', [
                 mint_address,
+                token_symbol,
                 signature,
                 block_time,
-                tx_limit
+                limit
             ])
 
             # Get the result
