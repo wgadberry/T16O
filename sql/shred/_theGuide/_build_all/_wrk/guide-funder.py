@@ -194,7 +194,7 @@ class SolscanClient:
             return {}
 
         # Limit to 50 addresses per call
-        addresses = addresses[:50]
+        addresses = addresses[:10]
 
         # Build URL with address[] params
         url = f"{SOLSCAN_API_BASE}/account/metadata/multi"
@@ -720,7 +720,7 @@ class AddressHistoryWorker:
     """Worker that fetches initial transactions and finds funding wallets"""
 
     def __init__(self, db_conn, channel, solscan: SolscanClient,
-                 prefetch: int = 50, tx_limit: int = 20,
+                 prefetch: int = 10, tx_limit: int = 10,
                  dry_run: bool = False, api_delay: float = API_DELAY,
                  batch_delay: float = 0.5):
         self.db_conn = db_conn
@@ -901,10 +901,10 @@ class AddressHistoryWorker:
                 mapped_type = 'pool'
             elif 'market' in tags_lower:
                 mapped_type = 'market'
-            elif 'vault' in tags_lower:
+            elif any('vault' in tag for tag in tags_lower):
                 mapped_type = 'vault'
             elif 'lptoken' in tags_lower:
-                mapped_type = 'lptoken'
+                mapped_type = 'lp_token'
             elif 'dex_wallet' in tags_lower:
                 mapped_type = 'dex_wallet'
             elif 'fee_vault' in tags_lower:
@@ -924,7 +924,7 @@ class AddressHistoryWorker:
 
             if mapped_type:
                 # Override unknown, wallet, and ata (ata is often incorrectly assigned)
-                update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata') THEN %s ELSE address_type END")
+                update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
                 update_values.append(mapped_type)
 
         elif account_type is not None:
@@ -1129,7 +1129,7 @@ class AddressHistoryWorker:
 
         # Step 5: Find funders using batch API (50 addresses per call)
         initialized_addresses = []
-        batch_size = 50
+        batch_size = 10
         total_claimed = len(claimed)
 
         for batch_start in range(0, total_claimed, batch_size):
@@ -1394,8 +1394,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Address Funding Worker - Find funding wallets for addresses'
     )
-    parser.add_argument('--prefetch', type=int, default=50,
-                        help='Number of messages to prefetch before processing (default: 50)')
+    parser.add_argument('--prefetch', type=int, default=10,
+                        help='Number of messages to prefetch before processing (default: 10)')
     parser.add_argument('--tx-limit', type=int, default=20,
                         help='Number of transactions to fetch per address (default: 20)')
     parser.add_argument('--api-delay', type=float, default=API_DELAY,
@@ -1666,10 +1666,10 @@ def main():
                         mapped_type = 'pool'
                     elif 'market' in tags_lower:
                         mapped_type = 'market'
-                    elif 'vault' in tags_lower:
+                    elif any('vault' in tag for tag in tags_lower):
                         mapped_type = 'vault'
                     elif 'lptoken' in tags_lower:
-                        mapped_type = 'lptoken'
+                        mapped_type = 'lp_token'
                     elif 'dex_wallet' in tags_lower:
                         mapped_type = 'dex_wallet'
                     elif 'fee_vault' in tags_lower:
@@ -1688,7 +1688,7 @@ def main():
                         mapped_type = 'wallet'
 
                     if mapped_type:
-                        update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata') THEN %s ELSE address_type END")
+                        update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
                         update_values.append(mapped_type)
 
                 elif account_type is not None:
@@ -1817,7 +1817,7 @@ def main():
                     batch_funders_not_found = 0
 
                     # Use batch API (50 addresses per call, 1 sec between calls)
-                    api_batch_size = 50
+                    api_batch_size = 10
                     total_to_process = len(addresses_to_process)
 
                     for api_batch_start in range(0, total_to_process, api_batch_size):

@@ -249,6 +249,12 @@ def run_guide_batch(cursor, conn, batch_size: int = 1000) -> Tuple[int, int, int
         try:
             cursor.execute("SET @g = 0, @f = 0, @p = 0")
             cursor.execute("CALL sp_tx_guide_batch(%s, @g, @f, @p)", (batch_size,))
+            # Consume any result sets from the stored procedure
+            try:
+                while cursor.nextset():
+                    pass
+            except:
+                pass
             cursor.execute("SELECT @g, @f, @p")
             result = cursor.fetchone()
             conn.commit()

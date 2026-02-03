@@ -14,6 +14,7 @@ BEGIN
     DECLARE v_end BIGINT;
     DECLARE v_transfer_count INT DEFAULT 0;
     DECLARE v_swap_count INT DEFAULT 0;
+    DECLARE v_unknown_mint_id BIGINT DEFAULT 751438;  -- UnknownMint placeholder
 
     SET p_batch_size = COALESCE(p_batch_size, 10000);
     SET p_rows_loaded = 0;
@@ -38,7 +39,8 @@ BEGIN
 
     IF v_end IS NULL OR v_start >= v_end THEN
         SET p_last_tx_id = v_start;
-        SELECT 'No transactions to process' AS message;
+        SET p_rows_loaded = 0;
+        -- No SELECT here to avoid unread result issues
     ELSE
         -- Create batch table
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;
@@ -70,12 +72,12 @@ BEGIN
             b.tx_id, b.block_time,
             -- from_address: source owner, or mint for MINT type
             CASE
-                WHEN t.transfer_type = 'ACTIVITY_SPL_MINT' THEN tk.mint_address_id
+                WHEN t.transfer_type = 'ACTIVITY_SPL_MINT' THEN COALESCE(tk.mint_address_id, v_unknown_mint_id)
                 ELSE t.source_owner_address_id
             END,
             -- to_address: dest owner, or mint for BURN type
             CASE
-                WHEN t.transfer_type = 'ACTIVITY_SPL_BURN' THEN tk.mint_address_id
+                WHEN t.transfer_type = 'ACTIVITY_SPL_BURN' THEN COALESCE(tk.mint_address_id, v_unknown_mint_id)
                 ELSE t.destination_owner_address_id
             END,
             t.source_address_id,
@@ -272,13 +274,9 @@ BEGIN
           AND a.address_type = 'mint'
           AND (g.to_token_post_balance IS NULL OR g.to_sol_post_balance IS NULL);
 
-        -- Return results
+        -- Return results via OUT params (no SELECT to avoid unread result issues)
         SET p_rows_loaded = v_transfer_count + v_swap_count;
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;
-
-        SELECT v_start AS start_tx_id, v_end - 1 AS end_tx_id,
-               v_transfer_count AS transfer_edges, v_swap_count AS swap_edges,
-               p_rows_loaded AS total_edges, p_last_tx_id AS last_tx_id;
     END IF;
 END //
 
