@@ -1249,9 +1249,28 @@
                 };
             });
 
+            // Track nodes with close_ata events (self-edges where ATA was closed)
+            const closeAtaInfo = new Map(); // address -> { amount, sol returned }
+            (edges || []).forEach(e => {
+                if (e.type === 'close_ata' && e.source === e.target) {
+                    closeAtaInfo.set(e.source, {
+                        amount: e.amount,
+                        ins_index: e.ins_index
+                    });
+                }
+            });
+
+            // Add close_ata info to d3Nodes
+            d3Nodes.forEach(n => {
+                if (closeAtaInfo.has(n.id)) {
+                    n.closeAta = closeAtaInfo.get(n.id);
+                }
+            });
+
             // Prepare edges for D3 - only include edges where both nodes exist
+            // Filter out self-edges (like close_ata) since they can't be rendered as lines
             const d3Edges = (edges || [])
-                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
+                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target) && e.source !== e.target)
                 .map(e => ({
                     source: e.source,
                     target: e.target,
@@ -1434,6 +1453,7 @@
                             Balance: <span>${formatNumber(d.balance)}</span><br>
                             SOL: <span>${d.sol_balance.toFixed(4)}</span>
                             ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
+                            ${d.closeAta ? `<br><span style="color: #0891b2;">ATA Closed: +${d.closeAta.amount.toFixed(6)} SOL</span>` : ''}
                         </div>
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
                             Click to fetch wallet transactions
@@ -1450,6 +1470,51 @@
                     tooltip.style('opacity', 0);
                     fetchWalletTransactions(d.id);
                 });
+
+            // Create close_ata badges (small cyan circle with X for nodes that closed an ATA)
+            const closeAtaNodes = d3Nodes.filter(d => d.closeAta);
+            const badge = g.append('g')
+                .selectAll('g')
+                .data(closeAtaNodes)
+                .join('g')
+                .attr('class', 'close-ata-badge')
+                .style('cursor', 'pointer')
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    tooltip.html(`
+                        <div style="margin-bottom: 5px;">
+                            <span class="edge-type close_ata">close_ata</span>
+                        </div>
+                        <div class="stats">
+                            SOL Returned: <span style="color: #0891b2; font-weight: bold;">${d.closeAta.amount.toFixed(6)} SOL</span><br>
+                            Instruction: <span>#${d.closeAta.ins_index}</span>
+                        </div>
+                        <div style="margin-top: 8px; color: #aaa; font-size: 10px;">
+                            Token account was closed, rent returned
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                });
+
+            // Badge background circle
+            badge.append('circle')
+                .attr('r', 8)
+                .attr('fill', '#0891b2')
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1);
+
+            // Badge X symbol
+            badge.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'central')
+                .attr('fill', '#fff')
+                .attr('font-size', '10px')
+                .attr('font-weight', 'bold')
+                .text('X');
 
             // Create labels
             const label = g.append('g')
@@ -1477,6 +1542,10 @@
                     node
                         .attr('cx', d => d.x)
                         .attr('cy', d => d.y);
+
+                    // Position badges at top-right of node
+                    badge
+                        .attr('transform', d => `translate(${d.x + d.radius * 0.7}, ${d.y - d.radius * 0.7})`);
 
                     label
                         .attr('x', d => d.x)
@@ -1808,9 +1877,28 @@
                 };
             });
 
+            // Track nodes with close_ata events (self-edges where ATA was closed)
+            const closeAtaInfo = new Map(); // address -> { amount, sol returned }
+            (edges || []).forEach(e => {
+                if (e.type === 'close_ata' && e.source === e.target) {
+                    closeAtaInfo.set(e.source, {
+                        amount: e.amount,
+                        ins_index: e.ins_index
+                    });
+                }
+            });
+
+            // Add close_ata info to d3Nodes
+            d3Nodes.forEach(n => {
+                if (closeAtaInfo.has(n.id)) {
+                    n.closeAta = closeAtaInfo.get(n.id);
+                }
+            });
+
             // Prepare edges for D3 - only include edges where both nodes exist
+            // Filter out self-edges (like close_ata) since they can't be rendered as lines
             const d3Edges = (edges || [])
-                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
+                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target) && e.source !== e.target)
                 .map(e => ({
                     source: e.source,
                     target: e.target,
@@ -1991,6 +2079,7 @@
                             Balance: <span>${formatNumber(d.balance)}</span><br>
                             SOL: <span>${d.sol_balance.toFixed(4)}</span>
                             ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
+                            ${d.closeAta ? `<br><span style="color: #0891b2;">ATA Closed: +${d.closeAta.amount.toFixed(6)} SOL</span>` : ''}
                         </div>
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
                             Click to fetch wallet transactions
@@ -2007,6 +2096,51 @@
                     tooltip.style('opacity', 0);
                     fetchWalletTransactions(d.id);
                 });
+
+            // Create close_ata badges (small cyan circle with X for nodes that closed an ATA)
+            const closeAtaNodes = d3Nodes.filter(d => d.closeAta);
+            const badge = g.append('g')
+                .selectAll('g')
+                .data(closeAtaNodes)
+                .join('g')
+                .attr('class', 'close-ata-badge')
+                .style('cursor', 'pointer')
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    tooltip.html(`
+                        <div style="margin-bottom: 5px;">
+                            <span class="edge-type close_ata">close_ata</span>
+                        </div>
+                        <div class="stats">
+                            SOL Returned: <span style="color: #0891b2; font-weight: bold;">${d.closeAta.amount.toFixed(6)} SOL</span><br>
+                            Instruction: <span>#${d.closeAta.ins_index}</span>
+                        </div>
+                        <div style="margin-top: 8px; color: #aaa; font-size: 10px;">
+                            Token account was closed, rent returned
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                });
+
+            // Badge background circle
+            badge.append('circle')
+                .attr('r', 8)
+                .attr('fill', '#0891b2')
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1);
+
+            // Badge X symbol
+            badge.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'central')
+                .attr('fill', '#fff')
+                .attr('font-size', '10px')
+                .attr('font-weight', 'bold')
+                .text('X');
 
             // Create labels
             const label = g.append('g')
@@ -2034,6 +2168,10 @@
                     node
                         .attr('cx', d => d.x)
                         .attr('cy', d => d.y);
+
+                    // Position badges at top-right of node
+                    badge
+                        .attr('transform', d => `translate(${d.x + d.radius * 0.7}, ${d.y - d.radius * 0.7})`);
 
                     label
                         .attr('x', d => d.x)
