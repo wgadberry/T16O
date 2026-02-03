@@ -176,7 +176,6 @@ def index():
 
 @app.route('/api/bmap', methods=['GET'])
 def get_bmap():
-    token_name = request.args.get('token_name') or None
     token_symbol = request.args.get('token_symbol') or None
     mint_address = request.args.get('mint_address') or None
     signature = request.args.get('signature') or None
@@ -193,9 +192,10 @@ def get_bmap():
             conn = mysql.connector.connect(**DB_CONFIG)
             cursor = conn.cursor()
 
-            cursor.callproc('sp_tx_bmap_get_token_state_v5', [
-                token_name, token_symbol, mint_address,
-                signature, block_time, tx_limit
+            # sp_tx_bmap_get params: mint_address, token_symbol, signature, block_time, limit
+            cursor.callproc('sp_tx_bmap_get', [
+                mint_address, token_symbol, signature,
+                block_time, tx_limit
             ])
 
             result = None

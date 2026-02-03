@@ -12,6 +12,7 @@ CREATE PROCEDURE sp_tx_bmap_get(
 BEGIN
     -- ============================================================
     -- sp_tx_bmap_get: BMap viewer data sourced purely from tx_guide
+    -- Optimized with temp tables for balance lookups
     -- ============================================================
 
     DECLARE v_token_id BIGINT;
@@ -33,7 +34,7 @@ BEGIN
     IF p_limit > 50 THEN SET p_limit = 50; END IF;
 
     -- ============================================================
-    -- STEP 1: Resolve token
+    -- STEP 1: Resolve token (optimized - removed expensive GROUP BY)
     -- ============================================================
     IF p_mint_address IS NOT NULL THEN
         SELECT tk.id, a.address, tk.token_symbol, tk.decimals
@@ -42,16 +43,18 @@ BEGIN
         JOIN tx_address a ON a.id = tk.mint_address_id
         WHERE a.address = p_mint_address
         LIMIT 1;
+
     ELSEIF p_token_symbol IS NOT NULL THEN
+        -- Simplified: just get the token, skip expensive count subquery
         SELECT tk.id, a.address, tk.token_symbol, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
         FROM tx_token tk
         JOIN tx_address a ON a.id = tk.mint_address_id
-        LEFT JOIN (SELECT token_id, COUNT(*) cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
         WHERE tk.token_symbol = p_token_symbol
-        ORDER BY COALESCE(g.cnt, 0) DESC
         LIMIT 1;
+
     ELSEIF p_signature IS NOT NULL THEN
+        -- Find token from signature (prefer non-stablecoin)
         SELECT tk.id, a.address, tk.token_symbol, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
         FROM tx t
@@ -63,6 +66,7 @@ BEGIN
           AND UPPER(COALESCE(tk.token_symbol, '')) NOT IN ('SOL','WSOL','USDC','USDT','PYUSD')
         LIMIT 1;
 
+        -- Fallback to any token if no non-stablecoin found
         IF v_token_id IS NULL THEN
             SELECT tk.id, a.address, tk.token_symbol, tk.decimals
             INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
@@ -76,7 +80,7 @@ BEGIN
     END IF;
 
     IF v_token_id IS NULL THEN
-        SELECT JSON_OBJECT('error', 'Token not found') AS result;
+        SELECT JSON_OBJECT('result', JSON_OBJECT('error', 'Token not found')) AS result;
     ELSE
         -- ============================================================
         -- STEP 2: Find anchor transaction
@@ -107,10 +111,11 @@ BEGIN
         END IF;
 
         IF v_tx_id IS NULL THEN
-            SELECT JSON_OBJECT('error', 'No transactions found for token') AS result;
+            SELECT JSON_OBJECT('result', JSON_OBJECT('error', 'No transactions found for token')) AS result;
         ELSE
             -- ============================================================
             -- STEP 3: Build navigation (prev/next transactions)
+            -- Uses idx_token_blocktime index
             -- ============================================================
             SELECT JSON_ARRAYAGG(nav_data) INTO v_prev_json
             FROM (
@@ -121,7 +126,7 @@ BEGIN
                 ) AS nav_data
                 FROM tx_guide g
                 JOIN tx t ON t.id = g.tx_id
-                WHERE g.token_id = v_token_id AND t.block_time < v_block_time
+                WHERE g.token_id = v_token_id AND g.block_time < v_block_time
                 GROUP BY t.id, t.signature, t.block_time
                 ORDER BY t.block_time DESC
                 LIMIT 5
@@ -136,25 +141,120 @@ BEGIN
                 ) AS nav_data
                 FROM tx_guide g
                 JOIN tx t ON t.id = g.tx_id
-                WHERE g.token_id = v_token_id AND t.block_time > v_block_time
+                WHERE g.token_id = v_token_id AND g.block_time > v_block_time
                 GROUP BY t.id, t.signature, t.block_time
                 ORDER BY t.block_time ASC
                 LIMIT 5
             ) next_txs;
 
             -- ============================================================
-            -- STEP 4: Build nodes with balances
+            -- STEP 4: Collect addresses involved in this transaction
             -- ============================================================
             DROP TEMPORARY TABLE IF EXISTS tmp_addr;
             CREATE TEMPORARY TABLE tmp_addr (
                 address_id INT UNSIGNED PRIMARY KEY
-            );
+            ) ENGINE=MEMORY;
 
             INSERT IGNORE INTO tmp_addr (address_id)
             SELECT from_address_id FROM tx_guide WHERE tx_id = v_tx_id
             UNION
             SELECT to_address_id FROM tx_guide WHERE tx_id = v_tx_id;
 
+            -- ============================================================
+            -- STEP 5: Pre-compute token balances (separate queries to avoid temp table reopen)
+            -- ============================================================
+            DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
+            CREATE TEMPORARY TABLE tmp_token_bal (
+                address_id INT UNSIGNED PRIMARY KEY,
+                balance DECIMAL(30,6),
+                block_time BIGINT UNSIGNED,
+                guide_id BIGINT UNSIGNED
+            ) ENGINE=MEMORY;
+
+            -- Get token balances from FROM side (uses idx_from_token_time)
+            INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
+            SELECT g.from_address_id,
+                   ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 6)), 6),
+                   g.block_time, g.id
+            FROM tx_guide g
+            WHERE g.from_address_id IN (SELECT address_id FROM tmp_addr)
+              AND g.token_id = v_token_id
+              AND g.block_time <= v_block_time
+              AND g.from_token_post_balance IS NOT NULL
+            ON DUPLICATE KEY UPDATE
+                balance = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
+                            VALUES(balance), tmp_token_bal.balance),
+                block_time = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
+                            VALUES(block_time), tmp_token_bal.block_time),
+                guide_id = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
+                            VALUES(guide_id), tmp_token_bal.guide_id);
+
+            -- Get token balances from TO side (uses idx_to_token_time)
+            INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
+            SELECT g.to_address_id,
+                   ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 6)), 6),
+                   g.block_time, g.id
+            FROM tx_guide g
+            WHERE g.to_address_id IN (SELECT address_id FROM tmp_addr)
+              AND g.token_id = v_token_id
+              AND g.block_time <= v_block_time
+              AND g.to_token_post_balance IS NOT NULL
+            ON DUPLICATE KEY UPDATE
+                balance = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
+                            VALUES(balance), tmp_token_bal.balance),
+                block_time = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
+                            VALUES(block_time), tmp_token_bal.block_time),
+                guide_id = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
+                            VALUES(guide_id), tmp_token_bal.guide_id);
+
+            -- ============================================================
+            -- STEP 6: Pre-compute SOL balances (separate queries to avoid temp table reopen)
+            -- ============================================================
+            DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
+            CREATE TEMPORARY TABLE tmp_sol_bal (
+                address_id INT UNSIGNED PRIMARY KEY,
+                sol_balance DECIMAL(20,9),
+                block_time BIGINT UNSIGNED,
+                guide_id BIGINT UNSIGNED
+            ) ENGINE=MEMORY;
+
+            -- Get SOL balances from FROM side (uses idx_from_time)
+            INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
+            SELECT g.from_address_id,
+                   ROUND(g.from_sol_post_balance / 1e9, 9),
+                   g.block_time, g.id
+            FROM tx_guide g
+            WHERE g.from_address_id IN (SELECT address_id FROM tmp_addr)
+              AND g.block_time <= v_block_time
+              AND g.from_sol_post_balance IS NOT NULL
+            ON DUPLICATE KEY UPDATE
+                sol_balance = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
+                                VALUES(sol_balance), tmp_sol_bal.sol_balance),
+                block_time = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
+                            VALUES(block_time), tmp_sol_bal.block_time),
+                guide_id = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
+                            VALUES(guide_id), tmp_sol_bal.guide_id);
+
+            -- Get SOL balances from TO side (uses idx_to_time)
+            INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
+            SELECT g.to_address_id,
+                   ROUND(g.to_sol_post_balance / 1e9, 9),
+                   g.block_time, g.id
+            FROM tx_guide g
+            WHERE g.to_address_id IN (SELECT address_id FROM tmp_addr)
+              AND g.block_time <= v_block_time
+              AND g.to_sol_post_balance IS NOT NULL
+            ON DUPLICATE KEY UPDATE
+                sol_balance = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
+                                VALUES(sol_balance), tmp_sol_bal.sol_balance),
+                block_time = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
+                            VALUES(block_time), tmp_sol_bal.block_time),
+                guide_id = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
+                            VALUES(guide_id), tmp_sol_bal.guide_id);
+
+            -- ============================================================
+            -- STEP 7: Build nodes JSON (now using temp tables, no correlated subqueries)
+            -- ============================================================
             SELECT JSON_ARRAYAGG(node_data) INTO v_nodes_json
             FROM (
                 SELECT JSON_OBJECT(
@@ -163,50 +263,26 @@ BEGIN
                     'address_type', a.address_type,
                     'pool_label', p.pool_label,
                     'token_name', tk.token_name,
-                    'balance', COALESCE((
-                        SELECT ROUND(
-                            CASE
-                                WHEN bg.from_address_id = addr.address_id THEN bg.from_token_post_balance
-                                ELSE bg.to_token_post_balance
-                            END / POW(10, COALESCE(bg.decimals, v_decimals, 6)), 6)
-                        FROM tx_guide bg
-                        WHERE bg.token_id = v_token_id
-                          AND (bg.from_address_id = addr.address_id OR bg.to_address_id = addr.address_id)
-                          AND bg.block_time <= v_block_time
-                          AND (
-                              (bg.from_address_id = addr.address_id AND bg.from_token_post_balance IS NOT NULL)
-                              OR (bg.to_address_id = addr.address_id AND bg.to_token_post_balance IS NOT NULL)
-                          )
-                        ORDER BY bg.block_time DESC, bg.id DESC
-                        LIMIT 1
-                    ), 0),
-                    'sol_balance', COALESCE((
-                        SELECT ROUND(
-                            CASE
-                                WHEN bg.from_address_id = addr.address_id THEN bg.from_sol_post_balance
-                                ELSE bg.to_sol_post_balance
-                            END / 1e9, 9)
-                        FROM tx_guide bg
-                        WHERE (bg.from_address_id = addr.address_id OR bg.to_address_id = addr.address_id)
-                          AND bg.block_time <= v_block_time
-                          AND (
-                              (bg.from_address_id = addr.address_id AND bg.from_sol_post_balance IS NOT NULL)
-                              OR (bg.to_address_id = addr.address_id AND bg.to_sol_post_balance IS NOT NULL)
-                          )
-                        ORDER BY bg.block_time DESC, bg.id DESC
-                        LIMIT 1
-                    ), 0)
+                    'funded_by', funder.address,
+                    'balance', COALESCE(tb.balance, 0),
+                    'sol_balance', COALESCE(sb.sol_balance, 0)
                 ) AS node_data
                 FROM tmp_addr addr
                 JOIN tx_address a ON a.id = addr.address_id
                 LEFT JOIN tx_pool p ON p.pool_address_id = a.id
                 LEFT JOIN tx_token tk ON tk.mint_address_id = a.id
+                LEFT JOIN tx_address funder ON funder.id = a.funded_by_address_id
+                LEFT JOIN tmp_token_bal tb ON tb.address_id = addr.address_id
+                LEFT JOIN tmp_sol_bal sb ON sb.address_id = addr.address_id
             ) nodes_outer;
 
+            -- Cleanup temp tables
             DROP TEMPORARY TABLE IF EXISTS tmp_addr;
+            DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
+            DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
 
             -- ============================================================
-            -- STEP 5: Build edges
+            -- STEP 8: Build edges JSON
             -- ============================================================
             SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
             FROM (
@@ -240,7 +316,7 @@ BEGIN
             ) edges_outer;
 
             -- ============================================================
-            -- STEP 6: Return final JSON
+            -- STEP 9: Return final JSON
             -- ============================================================
             SELECT JSON_OBJECT(
                 'result', JSON_OBJECT(

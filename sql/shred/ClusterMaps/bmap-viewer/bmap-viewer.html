@@ -731,6 +731,10 @@
                         <input type="text" id="mint_address" placeholder="Mint address...">
                     </div>
                     <div class="form-group">
+                        <label>TX Signature</label>
+                        <input type="text" id="signature" placeholder="Paste signature..." style="font-family: monospace; font-size: 10px;">
+                    </div>
+                    <div class="form-group">
                         <label>TX Window</label>
                         <select id="tx_limit" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); padding: 8px 10px; border-radius: 5px; font-size: 12px; width: 100%;">
                             <option value="1">Single TX</option>
@@ -741,7 +745,6 @@
                         </select>
                     </div>
                     <input type="hidden" id="token_name">
-                    <input type="hidden" id="signature">
                     <input type="hidden" id="block_time">
                     <button class="btn" onclick="fetchData()">Load Token</button>
                 </div>
