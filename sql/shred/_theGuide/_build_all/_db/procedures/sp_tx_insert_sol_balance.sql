@@ -54,7 +54,7 @@ BEGIN
     -- Join to get address_id
     JOIN tx_address addr ON addr.address = b.address
     WHERE b.address IS NOT NULL
-      AND CAST(b.change_amount AS SIGNED) != 0
+      -- Note: Include change_amount = 0 to capture pre/post balance data for viewer
       -- Filter: collect all OR address is in searched list
       AND (v_collect_all_balances
            OR p_searched_addresses IS NULL

@@ -75,7 +75,7 @@ BEGIN
     WHERE b.address IS NOT NULL
       AND b.owner IS NOT NULL
       AND b.token_address IS NOT NULL
-      AND CAST(b.change_amount AS DECIMAL(38,0)) != 0
+      -- Note: Include change_amount = 0 to capture pre/post balance data for viewer
       -- Filter by owner: collect all OR owner is in searched list
       AND (v_collect_all_balances
            OR p_searched_addresses IS NULL

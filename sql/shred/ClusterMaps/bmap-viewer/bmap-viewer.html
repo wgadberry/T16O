@@ -1258,7 +1258,14 @@
                     amount: e.amount,
                     type: e.type,
                     token_symbol: e.token_symbol,
+                    token_name: e.token_name,
+                    decimals: e.decimals,
+                    from_token_balance: e.from_token_balance,
+                    to_token_balance: e.to_token_balance,
+                    from_sol_balance: e.from_sol_balance,
+                    to_sol_balance: e.to_sol_balance,
                     signature: e.signature,
+                    block_time: e.block_time,
                     block_time_utc: e.block_time_utc,
                     dex: e.dex,
                     pool: e.pool,
@@ -1353,6 +1360,8 @@
                     d3.select(event.target).attr('stroke-width', 5);
                     tooltip.transition().duration(200).style('opacity', 1);
                     const tokenSymbol = d.token_symbol || 'Unknown';
+                    const tokenName = d.token_name || null;
+                    const tokenDisplay = tokenName && tokenName !== tokenSymbol ? `${tokenSymbol} (${tokenName})` : tokenSymbol;
                     const sourceLabel = d.source_label && !['unknown', 'wallet'].includes(d.source_label) ? d.source_label : null;
                     const targetLabel = d.target_label && !['unknown', 'wallet'].includes(d.target_label) ? d.target_label : null;
                     const poolLabel = d.pool_label || null;
@@ -1368,8 +1377,10 @@
                         </div>
                         ` : ''}
                         <div class="stats">
-                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
-                            Time: ${d.block_time_utc || 'N/A'}
+                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenDisplay}</span><br>
+                            ${d.from_sol_balance !== null && d.from_sol_balance !== undefined ? `From SOL: <span style="color: #60a5fa;">${d.from_sol_balance.toFixed(6)}</span><br>` : ''}
+                            ${d.to_sol_balance !== null && d.to_sol_balance !== undefined ? `To SOL: <span style="color: #60a5fa;">${d.to_sol_balance.toFixed(6)}</span><br>` : ''}
+                            Time: ${d.block_time_utc || (d.block_time ? formatTimestamp(d.block_time) : 'N/A')}
                             ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
                         ${d.pool || d.program || poolLabel ? `
@@ -1806,7 +1817,14 @@
                     amount: e.amount,
                     type: e.type,
                     token_symbol: e.token_symbol,
+                    token_name: e.token_name,
+                    decimals: e.decimals,
+                    from_token_balance: e.from_token_balance,
+                    to_token_balance: e.to_token_balance,
+                    from_sol_balance: e.from_sol_balance,
+                    to_sol_balance: e.to_sol_balance,
                     signature: e.signature,
+                    block_time: e.block_time,
                     block_time_utc: e.block_time_utc,
                     dex: e.dex,
                     pool: e.pool,
@@ -1899,6 +1917,8 @@
                     d3.select(event.target).attr('stroke-width', 5);
                     tooltip.transition().duration(200).style('opacity', 1);
                     const tokenSymbol = d.token_symbol || 'Unknown';
+                    const tokenName = d.token_name || null;
+                    const tokenDisplay = tokenName && tokenName !== tokenSymbol ? `${tokenSymbol} (${tokenName})` : tokenSymbol;
                     const sourceLabel = d.source_label && !['unknown', 'wallet'].includes(d.source_label) ? d.source_label : null;
                     const targetLabel = d.target_label && !['unknown', 'wallet'].includes(d.target_label) ? d.target_label : null;
                     const poolLabel = d.pool_label || null;
@@ -1914,8 +1934,10 @@
                         </div>
                         ` : ''}
                         <div class="stats">
-                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
-                            Time: ${d.block_time_utc || 'N/A'}
+                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenDisplay}</span><br>
+                            ${d.from_sol_balance !== null && d.from_sol_balance !== undefined ? `From SOL: <span style="color: #60a5fa;">${d.from_sol_balance.toFixed(6)}</span><br>` : ''}
+                            ${d.to_sol_balance !== null && d.to_sol_balance !== undefined ? `To SOL: <span style="color: #60a5fa;">${d.to_sol_balance.toFixed(6)}</span><br>` : ''}
+                            Time: ${d.block_time_utc || (d.block_time ? formatTimestamp(d.block_time) : 'N/A')}
                             ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
                         ${d.pool || d.program || poolLabel ? `
