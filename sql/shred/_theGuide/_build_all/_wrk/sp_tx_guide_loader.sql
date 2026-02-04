@@ -179,18 +179,33 @@ BEGIN
 
         -- ============================================================
         -- Populate balances with LAG (look backwards if not in same tx)
+        -- Uses token_account_address_id for precise ATA matching
         -- ============================================================
 
-        -- from_token_post_balance: same tx first, then most recent prior
+        -- from_token_post_balance: match by token account (ATA) for accuracy
         UPDATE tx_guide g
         SET g.from_token_post_balance = COALESCE(
-            -- First: try same transaction
+            -- First: try same transaction, match by token account
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             WHERE tbc.tx_id = g.tx_id
+               AND tbc.token_account_address_id = g.from_token_account_id
+               AND tbc.token_id = g.token_id
+             LIMIT 1),
+            -- Fallback: same tx by owner (for swap edges without token_account_id)
             (SELECT tbc.post_balance FROM tx_token_balance_change tbc
              WHERE tbc.tx_id = g.tx_id
                AND tbc.owner_address_id = g.from_address_id
                AND tbc.token_id = g.token_id
              LIMIT 1),
-            -- LAG: most recent prior balance for this (address, token)
+            -- LAG: most recent prior balance for this token account
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             JOIN tx t ON t.id = tbc.tx_id
+             WHERE tbc.token_account_address_id = g.from_token_account_id
+               AND tbc.token_id = g.token_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, tbc.id DESC
+             LIMIT 1),
+            -- LAG fallback: by owner
             (SELECT tbc.post_balance FROM tx_token_balance_change tbc
              JOIN tx t ON t.id = tbc.tx_id
              WHERE tbc.owner_address_id = g.from_address_id
@@ -202,16 +217,30 @@ BEGIN
         WHERE g.tx_id >= v_start AND g.tx_id < v_end
           AND g.from_token_post_balance IS NULL AND g.token_id IS NOT NULL;
 
-        -- to_token_post_balance: same tx first, then most recent prior
+        -- to_token_post_balance: match by token account (ATA) for accuracy
         UPDATE tx_guide g
         SET g.to_token_post_balance = COALESCE(
-            -- First: try same transaction
+            -- First: try same transaction, match by token account
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             WHERE tbc.tx_id = g.tx_id
+               AND tbc.token_account_address_id = g.to_token_account_id
+               AND tbc.token_id = g.token_id
+             LIMIT 1),
+            -- Fallback: same tx by owner (for swap edges without token_account_id)
             (SELECT tbc.post_balance FROM tx_token_balance_change tbc
              WHERE tbc.tx_id = g.tx_id
                AND tbc.owner_address_id = g.to_address_id
                AND tbc.token_id = g.token_id
              LIMIT 1),
-            -- LAG: most recent prior balance for this (address, token)
+            -- LAG: most recent prior balance for this token account
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             JOIN tx t ON t.id = tbc.tx_id
+             WHERE tbc.token_account_address_id = g.to_token_account_id
+               AND tbc.token_id = g.token_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, tbc.id DESC
+             LIMIT 1),
+            -- LAG fallback: by owner
             (SELECT tbc.post_balance FROM tx_token_balance_change tbc
              JOIN tx t ON t.id = tbc.tx_id
              WHERE tbc.owner_address_id = g.to_address_id
@@ -276,18 +305,33 @@ BEGIN
 
         -- ============================================================
         -- Populate PRE-balances (for tax detection)
+        -- Uses token_account_address_id for precise ATA matching
         -- ============================================================
 
-        -- from_token_pre_balance: same tx first, then most recent prior post_balance
+        -- from_token_pre_balance: match by token account (ATA) for accuracy
         UPDATE tx_guide g
         SET g.from_token_pre_balance = COALESCE(
-            -- First: try same transaction's pre_balance
+            -- First: try same transaction's pre_balance, match by token account
+            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+             WHERE tbc.tx_id = g.tx_id
+               AND tbc.token_account_address_id = g.from_token_account_id
+               AND tbc.token_id = g.token_id
+             LIMIT 1),
+            -- Fallback: same tx by owner
             (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
              WHERE tbc.tx_id = g.tx_id
                AND tbc.owner_address_id = g.from_address_id
                AND tbc.token_id = g.token_id
              LIMIT 1),
-            -- LAG: most recent prior post_balance for this (address, token)
+            -- LAG: most recent prior post_balance for this token account
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             JOIN tx t ON t.id = tbc.tx_id
+             WHERE tbc.token_account_address_id = g.from_token_account_id
+               AND tbc.token_id = g.token_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, tbc.id DESC
+             LIMIT 1),
+            -- LAG fallback: by owner
             (SELECT tbc.post_balance FROM tx_token_balance_change tbc
              JOIN tx t ON t.id = tbc.tx_id
              WHERE tbc.owner_address_id = g.from_address_id
@@ -300,16 +344,30 @@ BEGIN
         WHERE g.tx_id >= v_start AND g.tx_id < v_end
           AND g.from_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
 
-        -- to_token_pre_balance: same tx first, then most recent prior post_balance
+        -- to_token_pre_balance: match by token account (ATA) for accuracy
         UPDATE tx_guide g
         SET g.to_token_pre_balance = COALESCE(
-            -- First: try same transaction's pre_balance
+            -- First: try same transaction's pre_balance, match by token account
+            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+             WHERE tbc.tx_id = g.tx_id
+               AND tbc.token_account_address_id = g.to_token_account_id
+               AND tbc.token_id = g.token_id
+             LIMIT 1),
+            -- Fallback: same tx by owner
             (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
              WHERE tbc.tx_id = g.tx_id
                AND tbc.owner_address_id = g.to_address_id
                AND tbc.token_id = g.token_id
              LIMIT 1),
-            -- LAG: most recent prior post_balance for this (address, token)
+            -- LAG: most recent prior post_balance for this token account
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             JOIN tx t ON t.id = tbc.tx_id
+             WHERE tbc.token_account_address_id = g.to_token_account_id
+               AND tbc.token_id = g.token_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, tbc.id DESC
+             LIMIT 1),
+            -- LAG fallback: by owner
             (SELECT tbc.post_balance FROM tx_token_balance_change tbc
              JOIN tx t ON t.id = tbc.tx_id
              WHERE tbc.owner_address_id = g.to_address_id
