@@ -336,6 +336,64 @@ def explain_bmap():
 
     # Prepare a focused version for the LLM (reduce token usage)
     result = bmap_data.get('result', {})
+
+    # Process edges with tax detection
+    processed_edges = []
+    detected_taxes = []
+
+    for e in result.get('edges', []):
+        edge_data = {
+            'source_label': e.get('source_label'),
+            'target_label': e.get('target_label'),
+            'amount': e.get('amount'),
+            'type': e.get('type'),
+            'category': e.get('category'),
+            'token_symbol': e.get('token_symbol'),
+            'token_name': e.get('token_name'),
+            'dex': e.get('dex'),
+            'pool_label': e.get('pool_label')
+        }
+
+        # Add balance changes if available
+        from_pre = e.get('from_token_pre_balance')
+        from_post = e.get('from_token_balance')
+        to_pre = e.get('to_token_pre_balance')
+        to_post = e.get('to_token_balance')
+
+        if from_pre is not None and from_post is not None:
+            edge_data['sender_balance_change'] = f"{from_pre:,.0f} → {from_post:,.0f}"
+        if to_pre is not None and to_post is not None:
+            edge_data['receiver_balance_change'] = f"{to_pre:,.0f} → {to_post:,.0f}"
+
+            # Detect tax: receiver got less than amount sent
+            if to_post > to_pre:
+                actual_received = to_post - to_pre
+                amount = e.get('amount', 0)
+                if amount and amount > actual_received * 1.005:
+                    tax_amount = amount - actual_received
+                    tax_percent = (tax_amount / amount) * 100
+                    if 1 <= tax_percent < 50:
+                        edge_data['tax_detected'] = {
+                            'percent': round(tax_percent, 1),
+                            'amount': round(tax_amount, 2),
+                            'expected': round(amount, 2),
+                            'received': round(actual_received, 2)
+                        }
+                        # Determine direction: if target is wallet-like, it's a buy; if source is, it's a sell
+                        target_label = e.get('target_label', '')
+                        source_label = e.get('source_label', '')
+                        is_buy = target_label in ['wallet', 'Token Creator'] or target_label == 'wallet'
+                        is_sell = source_label in ['wallet', 'Token Creator']
+                        direction = 'buy' if is_buy else ('sell' if is_sell else 'transfer')
+
+                        detected_taxes.append({
+                            'token': e.get('token_symbol'),
+                            'percent': round(tax_percent, 1),
+                            'direction': direction
+                        })
+
+        processed_edges.append(edge_data)
+
     focused_data = {
         'token': result.get('token'),
         'signature': result.get('txs', {}).get('signature'),
@@ -351,47 +409,55 @@ def explain_bmap():
             }
             for n in result.get('nodes', [])
         ],
-        'edges': [
-            {
-                'source_label': e.get('source_label'),
-                'target_label': e.get('target_label'),
-                'amount': e.get('amount'),
-                'type': e.get('type'),
-                'category': e.get('category'),
-                'token_symbol': e.get('token_symbol'),
-                'token_name': e.get('token_name'),
-                'dex': e.get('dex'),
-                'pool_label': e.get('pool_label')
-            }
-            for e in result.get('edges', [])
-        ]
+        'edges': processed_edges,
+        'tax_summary': detected_taxes if detected_taxes else None
     }
 
-    # Identify user wallet (first wallet-type node)
+    # Identify user wallet (first wallet-type node, including Token Creator)
     user_wallet = None
+    user_label = None
     for n in result.get('nodes', []):
-        if n.get('address_type') == 'wallet' or n.get('label') == 'wallet':
+        if n.get('address_type') == 'wallet' or n.get('label') in ['wallet', 'Token Creator']:
             user_wallet = n.get('address', '')
+            user_label = n.get('label') or 'wallet'
             break
 
     # Build prompt
+    wallet_display = f"{user_wallet[:8]}...{user_wallet[-6:]}" if user_wallet and len(user_wallet) > 14 else user_wallet or 'unknown'
+    user_desc = f"{user_label} ({wallet_display})" if user_label and user_label != 'wallet' else wallet_display
+
+    # Build tax context if detected
+    tax_context = ""
+    if focused_data.get('tax_summary'):
+        taxes = focused_data['tax_summary']
+        tax_context = f"\n\nTAX DETECTED: This token has a built-in transfer tax. "
+        for t in taxes:
+            tax_context += f"{t['token']} has a ~{t['percent']}% tax on {t['direction']}s. "
+
     prompt = f"""Analyze this Solana transaction and explain what happened in simple, layman's terms.
 
 Transaction Data:
 {json.dumps(focused_data, indent=2)}
 
-User Wallet: {user_wallet or 'Unknown'}
+User: {user_desc}
+User Type: {user_label or 'wallet'}{tax_context}
 
 Format your response as follows:
-**Summary:** A user ({user_wallet[:8]}...{user_wallet[-6:] if user_wallet and len(user_wallet) > 14 else user_wallet or 'unknown'}) [describe main action in one sentence].
+**Summary:** A user ({user_desc}) [describe main action in one sentence].
 
 **Details:**
 [2-3 sentences explaining the token flows, DEXes used, and outcome]
 
+**Tax Impact:** (only if tax_detected in edges)
+[Explain the tax that was taken and its impact on the transaction]
+
 Guidelines:
 - Explain token flows in plain English (e.g., "sold X tokens for Y SOL")
 - If it's a swap through multiple DEXes, explain the route simply
-- Mention any fees if significant
+- When tax_detected is present in an edge, ALWAYS mention it prominently
+- The tax_detected shows: expected amount, actual received, and the percentage taken
+- Explain tax impact in terms of value lost (e.g., "10% tax took X tokens worth $Y")
+- Note if user is a "Token Creator" as this may be significant (dev selling)
 - Note account closures (close_ata) as "closing out of a position"
 - Avoid technical jargon; use analogies if helpful
 
