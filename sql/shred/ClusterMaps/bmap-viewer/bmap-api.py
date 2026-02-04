@@ -15,6 +15,14 @@ import threading
 import time
 import random
 
+# LLM support (optional)
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
+    print("[bmap-api] Warning: anthropic package not installed. /api/bmap/explain will be disabled.")
+
 # Deadlock retry config
 MAX_RETRIES = 3
 BASE_BACKOFF = 0.3  # seconds
@@ -273,10 +281,148 @@ def fetch_wallet():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+def fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit):
+    """Helper to get bmap data for explain endpoint."""
+    conn = mysql.connector.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+
+    cursor.callproc('sp_tx_bmap_get', [
+        mint_address, token_symbol, signature, block_time, limit
+    ])
+
+    result = None
+    for res in cursor.stored_results():
+        row = res.fetchone()
+        if row:
+            result = json.loads(row[0])
+
+    cursor.close()
+    conn.close()
+    return result or {'result': {'error': 'No data'}}
+
+
+@app.route('/api/bmap/explain', methods=['GET'])
+def explain_bmap():
+    """
+    Get layman's explanation of a transaction using Claude.
+    Same params as /api/bmap, returns narrative text.
+
+    Required: ANTHROPIC_API_KEY environment variable
+    """
+    if not HAS_ANTHROPIC:
+        return jsonify({'error': 'anthropic package not installed. Run: pip install anthropic'}), 500
+
+    # Check for API key
+    if not os.environ.get('ANTHROPIC_API_KEY'):
+        return jsonify({'error': 'ANTHROPIC_API_KEY environment variable not set'}), 500
+
+    # Get params (same as /api/bmap)
+    mint_address = request.args.get('mint_address') or None
+    token_symbol = request.args.get('token_symbol') or None
+    signature = request.args.get('signature') or None
+    block_time = request.args.get('block_time')
+    block_time = int(block_time) if block_time else None
+    limit = request.args.get('limit', 10)
+    limit = int(limit) if limit else 10
+
+    # Fetch bmap data
+    try:
+        bmap_data = fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit)
+    except Exception as e:
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
+
+    if 'error' in bmap_data.get('result', {}):
+        return jsonify(bmap_data), 404
+
+    # Prepare a focused version for the LLM (reduce token usage)
+    result = bmap_data.get('result', {})
+    focused_data = {
+        'token': result.get('token'),
+        'signature': result.get('txs', {}).get('signature'),
+        'block_time_utc': result.get('txs', {}).get('block_time_utc'),
+        'nodes': [
+            {
+                'address': n.get('address', '')[:12] + '...',
+                'label': n.get('label'),
+                'address_type': n.get('address_type'),
+                'pool_label': n.get('pool_label'),
+                'balance': n.get('balance'),
+                'sol_balance': n.get('sol_balance')
+            }
+            for n in result.get('nodes', [])
+        ],
+        'edges': [
+            {
+                'source_label': e.get('source_label'),
+                'target_label': e.get('target_label'),
+                'amount': e.get('amount'),
+                'type': e.get('type'),
+                'category': e.get('category'),
+                'token_symbol': e.get('token_symbol'),
+                'token_name': e.get('token_name'),
+                'dex': e.get('dex'),
+                'pool_label': e.get('pool_label')
+            }
+            for e in result.get('edges', [])
+        ]
+    }
+
+    # Identify user wallet (first wallet-type node)
+    user_wallet = None
+    for n in result.get('nodes', []):
+        if n.get('address_type') == 'wallet' or n.get('label') == 'wallet':
+            user_wallet = n.get('address', '')
+            break
+
+    # Build prompt
+    prompt = f"""Analyze this Solana transaction and explain what happened in simple, layman's terms.
+
+Transaction Data:
+{json.dumps(focused_data, indent=2)}
+
+User Wallet: {user_wallet or 'Unknown'}
+
+Format your response as follows:
+**Summary:** A user ({user_wallet[:8]}...{user_wallet[-6:] if user_wallet and len(user_wallet) > 14 else user_wallet or 'unknown'}) [describe main action in one sentence].
+
+**Details:**
+[2-3 sentences explaining the token flows, DEXes used, and outcome]
+
+Guidelines:
+- Explain token flows in plain English (e.g., "sold X tokens for Y SOL")
+- If it's a swap through multiple DEXes, explain the route simply
+- Mention any fees if significant
+- Note account closures (close_ata) as "closing out of a position"
+- Avoid technical jargon; use analogies if helpful
+
+Write for someone who understands basic crypto concepts but not Solana internals."""
+
+    # Call Claude
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        return jsonify({
+            'signature': signature,
+            'explanation': response.content[0].text,
+            'model': response.model
+        })
+
+    except anthropic.APIError as e:
+        return jsonify({'error': f'Claude API error: {str(e)}'}), 500
+    except Exception as e:
+        return jsonify({'error': f'LLM error: {str(e)}'}), 500
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("BMap Viewer API")
     print("=" * 60)
     print(f"Open http://localhost:5050 in your browser")
+    print(f"LLM Explain: {'Enabled' if HAS_ANTHROPIC else 'Disabled (pip install anthropic)'}")
     print("=" * 60)
     app.run(host='0.0.0.0', port=5050, debug=True)

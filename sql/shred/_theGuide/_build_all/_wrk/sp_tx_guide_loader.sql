@@ -274,6 +274,105 @@ BEGIN
           AND a.address_type = 'mint'
           AND (g.to_token_post_balance IS NULL OR g.to_sol_post_balance IS NULL);
 
+        -- ============================================================
+        -- Populate PRE-balances (for tax detection)
+        -- ============================================================
+
+        -- from_token_pre_balance: same tx first, then most recent prior post_balance
+        UPDATE tx_guide g
+        SET g.from_token_pre_balance = COALESCE(
+            -- First: try same transaction's pre_balance
+            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+             WHERE tbc.tx_id = g.tx_id
+               AND tbc.owner_address_id = g.from_address_id
+               AND tbc.token_id = g.token_id
+             LIMIT 1),
+            -- LAG: most recent prior post_balance for this (address, token)
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             JOIN tx t ON t.id = tbc.tx_id
+             WHERE tbc.owner_address_id = g.from_address_id
+               AND tbc.token_id = g.token_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, tbc.id DESC
+             LIMIT 1),
+            0  -- Default to 0 if no prior balance
+        )
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.from_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
+
+        -- to_token_pre_balance: same tx first, then most recent prior post_balance
+        UPDATE tx_guide g
+        SET g.to_token_pre_balance = COALESCE(
+            -- First: try same transaction's pre_balance
+            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+             WHERE tbc.tx_id = g.tx_id
+               AND tbc.owner_address_id = g.to_address_id
+               AND tbc.token_id = g.token_id
+             LIMIT 1),
+            -- LAG: most recent prior post_balance for this (address, token)
+            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+             JOIN tx t ON t.id = tbc.tx_id
+             WHERE tbc.owner_address_id = g.to_address_id
+               AND tbc.token_id = g.token_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, tbc.id DESC
+             LIMIT 1),
+            0  -- Default to 0 if no prior balance
+        )
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.to_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
+
+        -- from_sol_pre_balance: same tx first, then most recent prior post_balance
+        UPDATE tx_guide g
+        SET g.from_sol_pre_balance = COALESCE(
+            -- First: try same transaction's pre_balance
+            (SELECT sbc.pre_balance FROM tx_sol_balance_change sbc
+             WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.from_address_id
+             LIMIT 1),
+            -- LAG: most recent prior SOL post_balance for this address
+            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+             JOIN tx t ON t.id = sbc.tx_id
+             WHERE sbc.address_id = g.from_address_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, sbc.id DESC
+             LIMIT 1),
+            0
+        )
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end AND g.from_sol_pre_balance IS NULL;
+
+        -- to_sol_pre_balance: same tx first, then most recent prior post_balance
+        UPDATE tx_guide g
+        SET g.to_sol_pre_balance = COALESCE(
+            -- First: try same transaction's pre_balance
+            (SELECT sbc.pre_balance FROM tx_sol_balance_change sbc
+             WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.to_address_id
+             LIMIT 1),
+            -- LAG: most recent prior SOL post_balance for this address
+            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+             JOIN tx t ON t.id = sbc.tx_id
+             WHERE sbc.address_id = g.to_address_id
+               AND t.block_time < g.block_time
+             ORDER BY t.block_time DESC, sbc.id DESC
+             LIMIT 1),
+            0
+        )
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end AND g.to_sol_pre_balance IS NULL;
+
+        -- Default mint addresses pre-balance to 0
+        UPDATE tx_guide g
+        JOIN tx_address a ON a.id = g.from_address_id
+        SET g.from_token_pre_balance = 0, g.from_sol_pre_balance = 0
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND a.address_type = 'mint'
+          AND (g.from_token_pre_balance IS NULL OR g.from_sol_pre_balance IS NULL);
+
+        UPDATE tx_guide g
+        JOIN tx_address a ON a.id = g.to_address_id
+        SET g.to_token_pre_balance = 0, g.to_sol_pre_balance = 0
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND a.address_type = 'mint'
+          AND (g.to_token_pre_balance IS NULL OR g.to_sol_pre_balance IS NULL);
+
         -- Return results via OUT params (no SELECT to avoid unread result issues)
         SET p_rows_loaded = v_transfer_count + v_swap_count;
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;

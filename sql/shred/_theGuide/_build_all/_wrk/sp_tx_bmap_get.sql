@@ -282,7 +282,7 @@ BEGIN
             DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
 
             -- ============================================================
-            -- STEP 8: Build edges JSON
+            -- STEP 8: Build edges JSON (pre-balance now stored in tx_guide)
             -- ============================================================
             SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
             FROM (
@@ -299,10 +299,16 @@ BEGIN
                     'token_name', COALESCE(tk.token_name,
                         CASE WHEN g.token_id IS NULL THEN 'Solana' ELSE NULL END),
                     'decimals', COALESCE(g.decimals, tk.decimals, 6),
+                    -- Post-balances
                     'from_token_balance', ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, tk.decimals, 6)), COALESCE(g.decimals, tk.decimals, 6)),
                     'to_token_balance', ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, tk.decimals, 6)), COALESCE(g.decimals, tk.decimals, 6)),
                     'from_sol_balance', ROUND(g.from_sol_post_balance / 1e9, 9),
                     'to_sol_balance', ROUND(g.to_sol_post_balance / 1e9, 9),
+                    -- Pre-balances (for tax detection)
+                    'from_token_pre_balance', ROUND(COALESCE(g.from_token_pre_balance, 0) / POW(10, COALESCE(g.decimals, tk.decimals, 6)), COALESCE(g.decimals, tk.decimals, 6)),
+                    'to_token_pre_balance', ROUND(COALESCE(g.to_token_pre_balance, 0) / POW(10, COALESCE(g.decimals, tk.decimals, 6)), COALESCE(g.decimals, tk.decimals, 6)),
+                    'from_sol_pre_balance', ROUND(COALESCE(g.from_sol_pre_balance, 0) / 1e9, 9),
+                    'to_sol_pre_balance', ROUND(COALESCE(g.to_sol_pre_balance, 0) / 1e9, 9),
                     'ins_index', g.ins_index,
                     'dex', s.name,
                     'pool', pool_addr.address,
