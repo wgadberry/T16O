@@ -2795,6 +2795,7 @@
             if (!unixTime) return '--';
             const date = new Date(unixTime * 1000);
             return date.toLocaleString('en-US', {
+                year: 'numeric',
                 month: 'short',
                 day: 'numeric',
                 hour: '2-digit',
