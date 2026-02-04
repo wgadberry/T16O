@@ -229,6 +229,36 @@
                 <div id="responseHeaders" class="headers-display"></div>
             </div>
         </div>
+
+        <!-- TX Count by Address Panel -->
+        <div class="panel">
+            <h2 style="color: #00d4ff; margin-top: 0; margin-bottom: 15px;">TX Count by Address (Chainstack)</h2>
+            <div class="row">
+                <div class="col">
+                    <label>Chainstack RPC URL</label>
+                    <input type="text" id="chainstackUrl" value="https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb" placeholder="https://solana-mainnet.core.chainstack.com/...">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col">
+                    <label>Solana Address</label>
+                    <input type="text" id="txCountAddress" value="" placeholder="Enter Solana address...">
+                </div>
+                <button class="btn btn-primary" style="align-self: flex-end; margin-bottom: 0;" onclick="getTxCount()">Get TX Count</button>
+            </div>
+            <div class="row">
+                <div class="col">
+                    <label>Result</label>
+                    <div class="response-panel" style="min-height: 100px;">
+                        <div class="response-header">
+                            <span id="txCountStatus" class="status status-info">Ready</span>
+                            <span id="txCountTiming" class="timing"></span>
+                        </div>
+                        <pre id="txCountResponse">Enter an address and click "Get TX Count"...</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -469,6 +499,139 @@
                 sendRequest();
             }
         });
+
+        // TX Count by Address functionality
+        async function getTxCount() {
+            const chainstackUrl = document.getElementById('chainstackUrl').value.trim();
+            const address = document.getElementById('txCountAddress').value.trim();
+            const responseEl = document.getElementById('txCountResponse');
+            const statusEl = document.getElementById('txCountStatus');
+            const timingEl = document.getElementById('txCountTiming');
+
+            if (!chainstackUrl || chainstackUrl.includes('YOUR_API_KEY')) {
+                responseEl.innerHTML = '<span style="color: #ff5252;">Please enter a valid Chainstack RPC URL</span>';
+                return;
+            }
+
+            if (!address) {
+                responseEl.innerHTML = '<span style="color: #ff5252;">Please enter a Solana address</span>';
+                return;
+            }
+
+            responseEl.innerHTML = 'Fetching signatures...';
+            statusEl.textContent = 'Fetching...';
+            statusEl.className = 'status status-info';
+            timingEl.textContent = '';
+
+            const startTime = performance.now();
+            let allSignatures = [];
+            let beforeSignature = null;
+            let batchCount = 0;
+
+            try {
+                // Paginate through all signatures (max 1000 per call)
+                while (true) {
+                    batchCount++;
+                    responseEl.innerHTML = `Fetching batch ${batchCount}... (${allSignatures.length} signatures so far)`;
+
+                    const params = [address, { limit: 1000 }];
+                    if (beforeSignature) {
+                        params[1].before = beforeSignature;
+                    }
+
+                    const response = await fetch(chainstackUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            jsonrpc: '2.0',
+                            id: 1,
+                            method: 'getSignaturesForAddress',
+                            params: params
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.error) {
+                        throw new Error(data.error.message || 'RPC Error');
+                    }
+
+                    const signatures = data.result || [];
+                    if (signatures.length === 0) {
+                        break;
+                    }
+
+                    allSignatures = allSignatures.concat(signatures);
+
+                    // Get the last signature for pagination
+                    beforeSignature = signatures[signatures.length - 1].signature;
+
+                    // If we got less than 1000, we've reached the end
+                    if (signatures.length < 1000) {
+                        break;
+                    }
+
+                    // Safety limit to prevent infinite loops
+                    if (batchCount >= 1000) {
+                        responseEl.innerHTML += '\n<span style="color: #ffc107;">Warning: Reached 1M signature limit</span>';
+                        break;
+                    }
+                }
+
+                const endTime = performance.now();
+                const duration = Math.round(endTime - startTime);
+                timingEl.textContent = `${duration}ms`;
+
+                if (allSignatures.length === 0) {
+                    statusEl.textContent = 'No Results';
+                    statusEl.className = 'status status-warning';
+                    responseEl.innerHTML = 'No signatures found for this address.';
+                    return;
+                }
+
+                // Find oldest and newest block times
+                // Signatures are returned newest first
+                const newestSig = allSignatures[0];
+                const oldestSig = allSignatures[allSignatures.length - 1];
+
+                const formatBlockTime = (unixTime) => {
+                    if (!unixTime) return 'N/A';
+                    const date = new Date(unixTime * 1000);
+                    return date.toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+                };
+
+                statusEl.textContent = 'Success';
+                statusEl.className = 'status status-success';
+
+                const result = {
+                    address: address,
+                    total_signatures: allSignatures.length,
+                    batches_fetched: batchCount,
+                    newest: {
+                        signature: newestSig.signature,
+                        block_time_utc: formatBlockTime(newestSig.blockTime),
+                        block_time_unix: newestSig.blockTime,
+                        slot: newestSig.slot
+                    },
+                    oldest: {
+                        signature: oldestSig.signature,
+                        block_time_utc: formatBlockTime(oldestSig.blockTime),
+                        block_time_unix: oldestSig.blockTime,
+                        slot: oldestSig.slot
+                    }
+                };
+
+                responseEl.innerHTML = syntaxHighlight(result);
+
+            } catch (error) {
+                const endTime = performance.now();
+                const duration = Math.round(endTime - startTime);
+                timingEl.textContent = `${duration}ms`;
+                statusEl.textContent = 'Error';
+                statusEl.className = 'status status-error';
+                responseEl.innerHTML = `<span style="color: #ff5252;">Error: ${error.message}</span>`;
+            }
+        }
     </script>
 </body>
 </html>

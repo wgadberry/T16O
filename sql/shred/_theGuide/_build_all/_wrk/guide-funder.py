@@ -212,7 +212,7 @@ class SolscanClient:
             print(f"    [!] account/metadata error for {address[:12]}...: {e}")
             return None
 
-    def get_account_metadata_multi(self, addresses: List[str], limit: int = 50) -> Dict[str, Dict]:
+    def get_account_metadata_multi(self, addresses: List[str], limit: int = 50, debug: bool = False) -> Dict[str, Dict]:
         """
         Get account metadata for multiple addresses in a single call.
         /account/metadata/multi - batch endpoint using address[] query params
@@ -220,6 +220,7 @@ class SolscanClient:
         Args:
             addresses: List of addresses
             limit: Max addresses per call (default 50, Solscan API max)
+            debug: If True, print detailed API response info
 
         Returns dict mapping address -> metadata dict
         """
@@ -235,8 +236,17 @@ class SolscanClient:
 
         try:
             response = self.session.get(url, params=params, timeout=60)
+            if debug:
+                print(f"      [DEBUG] API status: {response.status_code}")
             response.raise_for_status()
             result = response.json()
+
+            if debug:
+                print(f"      [DEBUG] API success: {result.get('success')}, data count: {len(result.get('data', []))}")
+                if result.get('data') and len(result['data']) > 0:
+                    sample = result['data'][0]
+                    print(f"      [DEBUG] Sample keys: {list(sample.keys())}")
+                    print(f"      [DEBUG] Sample account_tags: {sample.get('account_tags')}")
 
             # Build address -> metadata map
             metadata_map = {}
@@ -245,10 +255,14 @@ class SolscanClient:
                     addr = item.get('account_address')
                     if addr:
                         metadata_map[addr] = item
+            elif debug:
+                print(f"      [DEBUG] API response: {result}")
 
             return metadata_map
         except Exception as e:
             print(f"    [!] account/metadata/multi error: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
 
     def get_account_transfers(self, address: str, page_size: int = 20, token_filter: str = None) -> Optional[Dict]:
@@ -1448,8 +1462,10 @@ def main():
                         help='Path to .txt file with addresses (one per line). Skips RabbitMQ when provided.')
     parser.add_argument('--sync-db-missing', action='store_true',
                         help='Query DB for addresses with funded_by_address_id=NULL and init_tx_fetched=0, then process them.')
+    parser.add_argument('--sync-db-missing-metadata', action='store_true',
+                        help='Query DB for addresses with funded_by_address_id set but account_tags=NULL, fetch metadata only.')
     parser.add_argument('--limit', type=int, default=0,
-                        help='Max addresses to process in --sync-db-missing mode (0 = unlimited)')
+                        help='Max addresses to process in --sync-db-missing or --sync-db-missing-metadata mode (0 = unlimited)')
     parser.add_argument('--interval', type=int, default=0,
                         help='Polling interval in seconds for --sync-db-missing mode. If set, daemon will sleep and retry when no work found (0 = exit when done)')
     parser.add_argument('--queue-consumer', action='store_true',
@@ -1471,8 +1487,8 @@ def main():
         print("Error: mysql-connector-python not installed")
         return 1
 
-    # File mode doesn't need RabbitMQ
-    if not args.address_file and not HAS_PIKA:
+    # File/sync modes don't need RabbitMQ
+    if not args.address_file and not args.sync_db_missing and not args.sync_db_missing_metadata and not HAS_PIKA:
         print("Error: pika not installed (required for queue mode)")
         return 1
 
@@ -1480,6 +1496,10 @@ def main():
     print(f"{'='*60}")
     if args.address_file:
         print(f"MODE: File input ({args.address_file})")
+    elif args.sync_db_missing:
+        print(f"MODE: Sync DB Missing (funder discovery)")
+    elif args.sync_db_missing_metadata:
+        print(f"MODE: Sync DB Missing Metadata (metadata backfill)")
     else:
         print(f"MODE: Queue consumer")
         print(f"Queue: {RABBITMQ_QUEUE_IN}")
@@ -1514,7 +1534,7 @@ def main():
     solscan = SolscanClient()
 
     # FILE MODE or SYNC-DB-MISSING MODE: Process addresses from file or DB query
-    if args.address_file or args.sync_db_missing:
+    if args.address_file or args.sync_db_missing or args.sync_db_missing_metadata:
         import os
 
         # Determine source of addresses
@@ -1782,6 +1802,105 @@ def main():
                 return [{'address': row['address'], 'request_log_id': row['request_log_id']}
                         for row in self.cursor.fetchall()]
 
+            def get_missing_metadata_addresses(self, limit: int) -> list:
+                """
+                Fetch addresses from DB where funded_by_address_id IS NOT NULL
+                but account_tags IS NULL (have funder but missing metadata).
+                Orders by id ASC to process oldest addresses first (backfill mode).
+                Returns list of dicts with 'address' and 'request_log_id' for billing.
+                """
+                query = """
+                    SELECT address, request_log_id FROM tx_address
+                    WHERE funded_by_address_id IS NOT NULL
+                      AND account_tags IS NULL
+                    ORDER BY id ASC
+                    LIMIT %s
+                """
+                self.cursor.execute(query, (limit,))
+                return [{'address': row['address'], 'request_log_id': row['request_log_id']}
+                        for row in self.cursor.fetchall()]
+
+            def save_metadata_only(self, target_address: str, metadata: Dict):
+                """
+                Save only metadata fields to tx_address table (no funder changes).
+                Used for backfilling metadata on addresses that already have funders.
+                metadata has: account_label, account_tags, account_type, active_age
+                """
+                if self.dry_run:
+                    return
+
+                label = metadata.get('account_label')
+                tags = metadata.get('account_tags')
+                account_type = metadata.get('account_type')
+
+                update_fields = []
+                update_values = []
+
+                if label is not None:
+                    update_fields.append("label = COALESCE(label, %s)")
+                    update_values.append(label)
+
+                if tags is not None:
+                    update_fields.append("account_tags = %s")
+                    update_values.append(json.dumps(tags) if tags else None)
+
+                    # Derive address_type from account_tags
+                    tags_lower = [t.lower() for t in tags] if tags else []
+                    mapped_type = None
+
+                    if 'pool' in tags_lower:
+                        mapped_type = 'pool'
+                    elif 'market' in tags_lower:
+                        mapped_type = 'market'
+                    elif any('vault' in tag for tag in tags_lower):
+                        mapped_type = 'vault'
+                    elif 'lptoken' in tags_lower:
+                        mapped_type = 'lp_token'
+                    elif 'dex_wallet' in tags_lower:
+                        mapped_type = 'dex_wallet'
+                    elif 'fee_vault' in tags_lower:
+                        mapped_type = 'fee_vault'
+                    elif 'arbitrage_bot' in tags_lower:
+                        mapped_type = 'bot'
+                    elif 'token_creator' in tags_lower:
+                        mapped_type = 'wallet'
+                        update_fields.append("label = COALESCE(label, %s)")
+                        update_values.append('Token Creator')
+                    elif 'memecoin' in tags_lower:
+                        mapped_type = 'mint'
+                    elif account_type == 'token_account':
+                        mapped_type = 'ata'
+                    elif account_type == 'mint':
+                        mapped_type = 'mint'
+                    elif account_type == 'address':
+                        mapped_type = 'wallet'
+
+                    if mapped_type:
+                        update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
+                        update_values.append(mapped_type)
+
+                elif account_type is not None:
+                    mapped_type = account_type
+                    if account_type == 'token_account':
+                        mapped_type = 'ata'
+                    elif account_type == 'mint':
+                        mapped_type = 'mint'
+                    elif account_type == 'address':
+                        mapped_type = 'wallet'
+                    update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata') THEN %s ELSE address_type END")
+                    update_values.append(mapped_type)
+
+                if not update_fields:
+                    return
+
+                update_values.append(target_address)
+                self.cursor.execute(f"""
+                    UPDATE tx_address
+                    SET {', '.join(update_fields)}
+                    WHERE address = %s
+                """, update_values)
+                self.db_conn.commit()
+
         worker = FileWorker(db_conn, solscan, args.tx_limit, args.dry_run, args.api_delay, args.batch_delay)
 
         # SYNC-DB-MISSING MODE: Query DB in batches until exhausted
@@ -1937,6 +2056,152 @@ def main():
                 if args.batch_delay > 0:
                     print(f"  Waiting {args.batch_delay}s before next batch...")
                     time.sleep(args.batch_delay)
+
+        # SYNC-DB-MISSING-METADATA MODE: Query DB for addresses with funders but missing metadata
+        elif args.sync_db_missing_metadata:
+            total_limit = args.limit if args.limit > 0 else float('inf')
+            batch_num = 0
+            metadata_updated = 0
+            metadata_not_found = 0
+
+            print(f"Sync DB Missing Metadata Mode")
+            print(f"  Target: addresses with funded_by_address_id but no account_tags")
+            print(f"  Limit: {args.limit if args.limit > 0 else 'unlimited'}")
+            print()
+
+            while worker.addresses_processed < total_limit:
+                # Get batch_size from config each iteration (runtime_editable)
+                batch_size = get_db_batch_size(worker.cursor)
+                remaining = int(min(batch_size, total_limit - worker.addresses_processed))
+                candidates = worker.get_missing_metadata_addresses(remaining)
+
+                if not candidates:
+                    print("\nNo more addresses to process.")
+                    break
+
+                # Filter out known programs and skip prefixes
+                skipped_addrs = [c['address'] for c in candidates if should_skip_address(c['address'])]
+                candidates = [c for c in candidates if not should_skip_address(c['address'])]
+
+                # For skipped addresses, set account_tags to empty array so they don't appear again
+                if skipped_addrs and not args.dry_run:
+                    placeholders = ','.join(['%s'] * len(skipped_addrs))
+                    worker.cursor.execute(f"""
+                        UPDATE tx_address SET account_tags = '[]'
+                        WHERE address IN ({placeholders})
+                    """, skipped_addrs)
+                    worker.db_conn.commit()
+                    print(f"  Marked {len(skipped_addrs)} system/program addresses with empty tags (skipped)")
+
+                if not candidates:
+                    print("  No valid candidates in this batch, continuing...")
+                    continue
+
+                batch_num += 1
+                print(f"\n{'='*60}")
+                print(f"Batch {batch_num}: Found {len(candidates)} candidates needing metadata")
+
+                candidate_addresses = [c['address'] for c in candidates]
+
+                if args.dry_run:
+                    print(f"  DRY RUN - would fetch metadata for {len(candidate_addresses)} addresses")
+                    for addr in candidate_addresses[:5]:
+                        print(f"    {addr[:20]}...")
+                    if len(candidate_addresses) > 5:
+                        print(f"    ... and {len(candidate_addresses) - 5} more")
+                    worker.addresses_processed += len(candidate_addresses)
+                else:
+                    # Create daemon request_log entry for billing
+                    daemon_request_log_id = log_daemon_request(
+                        worker.cursor, worker.db_conn,
+                        worker='funder', action='metadata_backfill',
+                        batch_size=len(candidate_addresses)
+                    )
+
+                    batch_metadata_found = 0
+                    batch_metadata_not_found = 0
+
+                    # Use batch API - get batch_size from config
+                    api_batch_size = get_db_batch_size(worker.cursor)
+                    total_to_process = len(candidate_addresses)
+
+                    for api_batch_start in range(0, total_to_process, api_batch_size):
+                        api_batch = candidate_addresses[api_batch_start:api_batch_start + api_batch_size]
+                        api_batch_num = api_batch_start // api_batch_size + 1
+                        total_api_batches = (total_to_process + api_batch_size - 1) // api_batch_size
+
+                        print(f"    API batch {api_batch_num}/{total_api_batches}: Fetching metadata for {len(api_batch)} addresses...")
+
+                        # Call batch API (debug=True for first batch to diagnose issues)
+                        is_first_batch = (batch_num == 1 and api_batch_num == 1)
+                        metadata_map = solscan.get_account_metadata_multi(api_batch, debug=is_first_batch)
+                        print(f"      Got metadata for {len(metadata_map)} addresses")
+
+                        # Process each address in API batch
+                        for j, addr in enumerate(api_batch):
+                            if worker.addresses_processed >= total_limit:
+                                break
+
+                            idx = api_batch_start + j + 1
+                            print(f"  [{idx}/{total_to_process}] {addr[:20]}...", end='')
+
+                            metadata = metadata_map.get(addr)
+
+                            if metadata and metadata.get('account_tags'):
+                                tags = metadata.get('account_tags')
+                                print(f" -> tags: {tags}")
+                                worker.save_metadata_only(addr, metadata)
+                                metadata_updated += 1
+                                batch_metadata_found += 1
+                            else:
+                                print(f" -> no tags found")
+                                # Set empty tags so this address isn't queried again
+                                if not args.dry_run:
+                                    worker.cursor.execute("""
+                                        UPDATE tx_address SET account_tags = '[]'
+                                        WHERE address = %s
+                                    """, (addr,))
+                                    worker.db_conn.commit()
+                                metadata_not_found += 1
+                                batch_metadata_not_found += 1
+
+                            worker.addresses_processed += 1
+
+                        # Check limit after each API batch
+                        if worker.addresses_processed >= total_limit:
+                            print(f"\n  Reached limit of {args.limit} addresses")
+                            break
+
+                        # 1 second delay between API batch calls
+                        if api_batch_start + api_batch_size < total_to_process:
+                            time.sleep(1.0)
+
+                    # Update daemon request_log entry with results
+                    update_daemon_request(
+                        worker.cursor, worker.db_conn, daemon_request_log_id,
+                        status='completed',
+                        result={
+                            'processed': worker.addresses_processed,
+                            'metadata_found': batch_metadata_found,
+                            'metadata_not_found': batch_metadata_not_found
+                        }
+                    )
+
+                    # Mark all processed addresses as initialized
+                    worker.mark_addresses_initialized(candidate_addresses)
+
+                print(f"  Batch complete. Total processed: {worker.addresses_processed}")
+
+                if args.batch_delay > 0:
+                    print(f"  Waiting {args.batch_delay}s before next batch...")
+                    time.sleep(args.batch_delay)
+
+            # Print final summary for metadata mode
+            print(f"\n{'='*60}")
+            print(f"Metadata Backfill Summary:")
+            print(f"  Addresses processed: {worker.addresses_processed}")
+            print(f"  Metadata found: {metadata_updated}")
+            print(f"  Metadata not found: {metadata_not_found}")
 
         # FILE MODE: Process addresses from file
         else:

@@ -85,6 +85,35 @@ MAX_DETAILED_ATTEMPTS = 3
 # Track completed correlations to avoid duplicate responses
 _completed_correlations = set()
 
+# Known Solana program addresses for participant classification
+KNOWN_PROGRAMS = {
+    '11111111111111111111111111111111',              # System Program
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  # Token Program
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',  # Token-2022 Program
+    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', # Associated Token Program
+    'ComputeBudget111111111111111111111111111111',   # Compute Budget
+    'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s',  # Metaplex Token Metadata
+    'BPFLoaderUpgradeab1e11111111111111111111111',   # BPF Upgradeable Loader
+    'BPFLoader2111111111111111111111111111111111',   # BPF Loader 2
+    'SysvarRent111111111111111111111111111111111',   # Sysvar Rent
+    'SysvarC1ock11111111111111111111111111111111',   # Sysvar Clock
+    'Sysvar1nstructions1111111111111111111111111',   # Sysvar Instructions
+    'Vote111111111111111111111111111111111111111',   # Vote Program
+    'Stake11111111111111111111111111111111111111',   # Stake Program
+    # DEX Programs
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',  # Raydium AMM V4
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',  # Raydium CPMM
+    'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',  # Raydium CLMM
+    '5quBtoiQqxF9Jv6KYKctB59NT3gtJD2Y65kdnB1Uev3h',  # Raydium Stable
+    'srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX',  # Serum DEX V3
+    '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',  # Serum DEX V2
+    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',  # Orca Whirlpools
+    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',  # Jupiter V6
+    'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo',  # Meteora DLMM
+    'Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB', # Meteora Pools
+    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',  # Pump.fun
+}
+
 
 # =============================================================================
 # Gateway Response Publishing
@@ -193,6 +222,88 @@ class ShredderProcessor:
             defaults = {'shredded': TX_STATE_SHREDDED, 'decoded': TX_STATE_DECODED, 'detailed': TX_STATE_DETAILED}
             self._tx_states[key] = row['val'] if row else defaults.get(key, 0)
         return self._tx_states[key]
+
+    def extract_and_insert_participants(self, staging_id: int) -> int:
+        """
+        Extract participants from staging row JSON and insert into tx_participant.
+        Returns number of participants inserted.
+        """
+        # Fetch the staging row JSON
+        self.cursor.execute(f"""
+            SELECT txs FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
+        """, (staging_id,))
+        row = self.cursor.fetchone()
+        if not row or not row.get('txs'):
+            return 0
+
+        txs_data = row['txs']
+        if isinstance(txs_data, str):
+            txs_data = json.loads(txs_data)
+
+        data_list = txs_data.get('data', [])
+        if not data_list:
+            return 0
+
+        total_inserted = 0
+
+        for tx_item in data_list:
+            tx_hash = tx_item.get('tx_hash')
+            account_keys = tx_item.get('account_keys', [])
+
+            if not tx_hash or not account_keys:
+                continue
+
+            # Look up tx_id by signature
+            self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (tx_hash,))
+            tx_row = self.cursor.fetchone()
+            if not tx_row:
+                continue  # Transaction not in tx table yet
+
+            tx_id = tx_row['id']
+
+            # Process each account in the transaction
+            for idx, acct in enumerate(account_keys):
+                pubkey = acct.get('pubkey')
+                if not pubkey:
+                    continue
+
+                is_signer = 1 if acct.get('signer') else 0
+                is_fee_payer = 1 if idx == 0 else 0  # First account is fee payer by convention
+                is_writable = 1 if acct.get('writable') else 0
+                is_program = 1 if pubkey in KNOWN_PROGRAMS else 0
+
+                # Get or create address_id
+                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (pubkey,))
+                addr_row = self.cursor.fetchone()
+                if addr_row:
+                    address_id = addr_row['id']
+                else:
+                    # Insert new address
+                    addr_type = 'program' if is_program else 'unknown'
+                    self.cursor.execute(
+                        "INSERT INTO tx_address (address, address_type) VALUES (%s, %s)",
+                        (pubkey, addr_type)
+                    )
+                    address_id = self.cursor.lastrowid
+
+                # Insert participant (ignore duplicates)
+                try:
+                    self.cursor.execute("""
+                        INSERT INTO tx_participant
+                            (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, account_index)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            is_signer = VALUES(is_signer),
+                            is_fee_payer = VALUES(is_fee_payer),
+                            is_writable = VALUES(is_writable),
+                            is_program = VALUES(is_program)
+                    """, (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, idx))
+                    total_inserted += 1
+                except MySQLError:
+                    pass  # Ignore duplicate key errors
+
+        self.db_conn.commit()
+        return total_inserted
 
     def fetch_pending_staging_rows(self, limit: int = 50) -> list:
         """
@@ -330,6 +441,7 @@ class ShredderProcessor:
             'sol_balance_count': 0,
             'token_balance_count': 0,
             'skipped_count': 0,
+            'participant_count': 0,
             'error': None
         }
 
@@ -356,6 +468,15 @@ class ShredderProcessor:
                     result['activity_count'] = row['@act'] or 0
                     result['skipped_count'] = row['@skip'] or 0
                 result['success'] = True
+
+                # Extract and insert transaction participants for forensics
+                if result['tx_count'] > 0:
+                    try:
+                        participant_count = self.extract_and_insert_participants(staging_id)
+                        result['participant_count'] = participant_count
+                    except Exception as e:
+                        # Don't fail the whole row if participant extraction fails
+                        result['participant_error'] = str(e)
 
             elif tx_state == detailed_state:
                 # Call sp_tx_parse_staging_detail for detailed data
@@ -490,10 +611,11 @@ class ShredderProcessor:
                 summary['processed'] += 1
                 if tx_state == decoded_state:
                     summary['decoded_count'] += 1
+                    participant_info = f" part={result['participant_count']}" if result.get('participant_count') else ""
                     print(f"  [+] staging.id={staging_id} (decoded): "
                           f"tx={result['tx_count']} xfer={result['transfer_count']} "
                           f"swap={result['swap_count']} act={result['activity_count']} "
-                          f"skip={result['skipped_count']}")
+                          f"skip={result['skipped_count']}{participant_info}")
                 elif tx_state == detailed_state:
                     summary['detailed_count'] += 1
                     print(f"  [+] staging.id={staging_id} (detailed): "
