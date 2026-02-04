@@ -945,7 +945,10 @@ class AddressHistoryWorker:
             elif 'arbitrage_bot' in tags_lower:
                 mapped_type = 'bot'
             elif 'token_creator' in tags_lower:
-                mapped_type = 'token_creator'
+                mapped_type = 'wallet'
+                # Set label for token creators (type stays wallet for tax detection)
+                update_fields.append("label = COALESCE(label, %s)")
+                update_values.append('Token Creator')
             elif 'memecoin' in tags_lower:
                 mapped_type = 'mint'
             elif account_type == 'token_account':
@@ -1711,7 +1714,10 @@ def main():
                     elif 'arbitrage_bot' in tags_lower:
                         mapped_type = 'bot'
                     elif 'token_creator' in tags_lower:
-                        mapped_type = 'token_creator'
+                        mapped_type = 'wallet'
+                        # Set label for token creators (type stays wallet for tax detection)
+                        update_fields.append("label = COALESCE(label, %s)")
+                        update_values.append('Token Creator')
                     elif 'memecoin' in tags_lower:
                         mapped_type = 'mint'
                     elif account_type == 'token_account':

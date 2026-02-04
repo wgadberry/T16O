@@ -1315,6 +1315,10 @@
                         to_token_balance: e.to_token_balance,
                         from_sol_balance: e.from_sol_balance,
                         to_sol_balance: e.to_sol_balance,
+                        from_token_pre_balance: e.from_token_pre_balance,
+                        to_token_pre_balance: e.to_token_pre_balance,
+                        from_sol_pre_balance: e.from_sol_pre_balance,
+                        to_sol_pre_balance: e.to_sol_pre_balance,
                         signature: e.signature,
                         block_time: e.block_time,
                         block_time_utc: e.block_time_utc,
@@ -1436,14 +1440,19 @@
                 }
             });
 
-            // SELL-SIDE TAX DETECTION: wallet sends tokens, pool receives less
+            // SELL-SIDE TAX DETECTION: sender sends tokens, receiver gets less
             // Uses pre-balance data to calculate actual received = post - pre
+            const walletLikeLabels = ['wallet', 'Token Creator', 'bot'];
+            const poolLikeLabels = ['Raydium', 'Jupiter', 'OKX', 'Orca', 'Pump.fun', 'vault', 'pool', 'Market'];
+            const isWalletLike = (label) => walletLikeLabels.includes(label) || label === null;
+            const isPoolLike = (label) => poolLikeLabels.some(p => label && label.includes(p));
+
             (edges || []).forEach(e => {
                 if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
 
-                // Wallet sending tokens out (swap_in or spl_transfer FROM wallet)
+                // Any spl_transfer where we can detect tax via pre/post balance
                 if ((e.type === 'swap_in' || e.type === 'spl_transfer') &&
-                    e.source_label === 'wallet' &&
+                    (isWalletLike(e.source_label) || isPoolLike(e.target_label)) &&
                     e.to_token_pre_balance !== null &&
                     e.to_token_pre_balance !== undefined &&
                     e.to_token_balance !== null &&
@@ -1452,7 +1461,7 @@
                     // What the recipient actually received
                     const actualReceived = e.to_token_balance - e.to_token_pre_balance;
 
-                    // Skip if recipient already had tokens or received negative (shouldn't happen)
+                    // Skip if received is not positive (pool might be sending, not receiving)
                     if (actualReceived <= 0) return;
 
                     // Compare to amount sent
@@ -2122,6 +2131,10 @@
                         to_token_balance: e.to_token_balance,
                         from_sol_balance: e.from_sol_balance,
                         to_sol_balance: e.to_sol_balance,
+                        from_token_pre_balance: e.from_token_pre_balance,
+                        to_token_pre_balance: e.to_token_pre_balance,
+                        from_sol_pre_balance: e.from_sol_pre_balance,
+                        to_sol_pre_balance: e.to_sol_pre_balance,
                         signature: e.signature,
                         block_time: e.block_time,
                         block_time_utc: e.block_time_utc,
@@ -2243,14 +2256,19 @@
                 }
             });
 
-            // SELL-SIDE TAX DETECTION: wallet sends tokens, pool receives less
+            // SELL-SIDE TAX DETECTION: sender sends tokens, receiver gets less
             // Uses pre-balance data to calculate actual received = post - pre
+            const walletLikeLabels = ['wallet', 'Token Creator', 'bot'];
+            const poolLikeLabels = ['Raydium', 'Jupiter', 'OKX', 'Orca', 'Pump.fun', 'vault', 'pool', 'Market'];
+            const isWalletLike = (label) => walletLikeLabels.includes(label) || label === null;
+            const isPoolLike = (label) => poolLikeLabels.some(p => label && label.includes(p));
+
             (edges || []).forEach(e => {
                 if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
 
-                // Wallet sending tokens out (swap_in or spl_transfer FROM wallet)
+                // Any spl_transfer where we can detect tax via pre/post balance
                 if ((e.type === 'swap_in' || e.type === 'spl_transfer') &&
-                    e.source_label === 'wallet' &&
+                    (isWalletLike(e.source_label) || isPoolLike(e.target_label)) &&
                     e.to_token_pre_balance !== null &&
                     e.to_token_pre_balance !== undefined &&
                     e.to_token_balance !== null &&
@@ -2259,7 +2277,7 @@
                     // What the recipient actually received
                     const actualReceived = e.to_token_balance - e.to_token_pre_balance;
 
-                    // Skip if recipient already had tokens or received negative (shouldn't happen)
+                    // Skip if received is not positive (pool might be sending, not receiving)
                     if (actualReceived <= 0) return;
 
                     // Compare to amount sent
