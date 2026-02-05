@@ -533,19 +533,24 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
         const target = d.target as D3Node;
         const progress = this.arrowProgress.get(i) || 0;
 
-        // Get source and target positions
-        const x1 = source.x || 0;
-        const y1 = source.y || 0;
-        const x2 = target.x || 0;
-        const y2 = target.y || 0;
-
-        // Calculate the target node radius to stop before entering
-        const targetRadius = target.radius || 10;
+        // Get source and target positions (check for valid numbers)
+        const x1 = typeof source.x === 'number' && !isNaN(source.x) ? source.x : 0;
+        const y1 = typeof source.y === 'number' && !isNaN(source.y) ? source.y : 0;
+        const x2 = typeof target.x === 'number' && !isNaN(target.x) ? target.x : 0;
+        const y2 = typeof target.y === 'number' && !isNaN(target.y) ? target.y : 0;
 
         // Calculate line length and direction
         const dx = x2 - x1;
         const dy = y2 - y1;
         const lineLength = Math.sqrt(dx * dx + dy * dy);
+
+        // Skip if line length is too small (avoid NaN from division)
+        if (lineLength < 1) {
+          return 'translate(0,0)';
+        }
+
+        // Calculate the target node radius to stop before entering
+        const targetRadius = target.radius || 10;
 
         // Adjust end point to stop at bubble edge
         const effectiveLength = Math.max(0, lineLength - targetRadius - 5);
