@@ -2,59 +2,6 @@
   <div class="cluster-maps-layout">
     <!-- Left Sidebar -->
     <div class="sidebar-panel">
-      <!-- Query Form -->
-      <p-card>
-        <ng-template #header>
-          <div class="card-header">
-            <h3><i class="pi pi-search"></i> Query</h3>
-          </div>
-        </ng-template>
-
-        <div class="form-group">
-          <label>Token Symbol</label>
-          <input type="text" pInputText [(ngModel)]="tokenSymbol" placeholder="e.g. BONK">
-        </div>
-
-        <div class="form-group">
-          <label>Mint Address</label>
-          <input type="text" pInputText [(ngModel)]="mintAddress" placeholder="Mint address...">
-        </div>
-
-        <div class="form-group">
-          <label>TX Window</label>
-          <p-select [options]="txLimitOptions" [(ngModel)]="txLimit" optionLabel="label" optionValue="value" styleClass="w-full"></p-select>
-        </div>
-
-        <button pButton label="Load Token" icon="pi pi-play" (click)="loadData()" [loading]="loading" class="w-full"></button>
-      </p-card>
-
-      <!-- Token Info -->
-      <ng-container *ngIf="currentData?.result?.token as token">
-        <p-card>
-          <ng-template #header>
-            <div class="card-header">
-              <h3><i class="pi pi-info-circle"></i> Token Info</h3>
-            </div>
-          </ng-template>
-
-          <div class="token-symbol">{{ token.symbol || 'Unknown' }}</div>
-          <div class="info-row">
-            <span class="label">Mint</span>
-            <span class="value" [title]="token.mint || ''">
-              {{ formatMintAddress(token.mint) }}
-            </span>
-          </div>
-          <div class="info-row">
-            <span class="label">Nodes</span>
-            <span class="value">{{ getNodesCount() }}</span>
-          </div>
-          <div class="info-row">
-            <span class="label">Edges</span>
-            <span class="value">{{ getEdgesCount() }}</span>
-          </div>
-        </p-card>
-      </ng-container>
-
       <!-- Current Transaction -->
       <ng-container *ngIf="currentData?.result?.txs as txs">
         <p-card>
@@ -135,6 +82,68 @@
         <!-- Bubble Map Container -->
         <div class="bubble-map-wrapper">
           <div #bubbleMapContainer class="bubble-map-container" [hidden]="loading"></div>
+
+          <!-- Left Panels Container -->
+          <div class="left-panels-container">
+            <!-- Collapsible Query Panel -->
+            <div class="query-panel" [class.collapsed]="!queryPanelExpanded">
+              <button class="panel-toggle" (click)="toggleQueryPanel()">
+                <i class="pi" [ngClass]="queryPanelExpanded ? 'pi-chevron-left' : 'pi-chevron-right'"></i>
+                <span *ngIf="!queryPanelExpanded" class="toggle-label">Query</span>
+              </button>
+              <div class="panel-content" *ngIf="queryPanelExpanded">
+                <div class="panel-header">
+                  <i class="pi pi-search"></i>
+                  <span>Query Token</span>
+                </div>
+                <div class="query-form">
+                  <div class="form-group">
+                    <label>Token Symbol</label>
+                    <input type="text" pInputText [(ngModel)]="tokenSymbol" placeholder="e.g. BONK">
+                  </div>
+                  <div class="form-group">
+                    <label>Mint Address</label>
+                    <input type="text" pInputText [(ngModel)]="mintAddress" placeholder="Mint address...">
+                  </div>
+                  <div class="form-group">
+                    <label>TX Window</label>
+                    <p-select [options]="txLimitOptions" [(ngModel)]="txLimit" optionLabel="label" optionValue="value" styleClass="w-full"></p-select>
+                  </div>
+                  <button pButton label="Load Token" icon="pi pi-play" (click)="loadData()" [loading]="loading" class="w-full"></button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Collapsible Token Info Panel -->
+            <div class="token-info-panel" *ngIf="currentData?.result?.token as token" [class.collapsed]="!tokenInfoPanelExpanded">
+              <button class="panel-toggle" (click)="toggleTokenInfoPanel()">
+                <i class="pi" [ngClass]="tokenInfoPanelExpanded ? 'pi-chevron-left' : 'pi-chevron-right'"></i>
+                <span *ngIf="!tokenInfoPanelExpanded" class="toggle-label">{{ token.symbol || 'Token' }}</span>
+              </button>
+              <div class="panel-content" *ngIf="tokenInfoPanelExpanded">
+                <div class="panel-header">
+                  <i class="pi pi-info-circle"></i>
+                  <span>Token Info</span>
+                </div>
+                <div class="token-symbol">{{ token.symbol || 'Unknown' }}</div>
+                <div class="info-row">
+                  <span class="label">Mint</span>
+                  <div class="value-with-copy">
+                    <span class="value" [title]="token.mint || ''">{{ formatMintAddress(token.mint) }}</span>
+                    <button pButton icon="pi pi-copy" class="p-button-text p-button-sm copy-btn" (click)="copyToClipboard(token.mint)" pTooltip="Copy mint"></button>
+                  </div>
+                </div>
+                <div class="info-row">
+                  <span class="label">Nodes</span>
+                  <span class="value">{{ getNodesCount() }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="label">Edges</span>
+                  <span class="value">{{ getEdgesCount() }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
 
           <!-- Node Details Panel -->
           <div class="node-details-panel" *ngIf="selectedNode">

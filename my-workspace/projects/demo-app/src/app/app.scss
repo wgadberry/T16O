@@ -1,0 +1,44 @@
+.demo-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #0d0d1a;
+  color: #e0e0e0;
+}
+
+.demo-header {
+  padding: 1.5rem 2rem;
+  background: rgba(20, 20, 35, 0.8);
+  border-bottom: 1px solid rgba(100, 100, 150, 0.3);
+
+  h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  p {
+    margin: 0.5rem 0 0;
+    font-size: 0.9rem;
+    color: #888;
+  }
+}
+
+.demo-content {
+  flex: 1;
+  padding: 1rem;
+}
+
+.demo-footer {
+  padding: 1rem 2rem;
+  background: rgba(20, 20, 35, 0.8);
+  border-top: 1px solid rgba(100, 100, 150, 0.3);
+  text-align: center;
+
+  p {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #666;
+  }
+}

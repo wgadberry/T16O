@@ -8,7 +8,6 @@ export interface BubbleMapNode {
   funded_by?: string | string[];
   token_mint?: string;
   token_symbol?: string;
-  // Additional properties from stored procedure
   pool_label?: string | null;
   token_name?: string | null;
   sol_balance?: number;
@@ -19,11 +18,10 @@ export interface BubbleMapEdge {
   source: string;
   target: string;
   edge_type?: string;
-  type?: string; // actual property name from stored procedure
+  type?: string;
   amount?: number;
   amount_usd?: number;
   signatures?: string[];
-  // Additional properties from stored procedure
   dex?: string;
   pool?: string | null;
   program?: string;
@@ -81,8 +79,44 @@ export interface BubbleMapResponse {
   result: BubbleMapResult;
 }
 
-export interface TimeRangeResponse {
-  min_time: number;
-  max_time: number;
-  tx_count: number;
+export interface BubbleMapQueryParams {
+  token_name?: string;
+  token_symbol?: string;
+  mint_address?: string;
+  signature?: string;
+  block_time?: number;
+  tx_limit?: number;
+}
+
+// D3 simulation node interface (extends d3.SimulationNodeDatum)
+export interface D3Node {
+  id: string;
+  label: string;
+  name: string;
+  balance: number;
+  balanceUsd: number;
+  isPool: boolean;
+  isProgram: boolean;
+  fundedBy: string[];
+  color: string;
+  radius: number;
+  // d3.SimulationNodeDatum properties
+  index?: number;
+  x?: number;
+  y?: number;
+  vx?: number;
+  vy?: number;
+  fx?: number | null;
+  fy?: number | null;
+}
+
+// D3 simulation link interface (extends d3.SimulationLinkDatum<D3Node>)
+export interface D3Link {
+  source: string | D3Node;
+  target: string | D3Node;
+  edgeType: string;
+  amount: number;
+  color: string;
+  // d3.SimulationLinkDatum properties
+  index?: number;
 }

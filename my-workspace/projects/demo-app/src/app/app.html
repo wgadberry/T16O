@@ -1,0 +1,18 @@
+<div class="demo-container">
+  <header class="demo-header">
+    <h1>{{ title }}</h1>
+    <p>Cluster Map Component Demo</p>
+  </header>
+
+  <main class="demo-content">
+    <lib-cluster-map
+      (nodeSelected)="onNodeSelected($event)"
+      (dataLoaded)="onDataLoaded($event)"
+      (loadError)="onLoadError($event)">
+    </lib-cluster-map>
+  </main>
+
+  <footer class="demo-footer">
+    <p>Enter a token symbol (e.g., BONK, WIF) or mint address to visualize transaction clusters</p>
+  </footer>
+</div>

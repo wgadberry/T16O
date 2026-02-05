@@ -4,8 +4,12 @@ using T16O.www.Server.Services;
 
 namespace T16O.www.Server.Controllers
 {
+    /// <summary>
+    /// API for retrieving blockchain transaction visualization data as bubble map graphs
+    /// </summary>
     [ApiController]
     [Route("api/[controller]")]
+    [Produces("application/json")]
     public class BubbleMapController : ControllerBase
     {
         private readonly IBubbleMapService _bubbleMapService;
@@ -18,15 +22,33 @@ namespace T16O.www.Server.Controllers
         }
 
         /// <summary>
-        /// Get bubble map data for a token
+        /// Get bubble map visualization data for a token
         /// </summary>
-        /// <param name="token_name">Token name (optional)</param>
-        /// <param name="token_symbol">Token symbol (optional)</param>
-        /// <param name="mint_address">Token mint address (optional)</param>
-        /// <param name="signature">Transaction signature (optional)</param>
-        /// <param name="block_time">Unix timestamp (optional)</param>
-        /// <param name="tx_limit">Transaction window size (10, 20, 50, 100) - default 10</param>
+        /// <remarks>
+        /// Returns a graph of nodes (wallets, pools, programs) and edges (transaction flows)
+        /// for visualizing token movement patterns on the Solana blockchain.
+        ///
+        /// You must provide at least one of: token_symbol, mint_address, or signature.
+        ///
+        /// **Edge Types:**
+        /// - `swap_in` / `swap_out` - DEX swap transactions
+        /// - `spl_transfer` - SPL token transfers
+        /// - `sol_transfer` - Native SOL transfers
+        /// - `wallet_funded` / `funded_by` - Wallet funding relationships
+        /// - `add_liquidity` / `remove_liquidity` - LP operations
+        /// - `mint` / `burn` - Token minting and burning
+        /// </remarks>
+        /// <param name="token_name">Token name to search for</param>
+        /// <param name="token_symbol">Token symbol (e.g., SOL, USDC, BONK)</param>
+        /// <param name="mint_address">Exact token mint address (base58)</param>
+        /// <param name="signature">Transaction signature to center the view on</param>
+        /// <param name="block_time">Unix timestamp to query around</param>
+        /// <param name="tx_limit">Transaction window size: 10, 20, 50, or 100 (default: 10)</param>
+        /// <response code="200">Returns the bubble map graph data</response>
+        /// <response code="500">Server error or database query failed</response>
         [HttpGet]
+        [ProducesResponseType(typeof(BubbleMapResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(BubbleMapResponse), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetBubbleMapData(
             [FromQuery] string? token_name,
             [FromQuery] string? token_symbol,
@@ -66,11 +88,25 @@ namespace T16O.www.Server.Controllers
         }
 
         /// <summary>
-        /// Get time range for a token's transactions
+        /// Get the time range of available transactions for a token
         /// </summary>
-        /// <param name="token_symbol">Token symbol</param>
-        /// <param name="mint_address">Token mint address</param>
+        /// <remarks>
+        /// Returns the earliest and latest transaction timestamps for a token,
+        /// useful for building time-based navigation or filtering.
+        ///
+        /// You must provide at least one of: token_symbol or mint_address.
+        /// </remarks>
+        /// <param name="token_symbol">Token symbol (e.g., SOL, USDC)</param>
+        /// <param name="mint_address">Exact token mint address (base58)</param>
+        /// <response code="200">Returns the time range data</response>
+        /// <response code="400">Missing required parameters</response>
+        /// <response code="404">No transactions found for the token</response>
+        /// <response code="500">Server error or database query failed</response>
         [HttpGet("timerange")]
+        [ProducesResponseType(typeof(TimeRangeResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(TimeRangeResponse), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(TimeRangeResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(TimeRangeResponse), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<TimeRangeResponse>> GetTimeRange(
             [FromQuery] string? token_symbol,
             [FromQuery] string? mint_address)

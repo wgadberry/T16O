@@ -1,37 +1,61 @@
-import { Component, OnInit, OnDestroy, ElementRef, ViewChild, AfterViewInit } from '@angular/core';
+import { Component, OnInit, OnDestroy, ElementRef, ViewChild, AfterViewInit, Input, Output, EventEmitter, inject } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { HttpClientModule } from '@angular/common/http';
 import * as d3 from 'd3';
-import { BubbleMapService, BubbleMapQueryParams } from '../../../services/bubble-map.service';
-import { BubbleMapResponse, BubbleMapNode, BubbleMapEdge } from '../../../models/bubble-map.models';
 
-interface D3Node extends d3.SimulationNodeDatum {
-  id: string;
-  label: string;
-  name: string;
-  balance: number;
-  balanceUsd: number;
-  isPool: boolean;
-  isProgram: boolean;
-  fundedBy: string[];
-  color: string;
-  radius: number;
-}
+// PrimeNG imports
+import { CardModule } from 'primeng/card';
+import { ButtonModule } from 'primeng/button';
+import { InputTextModule } from 'primeng/inputtext';
+import { SelectModule } from 'primeng/select';
+import { ProgressSpinnerModule } from 'primeng/progressspinner';
+import { MessageModule } from 'primeng/message';
+import { TooltipModule } from 'primeng/tooltip';
 
-interface D3Link extends d3.SimulationLinkDatum<D3Node> {
-  source: string | D3Node;
-  target: string | D3Node;
-  edgeType: string;
-  amount: number;
-  color: string;
-}
+import { ClusterMapService } from './cluster-map.service';
+import {
+  BubbleMapResponse,
+  BubbleMapNode,
+  BubbleMapEdge,
+  BubbleMapQueryParams,
+  D3Node,
+  D3Link
+} from './cluster-map.models';
 
 @Component({
-  selector: 'app-cluster-maps-page',
-  templateUrl: './cluster-maps.page.html',
-  styleUrl: './cluster-maps.page.css',
-  standalone: false
+  selector: 'lib-cluster-map',
+  standalone: true,
+  imports: [
+    CommonModule,
+    FormsModule,
+    HttpClientModule,
+    CardModule,
+    ButtonModule,
+    InputTextModule,
+    SelectModule,
+    ProgressSpinnerModule,
+    MessageModule,
+    TooltipModule
+  ],
+  templateUrl: './cluster-map.html',
+  styleUrl: './cluster-map.css',
 })
-export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
+export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
+  private clusterMapService = inject(ClusterMapService);
+
   @ViewChild('bubbleMapContainer', { static: false }) containerRef!: ElementRef;
+
+  // Inputs for external data binding
+  @Input() data: BubbleMapResponse | null = null;
+  @Input() mascotImagePath = 'images/cfuck_mascot.jpg';
+  @Input() minRadiusForMascot = 20;
+
+  // Outputs for events
+  @Output() nodeSelected = new EventEmitter<D3Node | null>();
+  @Output() transactionNavigate = new EventEmitter<string>();
+  @Output() dataLoaded = new EventEmitter<BubbleMapResponse>();
+  @Output() loadError = new EventEmitter<string>();
 
   // Query form
   tokenSymbol = '';
@@ -53,10 +77,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   selectedNode: D3Node | null = null;
   queryPanelExpanded = true;
   tokenInfoPanelExpanded = true;
-
-  // Mascot image for larger bubbles
-  private readonly mascotImagePath = 'images/cfuck_mascot.jpg';
-  private readonly minRadiusForMascot = 20; // Minimum radius to show mascot
+  txNavPanelExpanded = true;
 
   // D3 elements
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
@@ -92,12 +113,17 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     unknown: '#475569'
   };
 
-  constructor(private bubbleMapService: BubbleMapService) {}
-
-  ngOnInit(): void {}
+  ngOnInit(): void {
+    if (this.data) {
+      this.currentData = this.data;
+    }
+  }
 
   ngAfterViewInit(): void {
     this.initializeSvg();
+    if (this.currentData?.result?.nodes?.length) {
+      this.renderBubbleMap(this.currentData);
+    }
   }
 
   ngOnDestroy(): void {
@@ -170,18 +196,22 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     this.createNodeGradient(defs, 'gradient-green', '#22c55e');
     this.createNodeGradient(defs, 'gradient-gray', '#666666');
 
-    // Arrow marker
-    defs.append('marker')
-      .attr('id', 'arrowhead')
-      .attr('viewBox', '-0 -5 10 10')
-      .attr('refX', 20)
-      .attr('refY', 0)
-      .attr('orient', 'auto')
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .append('path')
-      .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
-      .attr('fill', '#444');
+    // Create filled arrow markers for each edge type color
+    Object.entries(this.edgeTypeColors).forEach(([edgeType, color]) => {
+      const markerId = `arrowhead-${edgeType}`;
+      defs.append('marker')
+        .attr('id', markerId)
+        .attr('viewBox', '-1 -6 12 12')
+        .attr('refX', 20)
+        .attr('refY', 0)
+        .attr('orient', 'auto')
+        .attr('markerWidth', 8)
+        .attr('markerHeight', 8)
+        .append('path')
+        .attr('d', 'M 0,-5 L 10,0 L 0,5 Z')
+        .attr('fill', color)
+        .attr('fill-opacity', 0.5);
+    });
 
     // Create main group for zoom
     this.svg.append('g').attr('class', 'main-group');
@@ -303,28 +333,28 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       params.mint_address = this.mintAddress;
     }
 
-    this.bubbleMapService.getBubbleMapData(params).subscribe({
+    this.clusterMapService.getBubbleMapData(params).subscribe({
       next: (data) => {
-        console.log('Bubble map data received:', data);
         this.currentData = data;
         this.loading = false;
+        this.dataLoaded.emit(data);
         if (data.result?.nodes?.length) {
           this.renderBubbleMap(data);
         } else {
           this.errorMessage = data.result?.error || 'No data found for this token';
+          this.loadError.emit(this.errorMessage);
         }
       },
       error: (error) => {
-        console.error('Bubble map error:', error);
         this.loading = false;
         this.errorMessage = error.error?.result?.error || error.message || 'Failed to load data';
+        this.loadError.emit(this.errorMessage);
       }
     });
   }
 
   private renderBubbleMap(data: BubbleMapResponse): void {
     if (!data.result) {
-      console.error('No result data to render');
       return;
     }
 
@@ -332,13 +362,12 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     const width = container.clientWidth || 800;
     const height = 850;
 
-    // Re-initialize SVG if needed (container may have been hidden during init)
+    // Re-initialize SVG if needed
     if (!this.svg || width === 0) {
       this.initializeSvg();
     }
 
     if (!this.svg) {
-      console.error('SVG not initialized');
       return;
     }
 
@@ -353,16 +382,19 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     const mainGroup = this.svg.select('.main-group');
     mainGroup.selectAll('*').remove();
 
-    // Create links with dark outline effect
+    // Create links with 50% transparency and matching colors
     const linkGroup = mainGroup.append('g').attr('class', 'links');
+
+    // Draw colored lines with 50% opacity
     const link = linkGroup.selectAll('line')
       .data(this.links)
       .enter()
       .append('line')
-      .attr('stroke', d => this.darkenColor(d.color, 40))
-      .attr('stroke-opacity', 0.8)
+      .attr('stroke', d => d.color)
+      .attr('stroke-opacity', 0.5)
       .attr('stroke-width', 2)
-      .attr('marker-end', 'url(#arrowhead)');
+      .attr('stroke-linecap', 'round')
+      .attr('marker-end', d => `url(#arrowhead-${d.edgeType})`);
 
     // Create nodes
     const nodeGroup = mainGroup.append('g').attr('class', 'nodes');
@@ -385,7 +417,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('filter', 'url(#glow)')
       .style('cursor', 'pointer')
       .on('mouseover', (event, d) => this.onNodeHover(event, d, true))
-      .on('mousemove', (event, d) => this.onNodeMouseMove(event))
+      .on('mousemove', (event) => this.onNodeMouseMove(event))
       .on('mouseout', (event, d) => this.onNodeHover(event, d, false))
       .on('click', (event, d) => this.onNodeClick(event, d));
 
@@ -394,15 +426,15 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
     // Create clip paths for nodes that will have mascot images
     node.filter(d => d.radius >= this.minRadiusForMascot)
-      .each((d, i, nodes) => {
+      .each((d) => {
         const clipId = `clip-${d.id.slice(0, 8)}`;
         defs.append('clipPath')
           .attr('id', clipId)
           .append('circle')
-          .attr('r', d.radius - 2); // Full circle radius (minus stroke width)
+          .attr('r', d.radius - 2);
       });
 
-    // Add mascot images to larger bubbles - full circle coverage
+    // Add mascot images to larger bubbles
     node.filter(d => d.radius >= this.minRadiusForMascot)
       .append('image')
       .attr('xlink:href', this.mascotImagePath)
@@ -449,19 +481,17 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     return nodes.map(node => {
       const balance = Math.abs(node.balance || 0);
       const balanceUsd = node.balance_usd || 0;
-      // Use address_type to determine if pool/program, or fall back to is_pool/is_program
       const isPool = node.address_type === 'pool' || node.is_pool || false;
       const isProgram = node.address_type === 'program' || node.is_program || false;
       const isMint = node.address_type === 'mint' || node.label === 'mint';
 
-      // Determine color based on node type and balance
       let color: string;
       if (isPool) {
-        color = '#14b8a6'; // Teal for pools
+        color = '#14b8a6';
       } else if (isMint) {
-        color = '#f59e0b'; // Amber for mints
+        color = '#f59e0b';
       } else if (isProgram) {
-        color = '#8b5cf6'; // Purple for programs
+        color = '#8b5cf6';
       } else if (balanceUsd > 10000) {
         color = '#e94560';
       } else if (balanceUsd > 1000) {
@@ -472,17 +502,14 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
         color = '#666666';
       }
 
-      // Calculate radius based on balance
       const radius = Math.max(8, Math.min(40, Math.sqrt(Math.abs(balance)) / 100 + 8));
 
-      // Handle funded_by which can be string or array
       const fundedBy = Array.isArray(node.funded_by)
         ? node.funded_by
         : node.funded_by
           ? [node.funded_by]
           : [];
 
-      // Determine node type label
       let typeLabel: string;
       if (isPool) {
         typeLabel = 'Pool';
@@ -519,7 +546,6 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     return edges
       .filter(edge => nodeMap.has(edge.source) && nodeMap.has(edge.target))
       .map(edge => {
-        // Use 'type' (from stored procedure) or fallback to 'edge_type'
         const edgeType = edge.type || edge.edge_type || 'unknown';
         return {
           source: edge.source,
@@ -561,7 +587,6 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .attr('stroke-width', isHover ? 4 : 2.5)
       .attr('stroke', isHover ? this.lightenColor(d.color, 20) : this.darkenColor(d.color, 30));
 
-    // Show/hide tooltip
     if (this.tooltip) {
       if (isHover) {
         const fundedByText = d.fundedBy.length > 0
@@ -614,10 +639,12 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   private onNodeClick(event: MouseEvent, d: D3Node): void {
     event.stopPropagation();
     this.selectedNode = d;
+    this.nodeSelected.emit(d);
   }
 
   closeDetailsPanel(): void {
     this.selectedNode = null;
+    this.nodeSelected.emit(null);
   }
 
   toggleQueryPanel(): void {
@@ -626,6 +653,10 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
 
   toggleTokenInfoPanel(): void {
     this.tokenInfoPanelExpanded = !this.tokenInfoPanelExpanded;
+  }
+
+  toggleTxNavPanel(): void {
+    this.txNavPanelExpanded = !this.txNavPanelExpanded;
   }
 
   copyToClipboard(text: string): void {
@@ -679,15 +710,19 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     }
 
     this.loading = true;
-    this.bubbleMapService.getBubbleMapData(params).subscribe({
+    this.transactionNavigate.emit(signature);
+
+    this.clusterMapService.getBubbleMapData(params).subscribe({
       next: (data) => {
         this.currentData = data;
         this.loading = false;
+        this.dataLoaded.emit(data);
         this.renderBubbleMap(data);
       },
       error: (error) => {
         this.loading = false;
         this.errorMessage = error.message || 'Failed to load transaction';
+        this.loadError.emit(this.errorMessage);
       }
     });
   }
@@ -709,7 +744,6 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     return colorMap[color] || 'gradient-gray';
   }
 
-  // Helper methods for template
   formatMintAddress(mint: string | undefined): string {
     if (!mint) return '';
     return `${mint.slice(0, 8)}...${mint.slice(-6)}`;
