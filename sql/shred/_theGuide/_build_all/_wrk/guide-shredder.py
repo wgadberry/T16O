@@ -228,82 +228,87 @@ class ShredderProcessor:
         Extract participants from staging row JSON and insert into tx_participant.
         Returns number of participants inserted.
         """
-        # Fetch the staging row JSON
-        self.cursor.execute(f"""
-            SELECT txs FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
-        """, (staging_id,))
-        row = self.cursor.fetchone()
-        if not row or not row.get('txs'):
-            return 0
+        # Use a fresh cursor to avoid SP result set issues
+        fresh_cursor = self.db_conn.cursor(dictionary=True)
+        try:
+            # Fetch the staging row JSON
+            fresh_cursor.execute(f"""
+                SELECT txs FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
+            """, (staging_id,))
+            row = fresh_cursor.fetchone()
+            if not row or not row.get('txs'):
+                return 0
 
-        txs_data = row['txs']
-        if isinstance(txs_data, str):
-            txs_data = json.loads(txs_data)
+            txs_data = row['txs']
+            if isinstance(txs_data, str):
+                txs_data = json.loads(txs_data)
 
-        data_list = txs_data.get('data', [])
-        if not data_list:
-            return 0
+            data_list = txs_data.get('data', [])
+            if not data_list:
+                return 0
 
-        total_inserted = 0
+            total_inserted = 0
 
-        for tx_item in data_list:
-            tx_hash = tx_item.get('tx_hash')
-            account_keys = tx_item.get('account_keys', [])
+            for tx_item in data_list:
+                tx_hash = tx_item.get('tx_hash')
+                account_keys = tx_item.get('account_keys', [])
 
-            if not tx_hash or not account_keys:
-                continue
-
-            # Look up tx_id by signature
-            self.cursor.execute("SELECT id FROM tx WHERE signature = %s", (tx_hash,))
-            tx_row = self.cursor.fetchone()
-            if not tx_row:
-                continue  # Transaction not in tx table yet
-
-            tx_id = tx_row['id']
-
-            # Process each account in the transaction
-            for idx, acct in enumerate(account_keys):
-                pubkey = acct.get('pubkey')
-                if not pubkey:
+                if not tx_hash or not account_keys:
                     continue
 
-                is_signer = 1 if acct.get('signer') else 0
-                is_fee_payer = 1 if idx == 0 else 0  # First account is fee payer by convention
-                is_writable = 1 if acct.get('writable') else 0
-                is_program = 1 if pubkey in KNOWN_PROGRAMS else 0
+                # Look up tx_id by signature
+                fresh_cursor.execute("SELECT id FROM tx WHERE signature = %s", (tx_hash,))
+                tx_row = fresh_cursor.fetchone()
+                if not tx_row:
+                    continue  # Transaction not in tx table yet
 
-                # Get or create address_id
-                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (pubkey,))
-                addr_row = self.cursor.fetchone()
-                if addr_row:
-                    address_id = addr_row['id']
-                else:
-                    # Insert new address
-                    addr_type = 'program' if is_program else 'unknown'
-                    self.cursor.execute(
-                        "INSERT INTO tx_address (address, address_type) VALUES (%s, %s)",
-                        (pubkey, addr_type)
-                    )
-                    address_id = self.cursor.lastrowid
+                tx_id = tx_row['id']
 
-                # Insert participant (ignore duplicates)
-                try:
-                    self.cursor.execute("""
-                        INSERT INTO tx_participant
-                            (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, account_index)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE
-                            is_signer = VALUES(is_signer),
-                            is_fee_payer = VALUES(is_fee_payer),
-                            is_writable = VALUES(is_writable),
-                            is_program = VALUES(is_program)
-                    """, (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, idx))
-                    total_inserted += 1
-                except MySQLError:
-                    pass  # Ignore duplicate key errors
+                # Process each account in the transaction
+                for idx, acct in enumerate(account_keys):
+                    pubkey = acct.get('pubkey')
+                    if not pubkey:
+                        continue
 
-        self.db_conn.commit()
-        return total_inserted
+                    is_signer = 1 if acct.get('signer') else 0
+                    is_fee_payer = 1 if idx == 0 else 0  # First account is fee payer by convention
+                    is_writable = 1 if acct.get('writable') else 0
+                    is_program = 1 if pubkey in KNOWN_PROGRAMS else 0
+
+                    # Get or create address_id
+                    fresh_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (pubkey,))
+                    addr_row = fresh_cursor.fetchone()
+                    if addr_row:
+                        address_id = addr_row['id']
+                    else:
+                        # Insert new address
+                        addr_type = 'program' if is_program else 'unknown'
+                        fresh_cursor.execute(
+                            "INSERT INTO tx_address (address, address_type) VALUES (%s, %s)",
+                            (pubkey, addr_type)
+                        )
+                        address_id = fresh_cursor.lastrowid
+
+                    # Insert participant (ignore duplicates)
+                    try:
+                        fresh_cursor.execute("""
+                            INSERT INTO tx_participant
+                                (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, account_index)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                is_signer = VALUES(is_signer),
+                                is_fee_payer = VALUES(is_fee_payer),
+                                is_writable = VALUES(is_writable),
+                                is_program = VALUES(is_program)
+                        """, (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, idx))
+                        total_inserted += 1
+                    except MySQLError:
+                        pass  # Ignore duplicate key errors
+
+            self.db_conn.commit()
+            return total_inserted
+        finally:
+            fresh_cursor.close()
 
     def fetch_pending_staging_rows(self, limit: int = 50) -> list:
         """
@@ -469,15 +474,6 @@ class ShredderProcessor:
                     result['skipped_count'] = row['@skip'] or 0
                 result['success'] = True
 
-                # Extract and insert transaction participants for forensics
-                if result['tx_count'] > 0:
-                    try:
-                        participant_count = self.extract_and_insert_participants(staging_id)
-                        result['participant_count'] = participant_count
-                    except Exception as e:
-                        # Don't fail the whole row if participant extraction fails
-                        result['participant_error'] = str(e)
-
             elif tx_state == detailed_state:
                 # Call sp_tx_parse_staging_detail for detailed data
                 self.cursor.execute(
@@ -498,6 +494,15 @@ class ShredderProcessor:
                 # If all skipped (tx not found yet), leave for retry (up to MAX_DETAILED_ATTEMPTS)
                 if result['tx_count'] > 0 or result['sol_balance_count'] > 0 or result['token_balance_count'] > 0:
                     result['success'] = True
+
+                    # DISABLED: tx_participant extraction - too much load
+                    # To re-enable, uncomment the following block:
+                    # try:
+                    #     self.db_conn.commit()
+                    #     participant_count = self.extract_and_insert_participants(staging_id)
+                    #     result['participant_count'] = participant_count
+                    # except Exception as e:
+                    #     result['participant_error'] = str(e)
                 else:
                     # Get current attempt count
                     self.cursor.execute(f"""
@@ -611,16 +616,16 @@ class ShredderProcessor:
                 summary['processed'] += 1
                 if tx_state == decoded_state:
                     summary['decoded_count'] += 1
-                    participant_info = f" part={result['participant_count']}" if result.get('participant_count') else ""
                     print(f"  [+] staging.id={staging_id} (decoded): "
                           f"tx={result['tx_count']} xfer={result['transfer_count']} "
                           f"swap={result['swap_count']} act={result['activity_count']} "
-                          f"skip={result['skipped_count']}{participant_info}")
+                          f"skip={result['skipped_count']}")
                 elif tx_state == detailed_state:
                     summary['detailed_count'] += 1
+                    participant_info = f" part={result['participant_count']}" if result.get('participant_count') else ""
                     print(f"  [+] staging.id={staging_id} (detailed): "
                           f"tx={result['tx_count']} sol={result['sol_balance_count']} "
-                          f"tok={result['token_balance_count']} skip={result['skipped_count']}")
+                          f"tok={result['token_balance_count']} skip={result['skipped_count']}{participant_info}")
             else:
                 summary['errors'] += 1
                 print(f"  [!] staging.id={staging_id}: ERROR - {result['error']}")
