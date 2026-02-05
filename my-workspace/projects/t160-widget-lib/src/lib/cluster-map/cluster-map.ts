@@ -49,6 +49,7 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   // Inputs for external data binding
   @Input() data: BubbleMapResponse | null = null;
   @Input() mascotImagePath = 'images/cfuck_mascot.jpg';
+  @Input() backgroundImagePath = 'images/cfuck-bg.png';
   @Input() minRadiusForMascot = 20;
 
   // Outputs for events
@@ -86,6 +87,8 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   private tooltip: d3.Selection<HTMLDivElement, unknown, null, undefined> | null = null;
   private nodes: D3Node[] = [];
   private links: D3Link[] = [];
+  private arrowAnimationTimer: d3.Timer | null = null;
+  private arrowProgress: Map<number, number> = new Map(); // Track progress for each arrow (0-1)
 
   // Edge type colors
   private edgeTypeColors: { [key: string]: string } = {
@@ -130,6 +133,9 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
     if (this.simulation) {
       this.simulation.stop();
     }
+    if (this.arrowAnimationTimer) {
+      this.arrowAnimationTimer.stop();
+    }
   }
 
   private initializeSvg(): void {
@@ -148,8 +154,19 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
       .attr('width', '100%')
       .attr('height', height)
       .attr('viewBox', `0 0 ${width} ${height}`)
-      .style('background', 'radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d1a 100%)')
+      .style('background', '#0d0d1a')
       .on('click', () => this.closeDetailsPanel());
+
+    // Add background image with 40% opacity
+    this.svg.append('image')
+      .attr('xlink:href', this.backgroundImagePath)
+      .attr('x', 0)
+      .attr('y', 0)
+      .attr('width', width)
+      .attr('height', height)
+      .attr('preserveAspectRatio', 'xMidYMid slice')
+      .attr('opacity', 0.4)
+      .style('pointer-events', 'none');
 
     // Add defs for filters and gradients
     const defs = this.svg.append('defs');
@@ -385,16 +402,33 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
     // Create links with 50% transparency and matching colors
     const linkGroup = mainGroup.append('g').attr('class', 'links');
 
-    // Draw colored lines with 50% opacity
+    // Draw colored lines with 50% opacity (no static marker-end, we'll animate arrows)
     const link = linkGroup.selectAll('line')
       .data(this.links)
       .enter()
       .append('line')
       .attr('stroke', d => d.color)
       .attr('stroke-opacity', 0.5)
-      .attr('stroke-width', 2)
-      .attr('stroke-linecap', 'round')
-      .attr('marker-end', d => `url(#arrowhead-${d.edgeType})`);
+      .attr('stroke-width', 1)
+      .attr('stroke-linecap', 'round');
+
+    // Create animated arrow group
+    const arrowGroup = mainGroup.append('g').attr('class', 'arrows');
+
+    // Initialize arrow progress with random starting positions for visual variety
+    this.arrowProgress.clear();
+    this.links.forEach((_, i) => {
+      this.arrowProgress.set(i, Math.random());
+    });
+
+    // Create arrow polygons for each link
+    const arrows = arrowGroup.selectAll('polygon')
+      .data(this.links)
+      .enter()
+      .append('polygon')
+      .attr('points', '-6,-4 6,0 -6,4')
+      .attr('fill', d => d.color)
+      .attr('fill-opacity', 0.5);
 
     // Create nodes
     const nodeGroup = mainGroup.append('g').attr('class', 'nodes');
@@ -474,6 +508,58 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
         .attr('y2', d => (d.target as D3Node).y || 0);
 
       node.attr('transform', d => `translate(${d.x || 0},${d.y || 0})`);
+    });
+
+    // Stop any existing arrow animation
+    if (this.arrowAnimationTimer) {
+      this.arrowAnimationTimer.stop();
+    }
+
+    // Start arrow animation timer
+    const animationSpeed = 0.0012; // Speed of arrow movement (0-1 per frame)
+    this.arrowAnimationTimer = d3.timer(() => {
+      // Update each arrow's progress
+      this.arrowProgress.forEach((progress, index) => {
+        let newProgress = progress + animationSpeed;
+        if (newProgress >= 1) {
+          newProgress = 0; // Reset to start
+        }
+        this.arrowProgress.set(index, newProgress);
+      });
+
+      // Update arrow positions and rotations
+      arrows.attr('transform', (d, i) => {
+        const source = d.source as D3Node;
+        const target = d.target as D3Node;
+        const progress = this.arrowProgress.get(i) || 0;
+
+        // Get source and target positions
+        const x1 = source.x || 0;
+        const y1 = source.y || 0;
+        const x2 = target.x || 0;
+        const y2 = target.y || 0;
+
+        // Calculate the target node radius to stop before entering
+        const targetRadius = target.radius || 10;
+
+        // Calculate line length and direction
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const lineLength = Math.sqrt(dx * dx + dy * dy);
+
+        // Adjust end point to stop at bubble edge
+        const effectiveLength = Math.max(0, lineLength - targetRadius - 5);
+
+        // Interpolate position along the line
+        const t = progress * (effectiveLength / lineLength);
+        const x = x1 + dx * t;
+        const y = y1 + dy * t;
+
+        // Calculate rotation angle (in degrees)
+        const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+        return `translate(${x},${y}) rotate(${angle})`;
+      });
     });
   }
 

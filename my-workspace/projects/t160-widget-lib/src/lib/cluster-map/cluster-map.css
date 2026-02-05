@@ -175,9 +175,10 @@
 .bubble-map-canvas {
   width: 100%;
   min-height: 600px;
-  background: radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d1a 100%);
+  background: #0d0d1a;
   border-radius: var(--border-radius, 6px);
   position: relative;
+  overflow: hidden;
 }
 
 /* Bubble Map Wrapper */
