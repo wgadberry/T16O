@@ -23,7 +23,14 @@
       "Bash(git -C:*)",
       "Bash(mysql:*)",
       "Bash(curl -s -u admin:admin123 \"http://localhost:15692/api/queues/t16o_mq\")",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(curl:*)",
+      "Bash(if not exist \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\backups\" mkdir \"C:\\\\Users\\\\wgadb\\\\source\\\\repos\\\\backups\")",
+      "Bash(powershell -Command:*)",
+      "Bash(sqlcmd:*)",
+      "Bash(rabbitmqctl export_definitions:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker exec:*)"
     ]
   }
 }

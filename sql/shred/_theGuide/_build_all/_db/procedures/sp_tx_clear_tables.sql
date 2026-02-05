@@ -31,8 +31,8 @@ BEGIN
     
     TRUNCATE TABLE t16o_db_staging.txs;
 
-    -- Re-insert synthetic addresses required by sp_tx_guide_batch
-    -- These are placeholder addresses for BURN/MINT/CLOSE/CREATE operations
+    
+    
     INSERT INTO tx_address (id, address, address_type, label) VALUES
         (742702, 'BURN_SINK_11111111111111111111111111111111', 'unknown', 'SYNTHETIC:BURN'),
         (742703, 'MINT_SOURCE_1111111111111111111111111111111', 'unknown', 'SYNTHETIC:MINT'),

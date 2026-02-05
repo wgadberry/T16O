@@ -390,33 +390,46 @@ BEGIN
         SET n.token_name = tk.token_name
         WHERE tk.token_name IS NOT NULL;
 
-        
-        
-        -- Use tx_token_balance_change for actual blockchain-reported balances
-        -- (instead of tx_bmap_state which computes running deltas that net to 0 for arb wallets)
+        -- ============================================================
+        -- BALANCE LOOKUPS: Read directly from tx_guide (deprecates tx_bmap_state)
+        -- ============================================================
+
+        -- Token balance: Read from tx_guide's post_balance columns
         UPDATE tmp_nodes n
         SET balance = COALESCE((
-            SELECT tbc.post_balance / POW(10, tbc.decimals)
-            FROM tx_token_balance_change tbc
-            JOIN tx t ON t.id = tbc.tx_id
-            WHERE tbc.token_id = v_token_id
-              AND tbc.owner_address_id = n.address_id
-              AND t.block_time <= v_block_time
-            ORDER BY t.block_time DESC, tbc.id DESC
+            SELECT CASE
+                WHEN g.from_address_id = n.address_id AND g.from_token_post_balance IS NOT NULL
+                    THEN g.from_token_post_balance / POW(10, COALESCE(g.decimals, 9))
+                WHEN g.to_address_id = n.address_id AND g.to_token_post_balance IS NOT NULL
+                    THEN g.to_token_post_balance / POW(10, COALESCE(g.decimals, 9))
+                ELSE NULL
+            END
+            FROM tx_guide g
+            WHERE g.token_id = v_token_id
+              AND (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+              AND g.block_time <= v_block_time
+              AND (g.from_token_post_balance IS NOT NULL OR g.to_token_post_balance IS NOT NULL)
+            ORDER BY g.block_time DESC, g.id DESC
             LIMIT 1
         ), 0);
 
-        
+        -- SOL balance: Read from tx_guide's sol_post_balance columns
         UPDATE tmp_nodes n
-        SET sol_balance = (
-            SELECT sbc.post_balance / 1e9
-            FROM tx_sol_balance_change sbc
-            JOIN tx t ON t.id = sbc.tx_id
-            WHERE sbc.address_id = n.address_id
-              AND t.block_time <= v_block_time
-            ORDER BY t.block_time DESC, sbc.id DESC
+        SET sol_balance = COALESCE((
+            SELECT CASE
+                WHEN g.from_address_id = n.address_id AND g.from_sol_post_balance IS NOT NULL
+                    THEN g.from_sol_post_balance / 1e9
+                WHEN g.to_address_id = n.address_id AND g.to_sol_post_balance IS NOT NULL
+                    THEN g.to_sol_post_balance / 1e9
+                ELSE NULL
+            END
+            FROM tx_guide g
+            WHERE (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+              AND g.block_time <= v_block_time
+              AND (g.from_sol_post_balance IS NOT NULL OR g.to_sol_post_balance IS NOT NULL)
+            ORDER BY g.block_time DESC, g.id DESC
             LIMIT 1
-        );
+        ), 0);
 
         
         

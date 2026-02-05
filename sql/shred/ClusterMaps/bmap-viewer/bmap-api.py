@@ -52,18 +52,20 @@ def index():
 def get_bmap():
     """
     Call sp_tx_bmap_get with query parameters:
-    - mint_address: Token mint address (optional)
+    - token_name: Token name (optional)
     - token_symbol: Token symbol (optional)
+    - mint_address: Token mint address (optional)
     - signature: Transaction signature (optional)
     - block_time: Unix timestamp (optional)
-    - limit: Navigation limit (default 5)
+    - tx_limit: Window size - 1, 10, 20, 50, 100 (default 10)
     """
+    token_name = request.args.get('token_name') or None
     mint_address = request.args.get('mint_address') or None
     token_symbol = request.args.get('token_symbol') or None
     signature = request.args.get('signature') or None
     block_time = request.args.get('block_time')
     block_time = int(block_time) if block_time else None
-    limit = request.args.get('limit') or request.args.get('tx_limit')
+    limit = request.args.get('tx_limit') or request.args.get('limit')
     limit = int(limit) if limit else None
 
     last_error = None
@@ -75,8 +77,9 @@ def get_bmap():
             cursor = conn.cursor()
 
             cursor.callproc('sp_tx_bmap_get', [
-                mint_address,
+                token_name,
                 token_symbol,
+                mint_address,
                 signature,
                 block_time,
                 limit
@@ -281,13 +284,13 @@ def fetch_wallet():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit):
+def fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit, token_name=None):
     """Helper to get bmap data for explain endpoint."""
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor()
 
     cursor.callproc('sp_tx_bmap_get', [
-        mint_address, token_symbol, signature, block_time, limit
+        token_name, token_symbol, mint_address, signature, block_time, limit
     ])
 
     result = None
@@ -316,18 +319,17 @@ def explain_bmap():
     if not os.environ.get('ANTHROPIC_API_KEY'):
         return jsonify({'error': 'ANTHROPIC_API_KEY environment variable not set'}), 500
 
-    # Get params (same as /api/bmap)
+    # Get params - only need signature for single-tx explain
+    token_name = request.args.get('token_name') or None
     mint_address = request.args.get('mint_address') or None
     token_symbol = request.args.get('token_symbol') or None
     signature = request.args.get('signature') or None
     block_time = request.args.get('block_time')
     block_time = int(block_time) if block_time else None
-    limit = request.args.get('limit', 10)
-    limit = int(limit) if limit else 10
 
-    # Fetch bmap data
+    # Always use limit=1 for explain - only need the current transaction
     try:
-        bmap_data = fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit)
+        bmap_data = fetch_bmap_data(mint_address, token_symbol, signature, block_time, 1, token_name=token_name)
     except Exception as e:
         return jsonify({'error': f'Database error: {str(e)}'}), 500
 
@@ -336,20 +338,30 @@ def explain_bmap():
 
     # Prepare a focused version for the LLM (reduce token usage)
     result = bmap_data.get('result', {})
+    current_sig = result.get('txs', {}).get('signature')
+
+    # Filter edges to only the current transaction
+    all_edges = result.get('edges', [])
+    current_edges = [e for e in all_edges if e.get('signature') == current_sig] if current_sig else all_edges
+
+    # Filter nodes to only addresses that appear in current edges
+    edge_addresses = set()
+    for e in current_edges:
+        edge_addresses.add(e.get('source'))
+        edge_addresses.add(e.get('target'))
+    current_nodes = [n for n in result.get('nodes', []) if n.get('address') in edge_addresses]
 
     # Process edges with tax detection
     processed_edges = []
     detected_taxes = []
 
-    for e in result.get('edges', []):
+    for e in current_edges:
         edge_data = {
             'source_label': e.get('source_label'),
             'target_label': e.get('target_label'),
             'amount': e.get('amount'),
             'type': e.get('type'),
-            'category': e.get('category'),
             'token_symbol': e.get('token_symbol'),
-            'token_name': e.get('token_name'),
             'dex': e.get('dex'),
             'pool_label': e.get('pool_label')
         }
@@ -396,7 +408,7 @@ def explain_bmap():
 
     focused_data = {
         'token': result.get('token'),
-        'signature': result.get('txs', {}).get('signature'),
+        'signature': current_sig,
         'block_time_utc': result.get('txs', {}).get('block_time_utc'),
         'nodes': [
             {
@@ -405,9 +417,10 @@ def explain_bmap():
                 'address_type': n.get('address_type'),
                 'pool_label': n.get('pool_label'),
                 'balance': n.get('balance'),
-                'sol_balance': n.get('sol_balance')
+                'sol_balance': n.get('sol_balance'),
+                'interactions': n.get('interactions')
             }
-            for n in result.get('nodes', [])
+            for n in current_nodes
         ],
         'edges': processed_edges,
         'tax_summary': detected_taxes if detected_taxes else None
@@ -416,7 +429,7 @@ def explain_bmap():
     # Identify user wallet (first wallet-type node, including Token Creator)
     user_wallet = None
     user_label = None
-    for n in result.get('nodes', []):
+    for n in current_nodes:
         if n.get('address_type') == 'wallet' or n.get('label') in ['wallet', 'Token Creator']:
             user_wallet = n.get('address', '')
             user_label = n.get('label') or 'wallet'
@@ -446,22 +459,23 @@ Format your response as follows:
 **Summary:** A user ({user_desc}) [describe main action in one sentence].
 
 **Details:**
-[2-3 sentences explaining the token flows, DEXes used, and outcome]
+[Several sentences explaining the detail of the token flows, DEXes used, and outcome]
 
 **Tax Impact:** (only if tax_detected in edges)
-[Explain the tax that was taken and its impact on the transaction]
+[briefly explain the tax that was taken and its abriged impact on the transaction]
 
 Guidelines:
 - Explain token flows in plain English (e.g., "sold X tokens for Y SOL")
-- If it's a swap through multiple DEXes, explain the route simply
-- When tax_detected is present in an edge, ALWAYS mention it prominently
-- The tax_detected shows: expected amount, actual received, and the percentage taken
-- Explain tax impact in terms of value lost (e.g., "10% tax took X tokens worth $Y")
+- If it's a swap through multiple DEXes, explain the route in detail
+- When tax_detected is present in an edge, ALWAYS mention it, but keep response to more mathematical impact
 - Note if user is a "Token Creator" as this may be significant (dev selling)
 - Note account closures (close_ata) as "closing out of a position"
 - Avoid technical jargon; use analogies if helpful
 
 Write for someone who understands basic crypto concepts but not Solana internals."""
+
+# - The tax_detected shows: expected amount, actual received, and the percentage taken
+# - Explain tax impact in terms of value lost (e.g., "10% tax took X tokens worth $Y")
 
     # Call Claude
     try:
@@ -472,10 +486,20 @@ Write for someone who understands basic crypto concepts but not Solana internals
             messages=[{"role": "user", "content": prompt}]
         )
 
+        # Calculate API cost (Claude Sonnet 4: $3/M input, $15/M output)
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        cost_usd = (input_tokens * 3.0 / 1_000_000) + (output_tokens * 15.0 / 1_000_000)
+
         return jsonify({
             'signature': signature,
             'explanation': response.content[0].text,
-            'model': response.model
+            'model': response.model,
+            'usage': {
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'cost_usd': round(cost_usd, 6)
+            }
         })
 
     except anthropic.APIError as e:

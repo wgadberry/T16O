@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BMap Token State Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;600;700&display=swap" rel="stylesheet">
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         :root {
@@ -718,16 +721,20 @@
         .explain-checkbox label { font-size: 12px; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; }
         .explain-checkbox .ai-badge { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
 
-        .explanation-panel { background: var(--bg-card); border-radius: 10px; margin-bottom: 20px; overflow: hidden; border: 1px solid #6366f1; }
-        .explanation-header { background: linear-gradient(135deg, #6366f1, #8b5cf6); padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
-        .explanation-header h3 { font-size: 14px; margin: 0; color: white; display: flex; align-items: center; gap: 8px; }
-        .explanation-header .model-badge { background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; font-size: 10px; }
-        .explanation-content { padding: 20px; line-height: 1.6; color: var(--text-primary); }
-        .explanation-content p { margin-bottom: 12px; }
-        .explanation-content p:last-child { margin-bottom: 0; }
-        .explanation-loading { padding: 30px; text-align: center; color: var(--text-secondary); }
+        .explanation-panel { background: #fafafa; border-radius: 10px; margin-bottom: 20px; overflow: hidden; border: 1px solid #e0e0e0; font-family: 'Raleway', sans-serif; }
+        .explanation-header { background: #f0f0f0; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e0e0e0; }
+        .explanation-header h3 { font-size: 13px; margin: 0; color: #444; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+        .explanation-header .model-badge { background: #e0e0e0; color: #666; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
+        .explanation-cost { padding: 8px 20px; background: #f5f5f5; border-bottom: 1px solid #e0e0e0; font-size: 16.5px; color: #888; display: flex; gap: 16px; }
+        .explanation-cost .cost-value { color: #555; font-weight: 600; }
+        .explanation-cost .cost-usd { color: #d97706; font-weight: 600; }
+        .explanation-content { padding: 28px 32px; line-height: 1.75; color: #1a1a1a; font-size: 14px; font-weight: 400; }
+        .explanation-content .section-heading { font-size: 15px; font-weight: 700; color: #111; margin: 24px 0 8px 0; }
+        .explanation-content .section-heading:first-child { margin-top: 0; }
+        .explanation-content .section-body { margin: 0 0 0 32px; margin-bottom: 4px; }
+        .explanation-loading { padding: 30px; text-align: center; color: #888; background: #fafafa; }
         .explanation-loading::after { content: ''; animation: dots 1.5s infinite; }
-        .explanation-error { padding: 20px; color: #fca5a5; background: rgba(127, 29, 29, 0.3); }
+        .explanation-error { padding: 20px; color: #dc2626; background: #fef2f2; }
     </style>
 </head>
 <body>
@@ -1134,12 +1141,18 @@
                         ${(nodes || []).map(n => `
                             <div class="node">
                                 <div class="address">${n.address}</div>
-                                <div class="label">${n.label || 'Unknown'}</div>
+                                <div class="label">${n.label || 'Unknown'}${n.pool_label ? ` - ${n.pool_label}` : ''}${n.token_name ? ` - ${n.token_name}` : ''}</div>
                                 <div class="stats">
                                     <span>Balance: <span class="stat-value">${formatNumber(n.balance)}</span></span>
                                     <span>SOL: <span class="stat-value">${n.sol_balance?.toFixed(4) || '0'}</span></span>
                                 </div>
                                 ${n.funded_by ? `<div class="label" style="margin-top: 5px;">Funded by: ${n.funded_by.slice(0, 20)}...</div>` : ''}
+                                ${n.interactions && (n.interactions.dexes?.length || n.interactions.pools?.length || n.interactions.programs?.length) ? `
+                                <div style="margin-top: 6px; font-size: 11px; color: var(--text-secondary);">
+                                    ${n.interactions.dexes?.length ? `<div>DEXes: <span style="color: var(--warning);">${n.interactions.dexes.join(', ')}</span></div>` : ''}
+                                    ${n.interactions.pools?.length ? `<div>Pools: <span style="color: var(--accent);">${n.interactions.pools.map(p => p.label || p.address?.slice(0,8)).join(', ')}</span></div>` : ''}
+                                    ${n.interactions.programs?.length ? `<div>Programs: <span style="color: #3b82f6;">${n.interactions.programs.map(p => p.slice(0,8) + '...').join(', ')}</span></div>` : ''}
+                                </div>` : ''}
                             </div>
                         `).join('')}
                         ${(nodes || []).length === 0 ? '<div style="color: var(--text-secondary);">No nodes</div>' : ''}
@@ -1167,10 +1180,9 @@
                                     <span title="${e.signature}">${e.signature.slice(0, 16)}...</span>
                                     ${e.ins_index !== null ? `<span style="color: var(--text-secondary);">#${e.ins_index}</span>` : ''}
                                 </div>
-                                ${e.pool || e.program ? `
+                                ${e.pool_label ? `
                                 <div class="meta" style="margin-top: 4px;">
-                                    ${e.pool ? `<span title="${e.pool}">Pool: ${e.pool.slice(0, 8)}...</span>` : ''}
-                                    ${e.program ? `<span title="${e.program}">Prog: ${e.program.slice(0, 8)}...</span>` : ''}
+                                    <span style="color: var(--warning);">${e.pool_label}</span>
                                 </div>
                                 ` : ''}
                             </div>
@@ -1270,11 +1282,15 @@
                 return {
                     id: n.address,
                     label: n.label || 'wallet',
+                    address_type: n.address_type,
+                    pool_label: n.pool_label,
+                    token_name: n.token_name,
                     balance: n.balance || 0,
                     displayBalance: displayBalance,
                     isZeroBalance: isZeroBalance,
                     sol_balance: n.sol_balance || 0,
                     funded_by: n.funded_by,
+                    interactions: n.interactions || { pools: [], programs: [], dexes: [] },
                     radius: sizeScale(displayBalance),
                     color: isZeroBalance ? '#666' : colorScale(displayBalance) // Gray for zero balance
                 };
@@ -1302,37 +1318,24 @@
             // Filter out self-edges (like close_ata) since they can't be rendered as lines
             const d3Edges = (edges || [])
                 .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target) && e.source !== e.target)
-                .map(e => {
-                    const edge = {
-                        source: e.source,
-                        target: e.target,
-                        amount: e.amount,
-                        type: e.type,
-                        token_symbol: e.token_symbol,
-                        token_name: e.token_name,
-                        decimals: e.decimals,
-                        from_token_balance: e.from_token_balance,
-                        to_token_balance: e.to_token_balance,
-                        from_sol_balance: e.from_sol_balance,
-                        to_sol_balance: e.to_sol_balance,
-                        from_token_pre_balance: e.from_token_pre_balance,
-                        to_token_pre_balance: e.to_token_pre_balance,
-                        from_sol_pre_balance: e.from_sol_pre_balance,
-                        to_sol_pre_balance: e.to_sol_pre_balance,
-                        signature: e.signature,
-                        block_time: e.block_time,
-                        block_time_utc: e.block_time_utc,
-                        dex: e.dex,
-                        pool: e.pool,
-                        program: e.program,
-                        ins_index: e.ins_index,
-                        source_label: e.source_label,
-                        target_label: e.target_label,
-                        pool_label: e.pool_label
-                    };
-
-                    return edge;
-                });
+                .map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    amount: e.amount,
+                    type: e.type,
+                    token_symbol: e.token_symbol,
+                    from_token_balance: e.from_token_balance,
+                    to_token_balance: e.to_token_balance,
+                    from_token_pre_balance: e.from_token_pre_balance,
+                    to_token_pre_balance: e.to_token_pre_balance,
+                    signature: e.signature,
+                    block_time_utc: e.block_time_utc,
+                    dex: e.dex,
+                    ins_index: e.ins_index,
+                    source_label: e.source_label,
+                    target_label: e.target_label,
+                    pool_label: e.pool_label
+                }));
 
             // Detect token tax using two methods:
             // 1. Direct: swap_out/spl_transfer to wallet where amount > to_token_balance
@@ -1584,8 +1587,6 @@
                     d3.select(event.target).attr('stroke-width', 5);
                     tooltip.transition().duration(200).style('opacity', 1);
                     const tokenSymbol = d.token_symbol || 'Unknown';
-                    const tokenName = d.token_name || null;
-                    const tokenDisplay = tokenName && tokenName !== tokenSymbol ? `${tokenSymbol} (${tokenName})` : tokenSymbol;
                     const sourceLabel = d.source_label && !['unknown', 'wallet'].includes(d.source_label) ? d.source_label : null;
                     const targetLabel = d.target_label && !['unknown', 'wallet'].includes(d.target_label) ? d.target_label : null;
                     const poolLabel = d.pool_label || null;
@@ -1601,21 +1602,17 @@
                         </div>
                         ` : ''}
                         <div class="stats">
-                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenDisplay}</span><br>
+                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
                             ${d.from_token_pre_balance !== null && d.from_token_pre_balance !== undefined && d.from_token_balance !== null ?
-                                `From ${tokenDisplay}: <span style="color: #a855f7;">${formatNumber(d.from_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.from_token_balance)}</span><br>` : ''}
+                                `From ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.from_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.from_token_balance)}</span><br>` : ''}
                             ${d.to_token_pre_balance !== null && d.to_token_pre_balance !== undefined && d.to_token_balance !== null ?
-                                `To ${tokenDisplay}: <span style="color: #a855f7;">${formatNumber(d.to_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.to_token_balance)}</span><br>` : ''}
-                            ${d.from_sol_balance !== null && d.from_sol_balance !== undefined ? `From SOL: <span style="color: #60a5fa;">${d.from_sol_balance.toFixed(6)}</span><br>` : ''}
-                            ${d.to_sol_balance !== null && d.to_sol_balance !== undefined ? `To SOL: <span style="color: #60a5fa;">${d.to_sol_balance.toFixed(6)}</span><br>` : ''}
-                            Time: ${d.block_time_utc || (d.block_time ? formatTimestamp(d.block_time) : 'N/A')}
+                                `To ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.to_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.to_token_balance)}</span><br>` : ''}
+                            Time: ${d.block_time_utc || 'N/A'}
                             ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
-                        ${d.pool || d.program || poolLabel ? `
+                        ${poolLabel ? `
                         <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 10px;">
-                            ${poolLabel ? `<div style="margin-bottom: 4px; color: #fbbf24;">${poolLabel}</div>` : ''}
-                            ${d.pool ? `<div style="margin-bottom: 4px;">Pool: <span style="color: #e94560;">${d.pool.slice(0,12)}...</span></div>` : ''}
-                            ${d.program ? `<div>Program: <span style="color: #3b82f6;">${d.program.slice(0,12)}...</span></div>` : ''}
+                            <div style="color: #fbbf24;">${poolLabel}</div>
                         </div>
                         ` : ''}
                         <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
@@ -1654,6 +1651,7 @@
                 .on('mouseover', (event, d) => {
                     tooltip.transition().duration(200).style('opacity', 1);
                     const displayName = d.pool_label || d.token_name || null;
+                    const ix = d.interactions || {};
                     tooltip.html(`
                         <div class="address">${d.id}</div>
                         ${displayName ? `<div style="color: #fbbf24; font-weight: bold; margin-bottom: 8px;">${displayName}</div>` : ''}
@@ -1664,6 +1662,11 @@
                             ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
                             ${d.closeAta ? `<br><span style="color: #0891b2;">ATA Closed: +${d.closeAta.amount.toFixed(6)} SOL</span>` : ''}
                         </div>
+                        ${ix.dexes?.length || ix.pools?.length ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 11px;">
+                            ${ix.dexes?.length ? `<div>DEXes: <span style="color: #fbbf24;">${ix.dexes.join(', ')}</span></div>` : ''}
+                            ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
+                        </div>` : ''}
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
                             Click to fetch wallet transactions
                         </div>
@@ -2101,6 +2104,7 @@
                     isZeroBalance: isZeroBalance,
                     sol_balance: n.sol_balance || 0,
                     funded_by: n.funded_by,
+                    interactions: n.interactions || { pools: [], programs: [], dexes: [] },
                     radius: sizeScale(displayBalance),
                     color: isZeroBalance ? '#666' : colorScale(displayBalance)
                 };
@@ -2128,37 +2132,24 @@
             // Filter out self-edges (like close_ata) since they can't be rendered as lines
             const d3Edges = (edges || [])
                 .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target) && e.source !== e.target)
-                .map(e => {
-                    const edge = {
-                        source: e.source,
-                        target: e.target,
-                        amount: e.amount,
-                        type: e.type,
-                        token_symbol: e.token_symbol,
-                        token_name: e.token_name,
-                        decimals: e.decimals,
-                        from_token_balance: e.from_token_balance,
-                        to_token_balance: e.to_token_balance,
-                        from_sol_balance: e.from_sol_balance,
-                        to_sol_balance: e.to_sol_balance,
-                        from_token_pre_balance: e.from_token_pre_balance,
-                        to_token_pre_balance: e.to_token_pre_balance,
-                        from_sol_pre_balance: e.from_sol_pre_balance,
-                        to_sol_pre_balance: e.to_sol_pre_balance,
-                        signature: e.signature,
-                        block_time: e.block_time,
-                        block_time_utc: e.block_time_utc,
-                        dex: e.dex,
-                        pool: e.pool,
-                        program: e.program,
-                        ins_index: e.ins_index,
-                        source_label: e.source_label,
-                        target_label: e.target_label,
-                        pool_label: e.pool_label
-                    };
-
-                    return edge;
-                });
+                .map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    amount: e.amount,
+                    type: e.type,
+                    token_symbol: e.token_symbol,
+                    from_token_balance: e.from_token_balance,
+                    to_token_balance: e.to_token_balance,
+                    from_token_pre_balance: e.from_token_pre_balance,
+                    to_token_pre_balance: e.to_token_pre_balance,
+                    signature: e.signature,
+                    block_time_utc: e.block_time_utc,
+                    dex: e.dex,
+                    ins_index: e.ins_index,
+                    source_label: e.source_label,
+                    target_label: e.target_label,
+                    pool_label: e.pool_label
+                }));
 
             // Detect token tax using two methods:
             // 1. Direct: swap_out/spl_transfer to wallet where amount > to_token_balance
@@ -2408,8 +2399,6 @@
                     d3.select(event.target).attr('stroke-width', 5);
                     tooltip.transition().duration(200).style('opacity', 1);
                     const tokenSymbol = d.token_symbol || 'Unknown';
-                    const tokenName = d.token_name || null;
-                    const tokenDisplay = tokenName && tokenName !== tokenSymbol ? `${tokenSymbol} (${tokenName})` : tokenSymbol;
                     const sourceLabel = d.source_label && !['unknown', 'wallet'].includes(d.source_label) ? d.source_label : null;
                     const targetLabel = d.target_label && !['unknown', 'wallet'].includes(d.target_label) ? d.target_label : null;
                     const poolLabel = d.pool_label || null;
@@ -2425,21 +2414,17 @@
                         </div>
                         ` : ''}
                         <div class="stats">
-                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenDisplay}</span><br>
+                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
                             ${d.from_token_pre_balance !== null && d.from_token_pre_balance !== undefined && d.from_token_balance !== null ?
-                                `From ${tokenDisplay}: <span style="color: #a855f7;">${formatNumber(d.from_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.from_token_balance)}</span><br>` : ''}
+                                `From ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.from_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.from_token_balance)}</span><br>` : ''}
                             ${d.to_token_pre_balance !== null && d.to_token_pre_balance !== undefined && d.to_token_balance !== null ?
-                                `To ${tokenDisplay}: <span style="color: #a855f7;">${formatNumber(d.to_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.to_token_balance)}</span><br>` : ''}
-                            ${d.from_sol_balance !== null && d.from_sol_balance !== undefined ? `From SOL: <span style="color: #60a5fa;">${d.from_sol_balance.toFixed(6)}</span><br>` : ''}
-                            ${d.to_sol_balance !== null && d.to_sol_balance !== undefined ? `To SOL: <span style="color: #60a5fa;">${d.to_sol_balance.toFixed(6)}</span><br>` : ''}
-                            Time: ${d.block_time_utc || (d.block_time ? formatTimestamp(d.block_time) : 'N/A')}
+                                `To ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.to_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.to_token_balance)}</span><br>` : ''}
+                            Time: ${d.block_time_utc || 'N/A'}
                             ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
-                        ${d.pool || d.program || poolLabel ? `
+                        ${poolLabel ? `
                         <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 10px;">
-                            ${poolLabel ? `<div style="margin-bottom: 4px; color: #fbbf24;">${poolLabel}</div>` : ''}
-                            ${d.pool ? `<div style="margin-bottom: 4px;">Pool: <span style="color: #e94560;">${d.pool.slice(0,12)}...</span></div>` : ''}
-                            ${d.program ? `<div>Program: <span style="color: #3b82f6;">${d.program.slice(0,12)}...</span></div>` : ''}
+                            <div style="color: #fbbf24;">${poolLabel}</div>
                         </div>
                         ` : ''}
                         <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
@@ -2478,6 +2463,7 @@
                 .on('mouseover', (event, d) => {
                     tooltip.transition().duration(200).style('opacity', 1);
                     const displayName = d.pool_label || d.token_name || null;
+                    const ix = d.interactions || {};
                     tooltip.html(`
                         <div class="address">${d.id}</div>
                         ${displayName ? `<div style="color: #fbbf24; font-weight: bold; margin-bottom: 8px;">${displayName}</div>` : ''}
@@ -2488,6 +2474,11 @@
                             ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
                             ${d.closeAta ? `<br><span style="color: #0891b2;">ATA Closed: +${d.closeAta.amount.toFixed(6)} SOL</span>` : ''}
                         </div>
+                        ${ix.dexes?.length || ix.pools?.length ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 11px;">
+                            ${ix.dexes?.length ? `<div>DEXes: <span style="color: #fbbf24;">${ix.dexes.join(', ')}</span></div>` : ''}
+                            ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
+                        </div>` : ''}
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
                             Click to fetch wallet transactions
                         </div>
@@ -2832,7 +2823,7 @@
             container.innerHTML = `
                 <div class="explanation-panel">
                     <div class="explanation-header">
-                        <h3><span class="ai-badge" style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">AI</span> Transaction Explanation</h3>
+                        <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
                     </div>
                     <div class="explanation-loading">Analyzing transaction</div>
                 </div>
@@ -2847,7 +2838,7 @@
                     container.innerHTML = `
                         <div class="explanation-panel">
                             <div class="explanation-header">
-                                <h3><span class="ai-badge" style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">AI</span> Transaction Explanation</h3>
+                                <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
                             </div>
                             <div class="explanation-error">${data.error}</div>
                         </div>
@@ -2855,19 +2846,41 @@
                     return;
                 }
 
-                // Convert markdown-style paragraphs to HTML
+                // Convert markdown to structured HTML with section headings + indented bodies
                 const explanationHtml = data.explanation
                     .split('\n\n')
                     .filter(p => p.trim())
-                    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+                    .map(p => {
+                        const trimmed = p.trim();
+                        // Detect **Heading:** pattern (section headers)
+                        const headingMatch = trimmed.match(/^\*\*(.+?)\*\*\s*(.*)/s);
+                        if (headingMatch) {
+                            const heading = headingMatch[1];
+                            const body = headingMatch[2]?.trim();
+                            let html = `<div class="section-heading">${heading}</div>`;
+                            if (body) html += `<div class="section-body">${body.replace(/\n/g, '<br>')}</div>`;
+                            return html;
+                        }
+                        return `<div class="section-body">${trimmed.replace(/\n/g, '<br>')}</div>`;
+                    })
                     .join('');
+
+                const usage = data.usage || {};
+                const costLine = usage.input_tokens ? `
+                    <div class="explanation-cost">
+                        <span>In: <span class="cost-value">${usage.input_tokens.toLocaleString()}</span> tokens</span>
+                        <span>Out: <span class="cost-value">${usage.output_tokens.toLocaleString()}</span> tokens</span>
+                        <span>Cost: <span class="cost-usd">$${usage.cost_usd.toFixed(4)}</span></span>
+                    </div>
+                ` : '';
 
                 container.innerHTML = `
                     <div class="explanation-panel">
                         <div class="explanation-header">
-                            <h3><span class="ai-badge" style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">AI</span> Transaction Explanation</h3>
+                            <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
                             <span class="model-badge">${data.model || 'claude'}</span>
                         </div>
+                        ${costLine}
                         <div class="explanation-content">${explanationHtml}</div>
                     </div>
                 `;
@@ -2875,7 +2888,7 @@
                 container.innerHTML = `
                     <div class="explanation-panel">
                         <div class="explanation-header">
-                            <h3><span class="ai-badge" style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">AI</span> Transaction Explanation</h3>
+                            <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
                         </div>
                         <div class="explanation-error">Failed to fetch explanation: ${error.message}</div>
                     </div>
