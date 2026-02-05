@@ -18,6 +18,8 @@ CREATE TABLE `tx_guide` (
   `source_id` tinyint unsigned DEFAULT NULL COMMENT 'FK to tx_guide_source',
   `source_row_id` bigint unsigned DEFAULT NULL COMMENT 'Row ID in source table',
   `ins_index` smallint DEFAULT NULL COMMENT 'Instruction index within tx',
+  `tax_bps` smallint unsigned DEFAULT NULL COMMENT 'Token tax in basis points (100=1%). NULL=no tax',
+  `tax_amount` bigint unsigned DEFAULT NULL COMMENT 'Raw tax amount (same units as amount column)',
   PRIMARY KEY (`id`),
   KEY `idx_from_time` (`from_address_id`,`block_time`),
   KEY `idx_to_time` (`to_address_id`,`block_time`),

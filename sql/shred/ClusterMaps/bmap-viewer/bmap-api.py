@@ -351,7 +351,7 @@ def explain_bmap():
         edge_addresses.add(e.get('target'))
     current_nodes = [n for n in result.get('nodes', []) if n.get('address') in edge_addresses]
 
-    # Process edges with tax detection
+    # Process edges — tax data is pre-computed in database
     processed_edges = []
     detected_taxes = []
 
@@ -366,43 +366,22 @@ def explain_bmap():
             'pool_label': e.get('pool_label')
         }
 
-        # Add balance changes if available
-        from_pre = e.get('from_token_pre_balance')
-        from_post = e.get('from_token_balance')
-        to_pre = e.get('to_token_pre_balance')
-        to_post = e.get('to_token_balance')
-
-        if from_pre is not None and from_post is not None:
-            edge_data['sender_balance_change'] = f"{from_pre:,.0f} → {from_post:,.0f}"
-        if to_pre is not None and to_post is not None:
-            edge_data['receiver_balance_change'] = f"{to_pre:,.0f} → {to_post:,.0f}"
-
-            # Detect tax: receiver got less than amount sent
-            if to_post > to_pre:
-                actual_received = to_post - to_pre
-                amount = e.get('amount', 0)
-                if amount and amount > actual_received * 1.005:
-                    tax_amount = amount - actual_received
-                    tax_percent = (tax_amount / amount) * 100
-                    if 1 <= tax_percent < 50:
-                        edge_data['tax_detected'] = {
-                            'percent': round(tax_percent, 1),
-                            'amount': round(tax_amount, 2),
-                            'expected': round(amount, 2),
-                            'received': round(actual_received, 2)
-                        }
-                        # Determine direction: if target is wallet-like, it's a buy; if source is, it's a sell
-                        target_label = e.get('target_label', '')
-                        source_label = e.get('source_label', '')
-                        is_buy = target_label in ['wallet', 'Token Creator'] or target_label == 'wallet'
-                        is_sell = source_label in ['wallet', 'Token Creator']
-                        direction = 'buy' if is_buy else ('sell' if is_sell else 'transfer')
-
-                        detected_taxes.append({
-                            'token': e.get('token_symbol'),
-                            'percent': round(tax_percent, 1),
-                            'direction': direction
-                        })
+        # Tax data is pre-computed in tx_guide by sp_tx_guide_loader
+        tax_bps = e.get('tax_bps')
+        if tax_bps and tax_bps >= 100:
+            edge_type = e.get('type', '')
+            direction = 'buy' if edge_type == 'swap_out' else ('sell' if edge_type == 'swap_in' else 'transfer')
+            tax_percent = round(tax_bps / 100, 1)
+            edge_data['tax_detected'] = {
+                'percent': tax_percent,
+                'amount': e.get('tax_amount', 0),
+                'direction': direction
+            }
+            detected_taxes.append({
+                'token': e.get('token_symbol'),
+                'percent': tax_percent,
+                'direction': direction
+            })
 
         processed_edges.append(edge_data)
 

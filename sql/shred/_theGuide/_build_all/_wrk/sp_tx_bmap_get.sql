@@ -659,11 +659,8 @@ BEGIN
                 'ins_index', g.ins_index,
                 'signature', t.signature,
                 'block_time_utc', FROM_UNIXTIME(t.block_time),
-                -- Token pre/post balances (for tax detection)
-                'from_token_pre_balance', ROUND(COALESCE(g.from_token_pre_balance, 0) / POW(10, COALESCE(g.decimals, 6)), 6),
-                'from_token_balance', ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, 6)), 6),
-                'to_token_pre_balance', ROUND(COALESCE(g.to_token_pre_balance, 0) / POW(10, COALESCE(g.decimals, 6)), 6),
-                'to_token_balance', ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, 6)), 6)
+                'tax_bps', g.tax_bps,
+                'tax_amount', ROUND(g.tax_amount / POW(10, COALESCE(g.decimals, 9)), 6)
             ) AS edge_data
             FROM tx_guide g
             JOIN tmp_display_window w ON w.tx_id = g.tx_id
@@ -692,11 +689,8 @@ BEGIN
                 'ins_index', g.ins_index,
                 'signature', t.signature,
                 'block_time_utc', FROM_UNIXTIME(t.block_time),
-                -- Token pre/post balances (for tax detection)
-                'from_token_pre_balance', ROUND(COALESCE(g.from_token_pre_balance, 0) / POW(10, COALESCE(g.decimals, 6)), 6),
-                'from_token_balance', ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, 6)), 6),
-                'to_token_pre_balance', ROUND(COALESCE(g.to_token_pre_balance, 0) / POW(10, COALESCE(g.decimals, 6)), 6),
-                'to_token_balance', ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, 6)), 6)
+                'tax_bps', g.tax_bps,
+                'tax_amount', ROUND(g.tax_amount / POW(10, COALESCE(g.decimals, 9)), 6)
             ) AS edge_data
             FROM tx_guide g
             JOIN tmp_window2 w ON w.tx_id = g.tx_id

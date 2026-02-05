@@ -1324,10 +1324,8 @@
                     amount: e.amount,
                     type: e.type,
                     token_symbol: e.token_symbol,
-                    from_token_balance: e.from_token_balance,
-                    to_token_balance: e.to_token_balance,
-                    from_token_pre_balance: e.from_token_pre_balance,
-                    to_token_pre_balance: e.to_token_pre_balance,
+                    tax_bps: e.tax_bps,
+                    tax_amount: e.tax_amount,
                     signature: e.signature,
                     block_time_utc: e.block_time_utc,
                     dex: e.dex,
@@ -1337,169 +1335,17 @@
                     pool_label: e.pool_label
                 }));
 
-            // Detect token tax using two methods:
-            // 1. Direct: swap_out/spl_transfer to wallet where amount > to_token_balance
-            // 2. Aggregator: compare what aggregator received vs sent to wallet
-
-            // Known aggregator labels
-            const aggregatorLabels = ['OKX: Router', 'Jupiter', 'Jupiter Aggregator', '1inch', 'Raydium Router'];
-            const isAggregator = (label) => aggregatorLabels.some(a => label && label.includes(a.split(':')[0]));
-
-            // Track aggregator flows: aggregator+token -> { received, sentToWallet, lastOutEdge }
-            const aggregatorFlows = new Map();
-            (edges || []).forEach(e => {
-                if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
-
-                // Track what aggregators RECEIVE (spl_transfer TO aggregator)
-                if (e.type === 'spl_transfer' && isAggregator(e.target_label)) {
-                    const key = `${e.target}|${e.token_symbol}`;
-                    const flow = aggregatorFlows.get(key) || { received: 0, sentToWallet: 0, lastOutEdge: null };
-                    flow.received += e.amount;
-                    aggregatorFlows.set(key, flow);
-                }
-
-                // Track what aggregators SEND to wallets
-                if (e.type === 'spl_transfer' && isAggregator(e.source_label) && e.target_label === 'wallet') {
-                    const key = `${e.source}|${e.token_symbol}`;
-                    const flow = aggregatorFlows.get(key) || { received: 0, sentToWallet: 0, lastOutEdge: null };
-                    flow.sentToWallet += e.amount;
-                    flow.lastOutEdge = e;
-                    aggregatorFlows.set(key, flow);
-                }
-            });
-
-            // Check aggregator flows for tax
-            aggregatorFlows.forEach((flow, key) => {
-                if (flow.received <= 0 || flow.sentToWallet <= 0 || !flow.lastOutEdge) return;
-
-                // If aggregator received more than it sent, the difference is tax
-                if (flow.received > flow.sentToWallet * 1.005) {
-                    const taxAmount = flow.received - flow.sentToWallet;
-                    const taxPercent = (taxAmount / flow.received) * 100;
-
-                    if (taxPercent >= 1 && taxPercent < 50) {
-                        const e = flow.lastOutEdge;
-                        const d3Edge = d3Edges.find(de => {
-                            const src = typeof de.source === 'object' ? de.source.id : de.source;
-                            const tgt = typeof de.target === 'object' ? de.target.id : de.target;
-                            return src === e.source && tgt === e.target &&
-                                   de.type === e.type && de.ins_index === e.ins_index;
-                        });
-
-                        if (d3Edge) {
-                            d3Edge.tokenTax = {
-                                amount: taxAmount,
-                                percent: taxPercent,
-                                received: flow.sentToWallet,
-                                direction: 'buy'
-                            };
-                        }
-                    }
-                }
-            });
-
-            // BUY-SIDE TAX DETECTION: tokens sent to wallet, wallet receives less
-            // Uses pre-balance data to calculate actual received = post - pre
-            (edges || []).forEach(e => {
-                if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
-
-                // Direct swap_out or spl_transfer to wallet
-                if ((e.type === 'swap_out' || e.type === 'spl_transfer') &&
-                    (e.target_label === 'wallet' || e.target_label === 'Token Creator') &&
-                    !isAggregator(e.source_label) &&
-                    e.to_token_pre_balance !== null &&
-                    e.to_token_pre_balance !== undefined &&
-                    e.to_token_balance !== null &&
-                    e.to_token_balance !== undefined) {
-
-                    // Calculate actual received using pre/post balance
-                    const actualReceived = e.to_token_balance - e.to_token_pre_balance;
-
-                    // Skip if not a positive receipt
-                    if (actualReceived <= 0) return;
-
-                    // Check wallet doesn't send this token out (arbitrage)
-                    const hasOutflow = (edges || []).some(out =>
-                        (out.type === 'swap_in' || out.type === 'spl_transfer') &&
-                        out.source === e.target &&
-                        out.token_symbol === e.token_symbol &&
-                        out.amount > e.amount * 0.3
-                    );
-                    if (hasOutflow) return;
-
-                    // Compare amount to actual received
-                    if (e.amount > actualReceived * 1.005) {
-                        const taxAmount = e.amount - actualReceived;
-                        const taxPercent = (taxAmount / e.amount) * 100;
-
-                        if (taxPercent >= 1 && taxPercent < 50) {
-                            const d3Edge = d3Edges.find(de => {
-                                const src = typeof de.source === 'object' ? de.source.id : de.source;
-                                const tgt = typeof de.target === 'object' ? de.target.id : de.target;
-                                return src === e.source && tgt === e.target &&
-                                       de.type === e.type && de.ins_index === e.ins_index;
-                            });
-
-                            if (d3Edge && !d3Edge.tokenTax) {
-                                d3Edge.tokenTax = {
-                                    amount: taxAmount,
-                                    percent: taxPercent,
-                                    received: actualReceived,
-                                    direction: 'buy'
-                                };
-                            }
-                        }
-                    }
-                }
-            });
-
-            // SELL-SIDE TAX DETECTION: sender sends tokens, receiver gets less
-            // Uses pre-balance data to calculate actual received = post - pre
-            const walletLikeLabels = ['wallet', 'Token Creator', 'bot'];
-            const poolLikeLabels = ['Raydium', 'Jupiter', 'OKX', 'Orca', 'Pump.fun', 'vault', 'pool', 'Market'];
-            const isWalletLike = (label) => walletLikeLabels.includes(label) || label === null;
-            const isPoolLike = (label) => poolLikeLabels.some(p => label && label.includes(p));
-
-            (edges || []).forEach(e => {
-                if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
-
-                // Any spl_transfer where we can detect tax via pre/post balance
-                if ((e.type === 'swap_in' || e.type === 'spl_transfer') &&
-                    (isWalletLike(e.source_label) || isPoolLike(e.target_label)) &&
-                    e.to_token_pre_balance !== null &&
-                    e.to_token_pre_balance !== undefined &&
-                    e.to_token_balance !== null &&
-                    e.to_token_balance !== undefined) {
-
-                    // What the recipient actually received
-                    const actualReceived = e.to_token_balance - e.to_token_pre_balance;
-
-                    // Skip if received is not positive (pool might be sending, not receiving)
-                    if (actualReceived <= 0) return;
-
-                    // Compare to amount sent
-                    if (e.amount > actualReceived * 1.005) {
-                        const taxAmount = e.amount - actualReceived;
-                        const taxPercent = (taxAmount / e.amount) * 100;
-
-                        if (taxPercent >= 1 && taxPercent < 50) {
-                            const d3Edge = d3Edges.find(de => {
-                                const src = typeof de.source === 'object' ? de.source.id : de.source;
-                                const tgt = typeof de.target === 'object' ? de.target.id : de.target;
-                                return src === e.source && tgt === e.target &&
-                                       de.type === e.type && de.ins_index === e.ins_index;
-                            });
-
-                            if (d3Edge && !d3Edge.tokenTax) {
-                                d3Edge.tokenTax = {
-                                    amount: taxAmount,
-                                    percent: taxPercent,
-                                    received: actualReceived,
-                                    direction: 'sell'
-                                };
-                            }
-                        }
-                    }
+            // Token tax: read pre-computed values from database
+            d3Edges.forEach(d => {
+                if (d.tax_bps && d.tax_bps >= 100) {
+                    const direction = d.type === 'swap_out' ? 'buy' :
+                                      (d.type === 'swap_in' ? 'sell' : 'transfer');
+                    d.tokenTax = {
+                        amount: d.tax_amount,
+                        percent: d.tax_bps / 100,
+                        received: d.amount - d.tax_amount,
+                        direction: direction
+                    };
                 }
             });
 
@@ -1603,10 +1449,7 @@
                         ` : ''}
                         <div class="stats">
                             Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
-                            ${d.from_token_pre_balance !== null && d.from_token_pre_balance !== undefined && d.from_token_balance !== null ?
-                                `From ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.from_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.from_token_balance)}</span><br>` : ''}
-                            ${d.to_token_pre_balance !== null && d.to_token_pre_balance !== undefined && d.to_token_balance !== null ?
-                                `To ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.to_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.to_token_balance)}</span><br>` : ''}
+                            ${d.tokenTax ? `Tax: <span style="color: #ef4444; font-weight: bold;">${d.tokenTax.percent.toFixed(1)}%</span> (${d.tokenTax.direction})<br>` : ''}
                             Time: ${d.block_time_utc || 'N/A'}
                             ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
@@ -1744,6 +1587,36 @@
                 .attr('paint-order', 'stroke')
                 .text(d => `-${d.tokenTax.percent.toFixed(0)}%`);
 
+            // Step numbers: show instruction order on Single TX views
+            const isSingleTx = document.getElementById('tx_limit').value === '1';
+            let stepBadges;
+            if (isSingleTx) {
+                const steppedEdges = d3Edges
+                    .filter(e => e.ins_index !== null && e.ins_index !== undefined && e.type !== 'funded_by')
+                    .sort((a, b) => a.ins_index - b.ins_index);
+                steppedEdges.forEach((e, i) => { e.stepNum = i + 1; });
+
+                stepBadges = g.append('g')
+                    .selectAll('g')
+                    .data(steppedEdges)
+                    .join('g')
+                    .attr('class', 'step-badge');
+
+                stepBadges.append('circle')
+                    .attr('r', 9)
+                    .attr('fill', '#1a1a2e')
+                    .attr('stroke', '#60a5fa')
+                    .attr('stroke-width', 1.5);
+
+                stepBadges.append('text')
+                    .attr('text-anchor', 'middle')
+                    .attr('dominant-baseline', 'central')
+                    .attr('fill', '#60a5fa')
+                    .attr('font-size', '9px')
+                    .attr('font-weight', 'bold')
+                    .text(d => d.stepNum);
+            }
+
             // Create labels
             const label = g.append('g')
                 .selectAll('text')
@@ -1778,6 +1651,15 @@
                             const midY = (d.source.y + d.target.y) / 2;
                             return `translate(${midX}, ${midY - 5})`;
                         });
+
+                    // Position step badges at 30% along edge (source side)
+                    if (stepBadges) {
+                        stepBadges.attr('transform', d => {
+                            const x = d.source.x + (d.target.x - d.source.x) * 0.3;
+                            const y = d.source.y + (d.target.y - d.source.y) * 0.3;
+                            return `translate(${x}, ${y})`;
+                        });
+                    }
 
                     label
                         .attr('x', d => d.x)
@@ -2138,10 +2020,8 @@
                     amount: e.amount,
                     type: e.type,
                     token_symbol: e.token_symbol,
-                    from_token_balance: e.from_token_balance,
-                    to_token_balance: e.to_token_balance,
-                    from_token_pre_balance: e.from_token_pre_balance,
-                    to_token_pre_balance: e.to_token_pre_balance,
+                    tax_bps: e.tax_bps,
+                    tax_amount: e.tax_amount,
                     signature: e.signature,
                     block_time_utc: e.block_time_utc,
                     dex: e.dex,
@@ -2151,169 +2031,17 @@
                     pool_label: e.pool_label
                 }));
 
-            // Detect token tax using two methods:
-            // 1. Direct: swap_out/spl_transfer to wallet where amount > to_token_balance
-            // 2. Aggregator: compare what aggregator received vs sent to wallet
-
-            // Known aggregator labels
-            const aggregatorLabels = ['OKX: Router', 'Jupiter', 'Jupiter Aggregator', '1inch', 'Raydium Router'];
-            const isAggregator = (label) => aggregatorLabels.some(a => label && label.includes(a.split(':')[0]));
-
-            // Track aggregator flows: aggregator+token -> { received, sentToWallet, lastOutEdge }
-            const aggregatorFlows = new Map();
-            (edges || []).forEach(e => {
-                if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
-
-                // Track what aggregators RECEIVE (spl_transfer TO aggregator)
-                if (e.type === 'spl_transfer' && isAggregator(e.target_label)) {
-                    const key = `${e.target}|${e.token_symbol}`;
-                    const flow = aggregatorFlows.get(key) || { received: 0, sentToWallet: 0, lastOutEdge: null };
-                    flow.received += e.amount;
-                    aggregatorFlows.set(key, flow);
-                }
-
-                // Track what aggregators SEND to wallets
-                if (e.type === 'spl_transfer' && isAggregator(e.source_label) && e.target_label === 'wallet') {
-                    const key = `${e.source}|${e.token_symbol}`;
-                    const flow = aggregatorFlows.get(key) || { received: 0, sentToWallet: 0, lastOutEdge: null };
-                    flow.sentToWallet += e.amount;
-                    flow.lastOutEdge = e;
-                    aggregatorFlows.set(key, flow);
-                }
-            });
-
-            // Check aggregator flows for tax
-            aggregatorFlows.forEach((flow, key) => {
-                if (flow.received <= 0 || flow.sentToWallet <= 0 || !flow.lastOutEdge) return;
-
-                // If aggregator received more than it sent, the difference is tax
-                if (flow.received > flow.sentToWallet * 1.005) {
-                    const taxAmount = flow.received - flow.sentToWallet;
-                    const taxPercent = (taxAmount / flow.received) * 100;
-
-                    if (taxPercent >= 1 && taxPercent < 50) {
-                        const e = flow.lastOutEdge;
-                        const d3Edge = d3Edges.find(de => {
-                            const src = typeof de.source === 'object' ? de.source.id : de.source;
-                            const tgt = typeof de.target === 'object' ? de.target.id : de.target;
-                            return src === e.source && tgt === e.target &&
-                                   de.type === e.type && de.ins_index === e.ins_index;
-                        });
-
-                        if (d3Edge) {
-                            d3Edge.tokenTax = {
-                                amount: taxAmount,
-                                percent: taxPercent,
-                                received: flow.sentToWallet,
-                                direction: 'buy'
-                            };
-                        }
-                    }
-                }
-            });
-
-            // BUY-SIDE TAX DETECTION: tokens sent to wallet, wallet receives less
-            // Uses pre-balance data to calculate actual received = post - pre
-            (edges || []).forEach(e => {
-                if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
-
-                // Direct swap_out or spl_transfer to wallet
-                if ((e.type === 'swap_out' || e.type === 'spl_transfer') &&
-                    (e.target_label === 'wallet' || e.target_label === 'Token Creator') &&
-                    !isAggregator(e.source_label) &&
-                    e.to_token_pre_balance !== null &&
-                    e.to_token_pre_balance !== undefined &&
-                    e.to_token_balance !== null &&
-                    e.to_token_balance !== undefined) {
-
-                    // Calculate actual received using pre/post balance
-                    const actualReceived = e.to_token_balance - e.to_token_pre_balance;
-
-                    // Skip if not a positive receipt
-                    if (actualReceived <= 0) return;
-
-                    // Check wallet doesn't send this token out (arbitrage)
-                    const hasOutflow = (edges || []).some(out =>
-                        (out.type === 'swap_in' || out.type === 'spl_transfer') &&
-                        out.source === e.target &&
-                        out.token_symbol === e.token_symbol &&
-                        out.amount > e.amount * 0.3
-                    );
-                    if (hasOutflow) return;
-
-                    // Compare amount to actual received
-                    if (e.amount > actualReceived * 1.005) {
-                        const taxAmount = e.amount - actualReceived;
-                        const taxPercent = (taxAmount / e.amount) * 100;
-
-                        if (taxPercent >= 1 && taxPercent < 50) {
-                            const d3Edge = d3Edges.find(de => {
-                                const src = typeof de.source === 'object' ? de.source.id : de.source;
-                                const tgt = typeof de.target === 'object' ? de.target.id : de.target;
-                                return src === e.source && tgt === e.target &&
-                                       de.type === e.type && de.ins_index === e.ins_index;
-                            });
-
-                            if (d3Edge && !d3Edge.tokenTax) {
-                                d3Edge.tokenTax = {
-                                    amount: taxAmount,
-                                    percent: taxPercent,
-                                    received: actualReceived,
-                                    direction: 'buy'
-                                };
-                            }
-                        }
-                    }
-                }
-            });
-
-            // SELL-SIDE TAX DETECTION: sender sends tokens, receiver gets less
-            // Uses pre-balance data to calculate actual received = post - pre
-            const walletLikeLabels = ['wallet', 'Token Creator', 'bot'];
-            const poolLikeLabels = ['Raydium', 'Jupiter', 'OKX', 'Orca', 'Pump.fun', 'vault', 'pool', 'Market'];
-            const isWalletLike = (label) => walletLikeLabels.includes(label) || label === null;
-            const isPoolLike = (label) => poolLikeLabels.some(p => label && label.includes(p));
-
-            (edges || []).forEach(e => {
-                if (!e.token_symbol || e.token_symbol === 'Unknown' || e.token_symbol === 'SOL' || e.token_symbol === 'WSOL') return;
-
-                // Any spl_transfer where we can detect tax via pre/post balance
-                if ((e.type === 'swap_in' || e.type === 'spl_transfer') &&
-                    (isWalletLike(e.source_label) || isPoolLike(e.target_label)) &&
-                    e.to_token_pre_balance !== null &&
-                    e.to_token_pre_balance !== undefined &&
-                    e.to_token_balance !== null &&
-                    e.to_token_balance !== undefined) {
-
-                    // What the recipient actually received
-                    const actualReceived = e.to_token_balance - e.to_token_pre_balance;
-
-                    // Skip if received is not positive (pool might be sending, not receiving)
-                    if (actualReceived <= 0) return;
-
-                    // Compare to amount sent
-                    if (e.amount > actualReceived * 1.005) {
-                        const taxAmount = e.amount - actualReceived;
-                        const taxPercent = (taxAmount / e.amount) * 100;
-
-                        if (taxPercent >= 1 && taxPercent < 50) {
-                            const d3Edge = d3Edges.find(de => {
-                                const src = typeof de.source === 'object' ? de.source.id : de.source;
-                                const tgt = typeof de.target === 'object' ? de.target.id : de.target;
-                                return src === e.source && tgt === e.target &&
-                                       de.type === e.type && de.ins_index === e.ins_index;
-                            });
-
-                            if (d3Edge && !d3Edge.tokenTax) {
-                                d3Edge.tokenTax = {
-                                    amount: taxAmount,
-                                    percent: taxPercent,
-                                    received: actualReceived,
-                                    direction: 'sell'
-                                };
-                            }
-                        }
-                    }
+            // Token tax: read pre-computed values from database
+            d3Edges.forEach(d => {
+                if (d.tax_bps && d.tax_bps >= 100) {
+                    const direction = d.type === 'swap_out' ? 'buy' :
+                                      (d.type === 'swap_in' ? 'sell' : 'transfer');
+                    d.tokenTax = {
+                        amount: d.tax_amount,
+                        percent: d.tax_bps / 100,
+                        received: d.amount - d.tax_amount,
+                        direction: direction
+                    };
                 }
             });
 
@@ -2415,10 +2143,7 @@
                         ` : ''}
                         <div class="stats">
                             Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
-                            ${d.from_token_pre_balance !== null && d.from_token_pre_balance !== undefined && d.from_token_balance !== null ?
-                                `From ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.from_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.from_token_balance)}</span><br>` : ''}
-                            ${d.to_token_pre_balance !== null && d.to_token_pre_balance !== undefined && d.to_token_balance !== null ?
-                                `To ${tokenSymbol}: <span style="color: #a855f7;">${formatNumber(d.to_token_pre_balance)}</span> → <span style="color: #22c55e;">${formatNumber(d.to_token_balance)}</span><br>` : ''}
+                            ${d.tokenTax ? `Tax: <span style="color: #ef4444; font-weight: bold;">${d.tokenTax.percent.toFixed(1)}%</span> (${d.tokenTax.direction})<br>` : ''}
                             Time: ${d.block_time_utc || 'N/A'}
                             ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
                         </div>
@@ -2556,6 +2281,36 @@
                 .attr('paint-order', 'stroke')
                 .text(d => `-${d.tokenTax.percent.toFixed(0)}%`);
 
+            // Step numbers: show instruction order on Single TX views
+            const isSingleTx = document.getElementById('tx_limit').value === '1';
+            let stepBadges;
+            if (isSingleTx) {
+                const steppedEdges = d3Edges
+                    .filter(e => e.ins_index !== null && e.ins_index !== undefined && e.type !== 'funded_by')
+                    .sort((a, b) => a.ins_index - b.ins_index);
+                steppedEdges.forEach((e, i) => { e.stepNum = i + 1; });
+
+                stepBadges = g.append('g')
+                    .selectAll('g')
+                    .data(steppedEdges)
+                    .join('g')
+                    .attr('class', 'step-badge');
+
+                stepBadges.append('circle')
+                    .attr('r', 9)
+                    .attr('fill', '#1a1a2e')
+                    .attr('stroke', '#60a5fa')
+                    .attr('stroke-width', 1.5);
+
+                stepBadges.append('text')
+                    .attr('text-anchor', 'middle')
+                    .attr('dominant-baseline', 'central')
+                    .attr('fill', '#60a5fa')
+                    .attr('font-size', '9px')
+                    .attr('font-weight', 'bold')
+                    .text(d => d.stepNum);
+            }
+
             // Create labels
             const label = g.append('g')
                 .selectAll('text')
@@ -2590,6 +2345,15 @@
                             const midY = (d.source.y + d.target.y) / 2;
                             return `translate(${midX}, ${midY - 5})`;
                         });
+
+                    // Position step badges at 30% along edge (source side)
+                    if (stepBadges) {
+                        stepBadges.attr('transform', d => {
+                            const x = d.source.x + (d.target.x - d.source.x) * 0.3;
+                            const y = d.source.y + (d.target.y - d.source.y) * 0.3;
+                            return `translate(${x}, ${y})`;
+                        });
+                    }
 
                     label
                         .attr('x', d => d.x)

@@ -431,6 +431,30 @@ BEGIN
           AND a.address_type = 'mint'
           AND (g.to_token_pre_balance IS NULL OR g.to_sol_pre_balance IS NULL);
 
+        -- ============================================================
+        -- Token tax detection: amount sent > amount received
+        -- Compares edge amount to receiver's actual balance change
+        -- ============================================================
+        UPDATE tx_guide g
+        SET
+            g.tax_amount = g.amount - (g.to_token_post_balance - g.to_token_pre_balance),
+            g.tax_bps = ROUND(
+                (g.amount - (g.to_token_post_balance - g.to_token_pre_balance))
+                * 10000 / g.amount
+            )
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.token_id IS NOT NULL
+          AND g.amount > 0
+          AND g.to_token_pre_balance IS NOT NULL
+          AND g.to_token_post_balance IS NOT NULL
+          AND g.to_token_post_balance > g.to_token_pre_balance
+          AND g.amount > (g.to_token_post_balance - g.to_token_pre_balance)
+          AND g.amount > (g.to_token_post_balance - g.to_token_pre_balance) * 1.005
+          AND ROUND(
+              (g.amount - (g.to_token_post_balance - g.to_token_pre_balance))
+              * 10000 / g.amount
+          ) BETWEEN 100 AND 4999;
+
         -- Return results via OUT params (no SELECT to avoid unread result issues)
         SET p_rows_loaded = v_transfer_count + v_swap_count;
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;
