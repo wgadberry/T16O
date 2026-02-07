@@ -15,6 +15,10 @@ BEGIN
     DECLARE v_transfer_count INT DEFAULT 0;
     DECLARE v_swap_count INT DEFAULT 0;
     DECLARE v_unknown_mint_id BIGINT DEFAULT 751438;  -- UnknownMint placeholder
+    DECLARE v_sol_token_id BIGINT DEFAULT 25993;     -- So1111...
+    DECLARE v_create_sink_id INT UNSIGNED DEFAULT 742705;  -- CREATE_ACCOUNT sink address
+    DECLARE v_other_count INT DEFAULT 0;
+    DECLARE v_funding_count INT DEFAULT 0;
 
     SET p_batch_size = COALESCE(p_batch_size, 10000);
     SET p_rows_loaded = 0;
@@ -75,7 +79,7 @@ BEGIN
                 WHEN t.transfer_type = 'ACTIVITY_SPL_MINT' THEN COALESCE(tk.mint_address_id, v_unknown_mint_id)
                 ELSE t.source_owner_address_id
             END,
-            -- to_address: dest owner, or mint for BURN type
+            -- to_address: dest owner, or mint for BURN, or sink for CREATE
             CASE
                 WHEN t.transfer_type = 'ACTIVITY_SPL_BURN' THEN COALESCE(tk.mint_address_id, v_unknown_mint_id)
                 ELSE t.destination_owner_address_id
@@ -94,14 +98,12 @@ BEGIN
             WHEN 'ACTIVITY_SPL_TRANSFER' THEN 'spl_transfer'
             WHEN 'ACTIVITY_SPL_BURN' THEN 'burn'
             WHEN 'ACTIVITY_SPL_MINT' THEN 'mint'
-            WHEN 'ACTIVITY_SPL_CREATE_ACCOUNT' THEN 'create_ata'
             WHEN 'ACTIVITY_SPL_CLOSE_ACCOUNT' THEN 'close_ata'
         END
         WHERE t.transfer_type IN (
             'ACTIVITY_SPL_TRANSFER',
             'ACTIVITY_SPL_BURN',
             'ACTIVITY_SPL_MINT',
-            'ACTIVITY_SPL_CREATE_ACCOUNT',
             'ACTIVITY_SPL_CLOSE_ACCOUNT'
         )
         AND (t.source_owner_address_id IS NOT NULL OR t.transfer_type = 'ACTIVITY_SPL_MINT')
@@ -114,68 +116,133 @@ BEGIN
         SET v_transfer_count = ROW_COUNT();
 
         -- ============================================================
-        -- SWAPS: swap_in (separate INSERT to avoid temp table reopen)
+        -- SWAP ENRICHMENT: Update transfer rows with swap metadata
+        -- Matches by tx_id + token_id + amount (exact)
         -- ============================================================
-        INSERT INTO tx_guide (
-            tx_id, block_time,
-            from_address_id, to_address_id,
-            token_id, amount, decimals,
-            edge_type_id, source_id, source_row_id, ins_index,
-            fee, priority_fee
-        )
-        SELECT
-            b.tx_id, b.block_time,
-            s.account_address_id,
-            tk.mint_address_id,
-            s.token_1_id, s.amount_1, COALESCE(s.decimals_1, tk.decimals),
-            gt.id,  -- swap_in
-            2, s.id, s.ins_index,
-            b.fee, b.priority_fee
-        FROM tmp_batch b
-        JOIN tx_swap s ON s.tx_id = b.tx_id
-        JOIN tx_token tk ON tk.id = s.token_1_id
-        JOIN tx_guide_type gt ON gt.type_code = 'swap_in'
-        WHERE s.account_address_id IS NOT NULL
-          AND s.token_1_id IS NOT NULL
-          AND s.amount_1 > 0
-        ON DUPLICATE KEY UPDATE
-            amount = VALUES(amount),
-            fee = VALUES(fee),
-            priority_fee = VALUES(priority_fee);
+
+        -- swap_in: token received (token_1 side of swap)
+        UPDATE tx_guide g
+        JOIN tx_swap s ON s.tx_id = g.tx_id
+          AND s.token_1_id = g.token_id
+          AND s.amount_1 = g.amount
+        JOIN tx_program p ON p.id = s.program_id
+        LEFT JOIN tx_pool pool ON pool.id = s.amm_id
+        LEFT JOIN tx_address pa ON pa.id = pool.pool_address_id
+        SET
+            g.dex = p.name,
+            g.pool_address_id = pool.pool_address_id,
+            g.pool_label = pa.label,
+            g.swap_direction = 'in',
+            g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'swap_in')
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.source_id = 1
+          AND g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'spl_transfer');
 
         SET v_swap_count = ROW_COUNT();
 
-        -- ============================================================
-        -- SWAPS: swap_out (separate INSERT to avoid temp table reopen)
-        -- ============================================================
-        INSERT INTO tx_guide (
-            tx_id, block_time,
-            from_address_id, to_address_id,
-            token_id, amount, decimals,
-            edge_type_id, source_id, source_row_id, ins_index,
-            fee, priority_fee
-        )
-        SELECT
-            b.tx_id, b.block_time,
-            tk.mint_address_id,
-            s.account_address_id,
-            s.token_2_id, s.amount_2, COALESCE(s.decimals_2, tk.decimals),
-            gt.id,  -- swap_out
-            2, s.id, s.ins_index,
-            b.fee, b.priority_fee
-        FROM tmp_batch b
-        JOIN tx_swap s ON s.tx_id = b.tx_id
-        JOIN tx_token tk ON tk.id = s.token_2_id
-        JOIN tx_guide_type gt ON gt.type_code = 'swap_out'
-        WHERE s.account_address_id IS NOT NULL
-          AND s.token_2_id IS NOT NULL
-          AND s.amount_2 > 0
-        ON DUPLICATE KEY UPDATE
-            amount = VALUES(amount),
-            fee = VALUES(fee),
-            priority_fee = VALUES(priority_fee);
+        -- swap_out: token sent (token_2 side of swap)
+        UPDATE tx_guide g
+        JOIN tx_swap s ON s.tx_id = g.tx_id
+          AND s.token_2_id = g.token_id
+          AND s.amount_2 = g.amount
+        JOIN tx_program p ON p.id = s.program_id
+        LEFT JOIN tx_pool pool ON pool.id = s.amm_id
+        LEFT JOIN tx_address pa ON pa.id = pool.pool_address_id
+        SET
+            g.dex = p.name,
+            g.pool_address_id = pool.pool_address_id,
+            g.pool_label = pa.label,
+            g.swap_direction = 'out',
+            g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'swap_out')
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.source_id = 1
+          AND g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'spl_transfer');
 
         SET v_swap_count = v_swap_count + ROW_COUNT();
+
+        -- ============================================================
+        -- OTHER ACTIVITY EDGES (activities with guide_type but no swap/transfer)
+        -- ============================================================
+        INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
+                              token_id, edge_type_id, source_id, source_row_id, ins_index,
+                              fee, priority_fee)
+        SELECT a.tx_id, b.block_time,
+               a.account_address_id,
+               a.account_address_id,
+               NULL,
+               atm.guide_type_id,
+               5, a.id, a.ins_index,
+               b.fee, b.priority_fee
+        FROM tmp_batch b
+        JOIN tx_activity a ON a.tx_id = b.tx_id
+        JOIN tx_activity_type_map atm ON atm.activity_type = a.activity_type
+        LEFT JOIN tx_swap s ON s.activity_id = a.id
+        LEFT JOIN tx_transfer t ON t.activity_id = a.id
+        WHERE atm.creates_edge = 1
+          AND atm.guide_type_id IS NOT NULL
+          AND s.id IS NULL
+          AND t.id IS NULL
+          AND a.account_address_id IS NOT NULL
+          AND a.activity_type NOT LIKE 'ACTIVITY_%SWAP'
+          AND a.activity_type NOT LIKE '%TRANSFER%'
+        ON DUPLICATE KEY UPDATE edge_type_id = VALUES(edge_type_id);
+
+        SET v_other_count = ROW_COUNT();
+
+        -- ============================================================
+        -- FUNDING EDGES (funder→funded SOL transfer aggregation)
+        -- ============================================================
+        DROP TEMPORARY TABLE IF EXISTS tmp_funded_addresses;
+        CREATE TEMPORARY TABLE tmp_funded_addresses (
+            address_id INT UNSIGNED PRIMARY KEY,
+            funder_id INT UNSIGNED,
+            INDEX idx_funder (funder_id)
+        ) ENGINE=MEMORY;
+
+        INSERT IGNORE INTO tmp_funded_addresses (address_id, funder_id)
+        SELECT DISTINCT s.account_address_id, a.funded_by_address_id
+        FROM tx_swap s
+        JOIN tx_address a ON a.id = s.account_address_id
+        WHERE s.tx_id >= v_start AND s.tx_id < v_end
+          AND a.funded_by_address_id IS NOT NULL
+          AND s.account_address_id IS NOT NULL;
+
+        INSERT IGNORE INTO tmp_funded_addresses (address_id, funder_id)
+        SELECT DISTINCT t.source_owner_address_id, a.funded_by_address_id
+        FROM tx_transfer t
+        JOIN tx_address a ON a.id = t.source_owner_address_id
+        WHERE t.tx_id >= v_start AND t.tx_id < v_end
+          AND a.funded_by_address_id IS NOT NULL
+          AND t.source_owner_address_id IS NOT NULL;
+
+        INSERT IGNORE INTO tmp_funded_addresses (address_id, funder_id)
+        SELECT DISTINCT t.destination_owner_address_id, a.funded_by_address_id
+        FROM tx_transfer t
+        JOIN tx_address a ON a.id = t.destination_owner_address_id
+        WHERE t.tx_id >= v_start AND t.tx_id < v_end
+          AND a.funded_by_address_id IS NOT NULL
+          AND t.destination_owner_address_id IS NOT NULL;
+
+        INSERT INTO tx_funding_edge (from_address_id, to_address_id, total_sol, transfer_count,
+                                      first_transfer_time, last_transfer_time)
+        SELECT tf.funder_id, tf.address_id,
+               SUM(CASE WHEN t.token_id = v_sol_token_id THEN t.amount ELSE 0 END) / 1e9,
+               COUNT(*),
+               MIN(b.block_time),
+               MAX(b.block_time)
+        FROM tmp_funded_addresses tf
+        JOIN tx_transfer t ON t.source_owner_address_id = tf.funder_id
+                          AND t.destination_owner_address_id = tf.address_id
+                          AND t.tx_id >= v_start AND t.tx_id < v_end
+        JOIN tmp_batch b ON b.tx_id = t.tx_id
+        GROUP BY tf.funder_id, tf.address_id
+        ON DUPLICATE KEY UPDATE
+            total_sol = total_sol + VALUES(total_sol),
+            transfer_count = transfer_count + VALUES(transfer_count),
+            last_transfer_time = GREATEST(last_transfer_time, VALUES(last_transfer_time));
+
+        SET v_funding_count = ROW_COUNT();
+        DROP TEMPORARY TABLE IF EXISTS tmp_funded_addresses;
 
         -- ============================================================
         -- Populate balances with LAG (look backwards if not in same tx)
@@ -455,8 +522,16 @@ BEGIN
               * 10000 / g.amount
           ) BETWEEN 100 AND 4999;
 
+        -- ============================================================
+        -- Mark activities as processed
+        -- ============================================================
+        UPDATE tx_activity a
+        SET a.guide_loaded = 1
+        WHERE a.tx_id >= v_start AND a.tx_id < v_end
+          AND a.guide_loaded = 0;
+
         -- Return results via OUT params (no SELECT to avoid unread result issues)
-        SET p_rows_loaded = v_transfer_count + v_swap_count;
+        SET p_rows_loaded = v_transfer_count + v_swap_count + v_other_count;
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;
     END IF;
 END //

@@ -1326,43 +1326,21 @@
             const nodeMap = new Map();
             (nodes || []).forEach(n => nodeMap.set(n.address, n));
 
-            // Filter valid edges, deduplicate, and sort by ins_index
-            // The API returns both DEX swap summaries AND raw SPL transfers
-            // We prefer DEX edges (they have pool_label/dex) and dedupe by amount+token
+            // Filter valid edges and sort by ins_index
+            // Dedup no longer needed — tx_guide enriches transfer rows with swap metadata
+            // instead of creating separate swap rows
 
-            const validEdges = (edges || [])
+            const flowEdges = (edges || [])
                 .filter(e => {
                     if (!e.source || !e.target) return false;
                     if (e.source === e.target) return false;
                     if (e.ins_index === null || e.ins_index === undefined) return false;
                     if (e.type === 'funded_by') return false;
                     return true;
-                });
-
-            // Sort so DEX-enriched edges come first (they have dex or pool_label)
-            validEdges.sort((a, b) => {
-                const aHasDex = a.dex || a.pool_label ? 1 : 0;
-                const bHasDex = b.dex || b.pool_label ? 1 : 0;
-                if (bHasDex !== aHasDex) return bHasDex - aHasDex; // DEX edges first
-                return a.ins_index - b.ins_index;
-            });
-
-            // Deduplicate by amount + token + direction (keeping DEX-enriched version)
-            const seenEdges = new Set();
-            const flowEdges = validEdges
-                .filter(e => {
-                    // Use 9 decimal precision (Solana native) and include type for direction
-                    const amountKey = Math.round(e.amount * 1e9);
-                    const token = e.token_symbol || e.type || 'unknown';
-                    // Include source+target for small/zero amounts to avoid false deduplication
-                    const directionKey = amountKey < 1000 ? `${e.source?.slice(-6)}>${e.target?.slice(-6)}` : '';
-                    const key = `${amountKey}|${token}|${directionKey}`;
-                    if (seenEdges.has(key)) return false;
-                    seenEdges.add(key);
-                    return true;
                 })
-                .sort((a, b) => a.ins_index - b.ins_index)
-                .map((e, i) => ({ ...e, stepNum: i + 1 }));
+                .sort((a, b) => a.ins_index - b.ins_index);
+            assignStepLabels(flowEdges);
+            flowEdges.forEach((e, i) => { e.stepNum = i + 1; });
 
             if (flowEdges.length === 0) {
                 container.innerHTML = '<div style="padding: 40px; text-align: center; color: #aaa;">No transaction flow to display</div>';
@@ -1531,18 +1509,22 @@
             const BOX_H = 32;
             const CP_W = 220;
             const CP_H = 55;
-            const BOX_SPACING = 55;
+            const INTRA_GROUP_SPACING = 36;  // tight spacing within same ins_index
+            const INTER_GROUP_SPACING = 58;  // larger gap between different ins_index groups
 
-            // Calculate vertical positions for transfer boxes
+            // Calculate vertical positions — bundle edges with same ins_index closer together
             const boxStartY = MARGIN.top + 40;
-            const boxPositions = flowEdges.map((e, i) => ({
-                edge: e,
-                x: width / 2 - BOX_W / 2,
-                y: boxStartY + i * BOX_SPACING
-            }));
+            let currentY = 0;
+            const boxPositions = flowEdges.map((e, i) => {
+                if (i > 0) {
+                    const sameGroup = e.ins_index === flowEdges[i - 1].ins_index;
+                    currentY += sameGroup ? INTRA_GROUP_SPACING : INTER_GROUP_SPACING;
+                }
+                return { edge: e, x: width / 2 - BOX_W / 2, y: boxStartY + currentY };
+            });
 
             // Position signer on the left, vertically centered
-            const totalBoxHeight = flowEdges.length * BOX_SPACING;
+            const totalBoxHeight = currentY + BOX_H;
             const signerX = MARGIN.left;
             const signerY = boxStartY + totalBoxHeight / 2 - SIGNER_H / 2;
 
@@ -1555,10 +1537,9 @@
                 cpPositions.set(cp.address, cpStartY + i * cpSpacing);
             });
 
-            // Arrow markers
+            // Arrow markers (outgoing=red, incoming=green, passthrough=amber)
             const defs = gEl.append('defs');
-            ['incoming', 'outgoing'].forEach(dir => {
-                const color = dir === 'incoming' ? '#22c55e' : '#ef4444';
+            [['outgoing','#ef4444'], ['incoming','#22c55e'], ['passthrough','#f59e0b']].forEach(([dir, color]) => {
                 defs.append('marker')
                     .attr('id', `arrow-${dir}`)
                     .attr('viewBox', '0 0 10 6')
@@ -1572,49 +1553,64 @@
                     .attr('fill', color);
             });
 
-            // Draw lines from signer to transfer boxes to counterparties
+            // Draw flow lines with proper direction
             const lineGroup = gEl.append('g');
+            const signerCenterY = signerY + SIGNER_H / 2;
+            const signerRight = signerX + SIGNER_W;
+
             boxPositions.forEach(({ edge: e, x: boxX, y: boxY }) => {
-                const isOutgoing = e.source === signerAddr;
-                const counterAddr = isOutgoing ? e.target : e.source;
-                const cpY = cpPositions.get(counterAddr);
-                const lineColor = isOutgoing ? '#ef4444' : '#22c55e';
-                const arrowId = isOutgoing ? 'arrow-outgoing' : 'arrow-incoming';
-
-                // Line from signer to box
-                const signerCenterY = signerY + SIGNER_H / 2;
                 const boxCenterY = boxY + BOX_H / 2;
+                const boxLeft = boxX;
+                const boxRight = boxX + BOX_W;
+                const signerIsSource = e.source === signerAddr;
+                const signerIsTarget = e.target === signerAddr;
 
-                lineGroup.append('path')
-                    .attr('d', `M${signerX + SIGNER_W},${signerCenterY} Q${(signerX + SIGNER_W + boxX) / 2},${boxCenterY} ${boxX},${boxCenterY}`)
-                    .attr('fill', 'none')
-                    .attr('stroke', lineColor)
-                    .attr('stroke-width', 1.5)
-                    .attr('stroke-dasharray', '6,4')
-                    .attr('stroke-opacity', 0.7)
-                    .attr('marker-end', isOutgoing ? `url(#${arrowId})` : null);
-
-                // Line from box to counterparty
-                if (cpY !== undefined) {
-                    const cpCenterY = cpY + CP_H / 2;
+                const drawLine = (x1, y1, x2, y2, color, arrowId) => {
                     lineGroup.append('path')
-                        .attr('d', `M${boxX + BOX_W},${boxCenterY} Q${(boxX + BOX_W + cpX) / 2},${cpCenterY} ${cpX},${cpCenterY}`)
+                        .attr('d', `M${x1},${y1} Q${(x1 + x2) / 2},${y2} ${x2},${y2}`)
                         .attr('fill', 'none')
-                        .attr('stroke', lineColor)
+                        .attr('stroke', color)
                         .attr('stroke-width', 1.5)
                         .attr('stroke-dasharray', '6,4')
                         .attr('stroke-opacity', 0.7)
-                        .attr('marker-end', `url(#${arrowId})`);
+                        .attr('marker-end', `url(#arrow-${arrowId})`);
+                };
+
+                if (signerIsSource) {
+                    // Outgoing: signer → box → target
+                    drawLine(signerRight, signerCenterY, boxLeft, boxCenterY, '#ef4444', 'outgoing');
+                    const cpY = cpPositions.get(e.target);
+                    if (cpY !== undefined) {
+                        drawLine(boxRight, boxCenterY, cpX, cpY + CP_H / 2, '#ef4444', 'outgoing');
+                    }
+                } else if (signerIsTarget) {
+                    // Incoming: source → box → signer (right to left)
+                    const cpY = cpPositions.get(e.source);
+                    if (cpY !== undefined) {
+                        drawLine(cpX, cpY + CP_H / 2, boxRight, boxCenterY, '#22c55e', 'incoming');
+                    }
+                    drawLine(boxLeft, boxCenterY, signerRight, signerCenterY, '#22c55e', 'incoming');
+                } else {
+                    // Pass-through: source(cp) → box → target(cp) — both on right
+                    const srcY = cpPositions.get(e.source);
+                    const tgtY = cpPositions.get(e.target);
+                    if (srcY !== undefined) {
+                        drawLine(cpX, srcY + CP_H / 2, boxRight, boxCenterY, '#f59e0b', 'passthrough');
+                    }
+                    if (tgtY !== undefined) {
+                        drawLine(boxRight, boxCenterY, cpX, tgtY + CP_H / 2, '#f59e0b', 'passthrough');
+                    }
                 }
             });
 
             // Draw transfer boxes in center column
             const boxGroup = gEl.append('g');
             boxPositions.forEach(({ edge: e, x, y }) => {
-                const isOutgoing = e.source === signerAddr;
-                const bgColor = isOutgoing ? '#fef2f2' : '#f0fdf4';
-                const borderColor = isOutgoing ? '#fecaca' : '#bbf7d0';
-                const textColor = isOutgoing ? '#dc2626' : '#16a34a';
+                const signerIsSource = e.source === signerAddr;
+                const signerIsTarget = e.target === signerAddr;
+                const bgColor = signerIsSource ? '#fef2f2' : signerIsTarget ? '#f0fdf4' : '#fffbeb';
+                const borderColor = signerIsSource ? '#fecaca' : signerIsTarget ? '#bbf7d0' : '#fde68a';
+                const textColor = signerIsSource ? '#dc2626' : signerIsTarget ? '#16a34a' : '#d97706';
                 const tokenColor = getTokenColor(e.token_symbol);
                 const amount = formatNumber(e.amount);
                 const symbol = e.token_symbol || '';
@@ -1645,7 +1641,7 @@
                     .attr('fill', textColor)
                     .attr('font-size', '12px')
                     .attr('font-weight', '500')
-                    .text(`${amount} ${symbol} [${e.stepNum}]`);
+                    .text(`${amount} ${symbol} [${e.stepLabel}]`);
             });
 
             // Draw signer node
@@ -1753,7 +1749,7 @@
 
             // Center view
             const contentWidth = cpX + CP_W + MARGIN.right;
-            const contentHeight = boxStartY + flowEdges.length * BOX_SPACING + 50;
+            const contentHeight = boxStartY + totalBoxHeight + 50;
             const scale = Math.min(width / contentWidth, height / contentHeight, 1) * 0.85;
             const translateX = (width - contentWidth * scale) / 2;
             const translateY = Math.max(10, (height - contentHeight * scale) / 2);
@@ -2125,6 +2121,7 @@
                 const steppedEdges = d3Edges
                     .filter(e => e.ins_index !== null && e.ins_index !== undefined && e.type !== 'funded_by')
                     .sort((a, b) => a.ins_index - b.ins_index);
+                assignStepLabels(steppedEdges);
                 steppedEdges.forEach((e, i) => { e.stepNum = i + 1; });
 
                 stepBadges = g.append('g')
@@ -2133,8 +2130,12 @@
                     .join('g')
                     .attr('class', 'step-badge');
 
-                stepBadges.append('circle')
-                    .attr('r', 9)
+                stepBadges.append('rect')
+                    .attr('x', d => d.stepLabel.length > 2 ? -13 : -9)
+                    .attr('y', -9)
+                    .attr('width', d => d.stepLabel.length > 2 ? 26 : 18)
+                    .attr('height', 18)
+                    .attr('rx', 9)
                     .attr('fill', '#1a1a2e')
                     .attr('stroke', '#60a5fa')
                     .attr('stroke-width', 1.5);
@@ -2145,7 +2146,7 @@
                     .attr('fill', '#60a5fa')
                     .attr('font-size', '9px')
                     .attr('font-weight', 'bold')
-                    .text(d => d.stepNum);
+                    .text(d => d.stepLabel);
             }
 
             // Create labels
@@ -2827,6 +2828,7 @@
                 const steppedEdges = d3Edges
                     .filter(e => e.ins_index !== null && e.ins_index !== undefined && e.type !== 'funded_by')
                     .sort((a, b) => a.ins_index - b.ins_index);
+                assignStepLabels(steppedEdges);
                 steppedEdges.forEach((e, i) => { e.stepNum = i + 1; });
 
                 stepBadges = g.append('g')
@@ -2835,8 +2837,12 @@
                     .join('g')
                     .attr('class', 'step-badge');
 
-                stepBadges.append('circle')
-                    .attr('r', 9)
+                stepBadges.append('rect')
+                    .attr('x', d => d.stepLabel.length > 2 ? -13 : -9)
+                    .attr('y', -9)
+                    .attr('width', d => d.stepLabel.length > 2 ? 26 : 18)
+                    .attr('height', 18)
+                    .attr('rx', 9)
                     .attr('fill', '#1a1a2e')
                     .attr('stroke', '#60a5fa')
                     .attr('stroke-width', 1.5);
@@ -2847,7 +2853,7 @@
                     .attr('fill', '#60a5fa')
                     .attr('font-size', '9px')
                     .attr('font-weight', 'bold')
-                    .text(d => d.stepNum);
+                    .text(d => d.stepLabel);
             }
 
             // Create labels
@@ -2949,6 +2955,21 @@
             setTimeout(() => {
                 toast.classList.remove('show');
             }, 4000);
+        }
+
+        function assignStepLabels(edges) {
+            // Count edges per ins_index
+            const counts = {};
+            edges.forEach(e => { counts[e.ins_index] = (counts[e.ins_index] || 0) + 1; });
+            // Assign sub-indexes: "2" for solo, "2.1", "2.2" for shared ins_index
+            const seen = {};
+            edges.forEach(e => {
+                seen[e.ins_index] = (seen[e.ins_index] || 0) + 1;
+                e.stepLabel = counts[e.ins_index] > 1
+                    ? `${e.ins_index}.${seen[e.ins_index]}`
+                    : `${e.ins_index}`;
+            });
+            return edges;
         }
 
         function formatNumber(num) {

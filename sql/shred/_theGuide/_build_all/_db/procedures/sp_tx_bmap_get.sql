@@ -393,26 +393,28 @@ BEGIN
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
         WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id);
 
-        -- Add pool addresses as nodes (from tx_swap.amm_id for swaps in display window)
+        -- Add pool addresses as nodes (from tx_guide.pool_address_id for swaps in display window)
         INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
         SELECT DISTINCT
-            pool_addr.id,
-            pool_addr.address,
-            COALESCE(pool_addr.label, 'pool'),
-            COALESCE(pool_addr.address_type, 'pool'),
+            pa.id,
+            pa.address,
+            COALESCE(pa.label, 'pool'),
+            COALESCE(pa.address_type, 'pool'),
             0,
             NULL
-        FROM tx_swap s
-        JOIN tmp_display_window w ON w.tx_id = s.tx_id
-        JOIN tx_pool p ON p.id = s.amm_id
-        JOIN tx_address pool_addr ON pool_addr.id = p.pool_address_id
-        WHERE s.amm_id IS NOT NULL;
+        FROM tx_guide g
+        JOIN tmp_display_window w ON w.tx_id = g.tx_id
+        JOIN tx_address pa ON pa.id = g.pool_address_id
+        WHERE g.pool_address_id IS NOT NULL;
 
-        -- Enrich pool nodes with pool_label
+        -- Enrich pool nodes with pool_label from tx_guide
         UPDATE tmp_nodes n
-        JOIN tx_pool p ON p.pool_address_id = n.address_id
-        SET n.pool_label = p.pool_label
-        WHERE p.pool_label IS NOT NULL;
+        SET n.pool_label = (
+            SELECT g.pool_label FROM tx_guide g
+            WHERE g.pool_address_id = n.address_id AND g.pool_label IS NOT NULL
+            LIMIT 1
+        )
+        WHERE n.pool_label IS NULL AND n.address_type = 'pool';
 
         -- Enrich mint nodes with token_name
         UPDATE tmp_nodes n
@@ -427,7 +429,7 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
         CREATE TEMPORARY TABLE tmp_token_bal (
             address_id INT UNSIGNED PRIMARY KEY,
-            balance DECIMAL(30,6),
+            balance DECIMAL(30,9),
             block_time BIGINT UNSIGNED,
             guide_id BIGINT UNSIGNED
         ) ENGINE=MEMORY;
@@ -435,7 +437,7 @@ BEGIN
         -- Get token balances from FROM side (uses idx_from_token_time)
         INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
         SELECT g.from_address_id,
-               ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 6)), 6),
+               ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
                g.block_time, g.id
         FROM tx_guide g
         WHERE g.from_address_id IN (SELECT address_id FROM tmp_nodes)
@@ -453,7 +455,7 @@ BEGIN
         -- Get token balances from TO side (uses idx_to_token_time)
         INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
         SELECT g.to_address_id,
-               ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 6)), 6),
+               ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
                g.block_time, g.id
         FROM tx_guide g
         WHERE g.to_address_id IN (SELECT address_id FROM tmp_nodes)
@@ -537,23 +539,21 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
         CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
 
-        -- Aggregate pools interacted with (from swap edges)
+        -- Aggregate pools interacted with (from swap edges in tx_guide)
         UPDATE tmp_nodes n
         SET interactions_pools = (
             SELECT JSON_ARRAYAGG(pool_info)
             FROM (
                 SELECT DISTINCT JSON_OBJECT(
-                    'address', pool_addr.address,
-                    'label', COALESCE(p.pool_label, pool_addr.address)
+                    'address', pa.address,
+                    'label', COALESCE(g.pool_label, pa.address)
                 ) AS pool_info
                 FROM tx_guide g
                 JOIN tmp_display_window_int w ON w.tx_id = g.tx_id
-                JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
-                JOIN tx_pool p ON p.id = s.amm_id
-                JOIN tx_address pool_addr ON pool_addr.id = p.pool_address_id
+                JOIN tx_address pa ON pa.id = g.pool_address_id
                 WHERE (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
-                  AND s.amm_id IS NOT NULL
-                GROUP BY pool_addr.address, p.pool_label
+                  AND g.pool_address_id IS NOT NULL
+                GROUP BY pa.address, g.pool_label
             ) pools
         )
         WHERE n.address_type IN ('wallet', 'ata', 'unknown') OR n.address_type IS NULL;
@@ -582,17 +582,16 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
         CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
 
-        -- Aggregate DEXes interacted with (from swap edges)
+        -- Aggregate DEXes interacted with (from tx_guide.dex)
         UPDATE tmp_nodes n
         SET interactions_dexes = (
             SELECT JSON_ARRAYAGG(dex_name)
             FROM (
-                SELECT DISTINCT s.name AS dex_name
+                SELECT DISTINCT g.dex AS dex_name
                 FROM tx_guide g
                 JOIN tmp_display_window_int w ON w.tx_id = g.tx_id
-                JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
                 WHERE (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
-                  AND s.name IS NOT NULL
+                  AND g.dex IS NOT NULL
             ) dexes
         )
         WHERE n.address_type IN ('wallet', 'ata', 'unknown') OR n.address_type IS NULL;
@@ -634,33 +633,34 @@ BEGIN
             -- Swap edges - route through pool when available
             -- swap_in: wallet -> pool (sending token into swap)
             -- swap_out: pool -> wallet (receiving token from swap)
+            -- dex/pool_label/pool_address_id now stored directly on tx_guide
             SELECT JSON_OBJECT(
                 'source', CASE
                     WHEN gt.type_code = 'swap_in' THEN fa.address
-                    ELSE COALESCE(pool_addr.address, fa.address)
+                    ELSE COALESCE(pa.address, fa.address)
                 END,
                 'source_label', CASE
                     WHEN gt.type_code = 'swap_in' THEN COALESCE(fa.label, fa.address_type)
-                    ELSE COALESCE(pool.pool_label, pool_addr.address, fa.label, fa.address_type)
+                    ELSE COALESCE(g.pool_label, pa.address, fa.label, fa.address_type)
                 END,
                 'target', CASE
-                    WHEN gt.type_code = 'swap_in' THEN COALESCE(pool_addr.address, ta.address)
+                    WHEN gt.type_code = 'swap_in' THEN COALESCE(pa.address, ta.address)
                     ELSE ta.address
                 END,
                 'target_label', CASE
-                    WHEN gt.type_code = 'swap_in' THEN COALESCE(pool.pool_label, pool_addr.address, ta.label, ta.address_type)
+                    WHEN gt.type_code = 'swap_in' THEN COALESCE(g.pool_label, pa.address, ta.label, ta.address_type)
                     ELSE COALESCE(ta.label, ta.address_type)
                 END,
-                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 6),
+                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 9),
                 'type', gt.type_code,
                 'token_symbol', COALESCE(tk.token_symbol, CASE WHEN g.token_id IS NULL THEN 'SOL' ELSE 'Unknown' END),
-                'dex', s.name,
-                'pool_label', pool.pool_label,
+                'dex', g.dex,
+                'pool_label', g.pool_label,
                 'ins_index', g.ins_index,
                 'signature', t.signature,
                 'block_time_utc', FROM_UNIXTIME(t.block_time),
                 'tax_bps', g.tax_bps,
-                'tax_amount', ROUND(g.tax_amount / POW(10, COALESCE(g.decimals, 9)), 6)
+                'tax_amount', ROUND(g.tax_amount / POW(10, COALESCE(g.decimals, 9)), 9)
             ) AS edge_data
             FROM tx_guide g
             JOIN tmp_display_window w ON w.tx_id = g.tx_id
@@ -669,9 +669,7 @@ BEGIN
             JOIN tx_address ta ON ta.id = g.to_address_id
             JOIN tx_guide_type gt ON gt.id = g.edge_type_id
             LEFT JOIN tx_token tk ON tk.id = g.token_id
-            LEFT JOIN tx_swap s ON s.tx_id = g.tx_id AND s.ins_index = g.ins_index
-            LEFT JOIN tx_pool pool ON pool.id = s.amm_id
-            LEFT JOIN tx_address pool_addr ON pool_addr.id = pool.pool_address_id
+            LEFT JOIN tx_address pa ON pa.id = g.pool_address_id
             WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id)
               AND gt.type_code IN ('swap_in', 'swap_out')
 
@@ -683,14 +681,14 @@ BEGIN
                 'source_label', COALESCE(fa.label, fa.address_type),
                 'target', ta.address,
                 'target_label', COALESCE(ta.label, ta.address_type),
-                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 6),
+                'amount', ROUND(g.amount / POW(10, COALESCE(g.decimals, 9)), 9),
                 'type', gt.type_code,
                 'token_symbol', COALESCE(tk.token_symbol, CASE WHEN g.token_id IS NULL THEN 'SOL' ELSE 'Unknown' END),
                 'ins_index', g.ins_index,
                 'signature', t.signature,
                 'block_time_utc', FROM_UNIXTIME(t.block_time),
                 'tax_bps', g.tax_bps,
-                'tax_amount', ROUND(g.tax_amount / POW(10, COALESCE(g.decimals, 9)), 6)
+                'tax_amount', ROUND(g.tax_amount / POW(10, COALESCE(g.decimals, 9)), 9)
             ) AS edge_data
             FROM tx_guide g
             JOIN tmp_window2 w ON w.tx_id = g.tx_id

@@ -20,6 +20,10 @@ CREATE TABLE `tx_guide` (
   `ins_index` smallint DEFAULT NULL COMMENT 'Instruction index within tx',
   `tax_bps` smallint unsigned DEFAULT NULL COMMENT 'Token tax in basis points (100=1%). NULL=no tax',
   `tax_amount` bigint unsigned DEFAULT NULL COMMENT 'Raw tax amount (same units as amount column)',
+  `dex` varchar(50) DEFAULT NULL COMMENT 'DEX name (Raydium, Orca, Jupiter, etc.)',
+  `pool_address_id` int unsigned DEFAULT NULL COMMENT 'FK to tx_address - pool/AMM address',
+  `pool_label` varchar(100) DEFAULT NULL COMMENT 'Pool label from tx_address.label',
+  `swap_direction` enum('in','out') DEFAULT NULL COMMENT 'NULL=not a swap, in=received, out=sent',
   PRIMARY KEY (`id`),
   KEY `idx_from_time` (`from_address_id`,`block_time`),
   KEY `idx_to_time` (`to_address_id`,`block_time`),
@@ -37,5 +41,7 @@ CREATE TABLE `tx_guide` (
   CONSTRAINT `tx_guide_ibfk_to` FOREIGN KEY (`to_address_id`) REFERENCES `tx_address` (`id`),
   CONSTRAINT `tx_guide_ibfk_to_ata` FOREIGN KEY (`to_token_account_id`) REFERENCES `tx_address` (`id`),
   CONSTRAINT `tx_guide_ibfk_token` FOREIGN KEY (`token_id`) REFERENCES `tx_token` (`id`),
-  CONSTRAINT `tx_guide_ibfk_tx` FOREIGN KEY (`tx_id`) REFERENCES `tx` (`id`) ON DELETE CASCADE
+  CONSTRAINT `tx_guide_ibfk_tx` FOREIGN KEY (`tx_id`) REFERENCES `tx` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `tx_guide_ibfk_pool` FOREIGN KEY (`pool_address_id`) REFERENCES `tx_address` (`id`),
+  KEY `idx_swap_direction` (`swap_direction`)
 ) ENGINE=InnoDB AUTO_INCREMENT=158766 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
