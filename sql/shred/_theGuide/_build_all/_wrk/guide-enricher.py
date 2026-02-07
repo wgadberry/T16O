@@ -139,7 +139,7 @@ def create_api_session() -> requests.Session:
 
 
 def fetch_token_meta(session: requests.Session, mint_address: str) -> Optional[Dict]:
-    """Fetch token metadata from Solscan /v2.0/token/meta"""
+    """Fetch token metadata from Solscan /v2.0/token/meta (single)"""
     url = f"{SOLSCAN_API_BASE}/token/meta"
     params = {"address": mint_address}
 
@@ -153,6 +153,24 @@ def fetch_token_meta(session: requests.Session, mint_address: str) -> Optional[D
     except requests.RequestException as e:
         print(f"    [!] API Error: {e}")
         return None
+
+
+def fetch_token_meta_multi(session: requests.Session, mint_addresses: List[str]) -> Dict[str, Dict]:
+    """Fetch token metadata for multiple addresses from Solscan /v2.0/token/meta/multi.
+    Returns dict keyed by address."""
+    url = f"{SOLSCAN_API_BASE}/token/meta/multi"
+    params = [('address[]', addr) for addr in mint_addresses]
+
+    try:
+        response = session.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('success') and data.get('data'):
+            return {item['address']: item for item in data['data'] if 'address' in item}
+        return {}
+    except requests.RequestException as e:
+        print(f"    [!] Multi-meta API Error: {e}")
+        return {}
 
 
 def fetch_pool_info(session: requests.Session, pool_address: str) -> Optional[Dict]:
@@ -187,6 +205,24 @@ def fetch_account_metadata(session: requests.Session, address: str) -> Optional[
     except requests.RequestException as e:
         print(f"    [!] Metadata API Error: {e}")
         return None
+
+
+def fetch_account_metadata_multi(session: requests.Session, addresses: List[str]) -> Dict[str, Dict]:
+    """Fetch account metadata for multiple addresses from Solscan /v2.0/account/metadata/multi.
+    Returns dict keyed by account_address."""
+    url = f"{SOLSCAN_API_BASE}/account/metadata/multi"
+    params = [('address[]', addr) for addr in addresses]
+
+    try:
+        response = session.get(url, params=params, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('success') and data.get('data'):
+            return {item['account_address']: item for item in data['data'] if 'account_address' in item}
+        return {}
+    except requests.RequestException as e:
+        print(f"    [!] account/metadata/multi API Error: {e}")
+        return {}
 
 
 # =============================================================================
@@ -264,9 +300,13 @@ def increment_token_attempt(cursor, conn, token_id: int):
     conn.commit()
 
 
+MULTI_META_BATCH_SIZE = 50
+
+
 def enrich_tokens(session, cursor, conn, limit: int, max_attempts: int,
                   delay: float, verbose: bool = True) -> Dict[str, int]:
-    """Enrich tokens with metadata from Solscan. Returns stats."""
+    """Enrich tokens with metadata from Solscan using /v2.0/token/meta/multi.
+    Fetches up to 50 addresses per API call. Returns stats."""
     stats = {'processed': 0, 'updated': 0, 'failed': 0}
 
     tokens = get_tokens_needing_metadata(cursor, limit, max_attempts)
@@ -278,52 +318,60 @@ def enrich_tokens(session, cursor, conn, limit: int, max_attempts: int,
     if verbose:
         print(f"  [tokens] Found {len(tokens)} tokens needing metadata")
 
-    for i, token in enumerate(tokens):
-        token_id = token['id']
-        mint = token['mint']
+    # Process in chunks of MULTI_META_BATCH_SIZE
+    for chunk_start in range(0, len(tokens), MULTI_META_BATCH_SIZE):
+        chunk = tokens[chunk_start:chunk_start + MULTI_META_BATCH_SIZE]
+        mint_to_token = {t['mint']: t for t in chunk}
+        chunk_num = chunk_start // MULTI_META_BATCH_SIZE + 1
+        total_chunks = (len(tokens) + MULTI_META_BATCH_SIZE - 1) // MULTI_META_BATCH_SIZE
 
         if verbose:
-            print(f"    [{i+1}/{len(tokens)}] {mint[:16]}...", end=" ")
+            print(f"    Batch {chunk_num}/{total_chunks}: fetching {len(chunk)} tokens...", end=" ")
 
         try:
-            response = fetch_token_meta(session, mint)
+            results = fetch_token_meta_multi(session, list(mint_to_token.keys()))
 
-            if response:
-                name = response.get('name')
-                symbol = response.get('symbol')
-                icon = response.get('icon')
-                decimals = response.get('decimals')
+            if verbose:
+                print(f"got {len(results)} results")
 
-                if name or symbol or decimals is not None:
-                    if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals, response):
-                        if verbose:
-                            print(f"{symbol or 'unnamed'} ({decimals} dec)")
-                        stats['updated'] += 1
+            for mint, token_info in mint_to_token.items():
+                token_id = token_info['id']
+                response = results.get(mint)
+
+                if response:
+                    name = response.get('name')
+                    symbol = response.get('symbol')
+                    icon = response.get('icon')
+                    decimals = response.get('decimals')
+
+                    if name or symbol or decimals is not None:
+                        if update_token_metadata(cursor, conn, token_id, name, symbol, icon, decimals, response):
+                            if verbose:
+                                print(f"      {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec)")
+                            stats['updated'] += 1
+                        else:
+                            increment_token_attempt(cursor, conn, token_id)
+                            stats['failed'] += 1
                     else:
-                        if verbose:
-                            print("no change")
                         increment_token_attempt(cursor, conn, token_id)
                         stats['failed'] += 1
                 else:
                     if verbose:
-                        print("empty data")
+                        print(f"      {mint[:16]}... not found")
                     increment_token_attempt(cursor, conn, token_id)
                     stats['failed'] += 1
-            else:
-                if verbose:
-                    print("not found")
-                increment_token_attempt(cursor, conn, token_id)
-                stats['failed'] += 1
+
+                stats['processed'] += 1
 
         except Exception as e:
             if verbose:
                 print(f"error: {e}")
-            increment_token_attempt(cursor, conn, token_id)
-            stats['failed'] += 1
+            for token_info in chunk:
+                increment_token_attempt(cursor, conn, token_info['id'])
+                stats['failed'] += 1
+                stats['processed'] += 1
 
-        stats['processed'] += 1
-
-        if delay > 0 and i < len(tokens) - 1:
+        if delay > 0 and chunk_start + MULTI_META_BATCH_SIZE < len(tokens):
             time.sleep(delay)
 
     return stats
@@ -333,13 +381,27 @@ def enrich_tokens(session, cursor, conn, limit: int, max_attempts: int,
 # Pool Enrichment (from guide-pool-enricher.py)
 # =============================================================================
 
-def get_pools_needing_enrichment(cursor, limit: int, max_attempts: int = 3) -> List[Dict]:
-    """Get pools needing enrichment (missing token accounts or labels)"""
+def get_pools_needing_labels(cursor, limit: int, max_attempts: int = 3) -> List[Dict]:
+    """Get pools missing pool_label"""
     cursor.execute("""
         SELECT a.id as address_id, a.address, p.id as pool_id
         FROM tx_pool p
         JOIN tx_address a ON a.id = p.pool_address_id
-        WHERE (p.token_account1_id IS NULL OR p.pool_label IS NULL)
+        WHERE p.pool_label IS NULL
+          AND COALESCE(p.attempt_cnt, 0) < %s
+        LIMIT %s
+    """, (max_attempts, limit))
+    return [{'address_id': row[0], 'address': row[1], 'pool_id': row[2]}
+            for row in cursor.fetchall()]
+
+
+def get_pools_needing_structure(cursor, limit: int, max_attempts: int = 3) -> List[Dict]:
+    """Get pools missing structural data (token accounts, program, etc.)"""
+    cursor.execute("""
+        SELECT a.id as address_id, a.address, p.id as pool_id
+        FROM tx_pool p
+        JOIN tx_address a ON a.id = p.pool_address_id
+        WHERE p.token_account1_id IS NULL
           AND COALESCE(p.attempt_cnt, 0) < %s
         LIMIT %s
     """, (max_attempts, limit))
@@ -497,60 +559,143 @@ def update_pool_from_api(cursor, conn, pool_address_id: int, pool_id: int,
 
 def enrich_pools(session, cursor, conn, limit: int, max_attempts: int,
                  delay: float, verbose: bool = True) -> Dict[str, int]:
-    """Enrich pools with data from Solscan. Returns stats."""
-    stats = {'processed': 0, 'updated': 0, 'not_found': 0, 'failed': 0}
+    """Enrich pools with data from Solscan. Returns stats.
+    Phase 1: Batch-fetch labels via /account/metadata/multi (50 at a time)
+    Phase 2: Individual /market/info for pools missing structural data
+    """
+    stats = {'processed': 0, 'updated': 0, 'labels': 0, 'not_found': 0, 'failed': 0, 'backfill_created': 0, 'backfill_updated': 0}
 
-    pools = get_pools_needing_enrichment(cursor, limit, max_attempts)
-    if not pools:
+    # Phase 0: Run sp_tx_pool_backfill to enrich from local data before hitting APIs
+    try:
+        cursor.execute("CALL sp_tx_pool_backfill(@created, @updated, @accounts)")
+        try:
+            while cursor.nextset():
+                pass
+        except:
+            pass
+        cursor.execute("SELECT @created, @updated, @accounts")
+        row = cursor.fetchone()
+        bf_created = row[0] or 0
+        bf_updated = row[1] or 0
+        bf_accounts = row[2] or 0
+        stats['backfill_created'] = bf_created
+        stats['backfill_updated'] = bf_updated
+        if verbose and (bf_created > 0 or bf_updated > 0 or bf_accounts > 0):
+            print(f"  [pools] Phase 0: backfill created={bf_created}, updated={bf_updated}, accounts_copied={bf_accounts}")
+    except Exception as e:
         if verbose:
-            print("  [pools] No pools need enrichment")
-        return stats
+            print(f"  [pools] Phase 0: backfill error: {e}")
 
-    if verbose:
-        print(f"  [pools] Found {len(pools)} pools needing enrichment")
-
-    for i, pool in enumerate(pools):
-        address = pool['address']
-        address_id = pool['address_id']
-        pool_id = pool['pool_id']
-
+    # Phase 1: Batch label enrichment
+    label_pools = get_pools_needing_labels(cursor, limit, max_attempts)
+    if label_pools:
         if verbose:
-            print(f"    [{i+1}/{len(pools)}] {address[:20]}...", end=" ")
+            print(f"  [pools] Phase 1: {len(label_pools)} pools needing labels")
 
-        increment_pool_attempt(cursor, conn, pool_id)
+        for chunk_start in range(0, len(label_pools), MULTI_META_BATCH_SIZE):
+            chunk = label_pools[chunk_start:chunk_start + MULTI_META_BATCH_SIZE]
+            addr_to_pool = {p['address']: p for p in chunk}
+            chunk_num = chunk_start // MULTI_META_BATCH_SIZE + 1
+            total_chunks = (len(label_pools) + MULTI_META_BATCH_SIZE - 1) // MULTI_META_BATCH_SIZE
 
-        # Fetch market info
-        api_data = fetch_pool_info(session, address)
-
-        if not api_data:
             if verbose:
-                print("not found")
-            stats['not_found'] += 1
-            stats['processed'] += 1
-            if delay > 0:
+                print(f"    Batch {chunk_num}/{total_chunks}: fetching {len(chunk)} labels...", end=" ")
+
+            try:
+                metadata_map = fetch_account_metadata_multi(session, list(addr_to_pool.keys()))
+
+                if verbose:
+                    print(f"got {len(metadata_map)} results")
+
+                for address, pool_info in addr_to_pool.items():
+                    pool_id = pool_info['pool_id']
+                    meta = metadata_map.get(address)
+                    label = meta.get('account_label') if meta else None
+
+                    if label:
+                        cursor.execute("""
+                            UPDATE tx_pool SET pool_label = %s, attempt_cnt = 0
+                            WHERE id = %s AND pool_label IS NULL
+                        """, (label, pool_id))
+                        # Also update tx_address.label
+                        cursor.execute("""
+                            UPDATE tx_address SET label = %s
+                            WHERE id = %s AND label IS NULL
+                        """, (label, pool_info['address_id']))
+                        conn.commit()
+                        if verbose:
+                            print(f"      {address[:16]}... {label}")
+                        stats['labels'] += 1
+                        stats['updated'] += 1
+                    else:
+                        increment_pool_attempt(cursor, conn, pool_id)
+                        stats['failed'] += 1
+
+                    stats['processed'] += 1
+
+            except Exception as e:
+                if verbose:
+                    print(f"error: {e}")
+                for pool_info in chunk:
+                    increment_pool_attempt(cursor, conn, pool_info['pool_id'])
+                    stats['failed'] += 1
+                    stats['processed'] += 1
+
+            if delay > 0 and chunk_start + MULTI_META_BATCH_SIZE < len(label_pools):
                 time.sleep(delay)
-            continue
+    else:
+        if verbose:
+            print("  [pools] Phase 1: no pools need labels")
 
-        # Fetch metadata for label
-        if delay > 0:
-            time.sleep(delay)
-        metadata = fetch_account_metadata(session, address)
-        label = metadata.get('account_label') if metadata else None
+    # Phase 2: Individual structural enrichment via /market/info
+    struct_pools = get_pools_needing_structure(cursor, limit, max_attempts)
+    if struct_pools:
+        if verbose:
+            print(f"  [pools] Phase 2: {len(struct_pools)} pools needing structure")
 
-        if update_pool_from_api(cursor, conn, address_id, pool_id, api_data, label):
-            program = api_data.get('program_id', 'unknown')
+        for i, pool in enumerate(struct_pools):
+            address = pool['address']
+            address_id = pool['address_id']
+            pool_id = pool['pool_id']
+
             if verbose:
-                print(f"{program[:20]}...")
-            stats['updated'] += 1
-        else:
-            if verbose:
-                print("failed")
-            stats['failed'] += 1
+                print(f"    [{i+1}/{len(struct_pools)}] {address[:20]}...", end=" ")
 
-        stats['processed'] += 1
+            increment_pool_attempt(cursor, conn, pool_id)
 
-        if delay > 0 and i < len(pools) - 1:
-            time.sleep(delay)
+            api_data = fetch_pool_info(session, address)
+
+            if not api_data:
+                if verbose:
+                    print("not found")
+                stats['not_found'] += 1
+                stats['processed'] += 1
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+
+            # Use existing pool_label if already set from Phase 1
+            cursor.execute("SELECT pool_label FROM tx_pool WHERE id = %s", (pool_id,))
+            row = cursor.fetchone()
+            existing_label = row[0] if row else None
+
+            if update_pool_from_api(cursor, conn, address_id, pool_id, api_data, existing_label):
+                program = api_data.get('program_id', 'unknown')
+                if verbose:
+                    print(f"{program[:20]}...")
+                stats['updated'] += 1
+            else:
+                if verbose:
+                    print("failed")
+                stats['failed'] += 1
+
+            stats['processed'] += 1
+
+            if delay > 0 and i < len(struct_pools) - 1:
+                time.sleep(delay)
+    else:
+        if verbose:
+            print("  [pools] Phase 2: no pools need structure")
 
     return stats
 

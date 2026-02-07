@@ -225,10 +225,10 @@ def get_max_guide_id(cursor) -> int:
 # Guide Loading (from guide-loader.py)
 # =============================================================================
 
-def get_guide_batch_size(cursor, default: int = 1000) -> int:
-    """Get guide batch size from config table (runtime-editable)."""
+def get_config_int(cursor, config_key: str, default: int) -> int:
+    """Get an integer config value from config table (runtime-editable)."""
     try:
-        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', 'guide_batch_size'))
+        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', config_key))
         result = cursor.fetchone()
         try:
             while cursor.nextset():
@@ -242,6 +242,16 @@ def get_guide_batch_size(cursor, default: int = 1000) -> int:
     except Exception:
         pass
     return default
+
+
+def get_guide_batch_size(cursor, default: int = 1000) -> int:
+    """Get guide batch size from config table (runtime-editable)."""
+    return get_config_int(cursor, 'guide_batch_size', default)
+
+
+def get_guide_batch_interval(cursor, default: int = 30) -> int:
+    """Get guide batch interval (seconds) from config table (runtime-editable)."""
+    return get_config_int(cursor, 'guide_batch_interval', default)
 
 
 def get_pending_activity_count(cursor) -> int:
@@ -880,6 +890,9 @@ Examples:
                         else:
                             print(f"[{timestamp}] No changes\n")
 
+                    # Re-read interval from config (runtime-editable)
+                    interval = get_guide_batch_interval(cursor, args.interval)
+
                     # Close connection before sleeping
                     try:
                         cursor.close()
@@ -887,7 +900,7 @@ Examples:
                     except:
                         pass
 
-                    time.sleep(args.interval)
+                    time.sleep(interval)
 
                     # Reconnect after sleep
                     conn = get_db_connection()

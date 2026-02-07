@@ -108,11 +108,10 @@ BEGIN
           AND s.amount_1 = g.amount
         JOIN tx_program p ON p.id = s.program_id
         LEFT JOIN tx_pool pool ON pool.id = s.amm_id
-        LEFT JOIN tx_address pa ON pa.id = pool.pool_address_id
         SET
             g.dex = p.name,
             g.pool_address_id = pool.pool_address_id,
-            g.pool_label = pa.label,
+            g.pool_label = pool.pool_label,
             g.swap_direction = 'in',
             g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'swap_in')
         WHERE g.tx_id >= v_start AND g.tx_id < v_end
@@ -128,11 +127,10 @@ BEGIN
           AND s.amount_2 = g.amount
         JOIN tx_program p ON p.id = s.program_id
         LEFT JOIN tx_pool pool ON pool.id = s.amm_id
-        LEFT JOIN tx_address pa ON pa.id = pool.pool_address_id
         SET
             g.dex = p.name,
             g.pool_address_id = pool.pool_address_id,
-            g.pool_label = pa.label,
+            g.pool_label = pool.pool_label,
             g.swap_direction = 'out',
             g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'swap_out')
         WHERE g.tx_id >= v_start AND g.tx_id < v_end
@@ -140,6 +138,26 @@ BEGIN
           AND g.edge_type_id = (SELECT id FROM tx_guide_type WHERE type_code = 'spl_transfer');
 
         SET v_swap_count = v_swap_count + ROW_COUNT();
+
+        -- ============================================================
+        -- POOL ENRICHMENT: Non-swap edges where from/to is a pool
+        -- ============================================================
+
+        -- from_address is a pool
+        UPDATE tx_guide g
+        JOIN tx_pool p ON p.pool_address_id = g.from_address_id
+        SET g.pool_address_id = p.pool_address_id,
+            g.pool_label = p.pool_label
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.pool_address_id IS NULL;
+
+        -- to_address is a pool
+        UPDATE tx_guide g
+        JOIN tx_pool p ON p.pool_address_id = g.to_address_id
+        SET g.pool_address_id = p.pool_address_id,
+            g.pool_label = p.pool_label
+        WHERE g.tx_id >= v_start AND g.tx_id < v_end
+          AND g.pool_address_id IS NULL;
 
         -- ============================================================
         -- OTHER ACTIVITY EDGES (activities with guide_type but no swap/transfer)
