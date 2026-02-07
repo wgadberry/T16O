@@ -1,7 +1,7 @@
 -- tx_guide table
 -- Generated from t16o_db instance
 
-DROP TABLE IF EXISTS ;
+DROP TABLE IF EXISTS tx_guide;
 
 CREATE TABLE `tx_guide` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -18,6 +18,16 @@ CREATE TABLE `tx_guide` (
   `source_id` tinyint unsigned DEFAULT NULL COMMENT 'FK to tx_guide_source',
   `source_row_id` bigint unsigned DEFAULT NULL COMMENT 'Row ID in source table',
   `ins_index` smallint DEFAULT NULL COMMENT 'Instruction index within tx',
+  `fee` bigint unsigned DEFAULT NULL COMMENT 'Transaction base fee (lamports)',
+  `priority_fee` bigint unsigned DEFAULT NULL COMMENT 'Transaction priority fee (lamports)',
+  `from_token_pre_balance` bigint unsigned DEFAULT NULL COMMENT 'Source token balance before tx',
+  `from_token_post_balance` bigint unsigned DEFAULT NULL COMMENT 'Source token balance after tx',
+  `to_token_pre_balance` bigint unsigned DEFAULT NULL COMMENT 'Dest token balance before tx',
+  `to_token_post_balance` bigint unsigned DEFAULT NULL COMMENT 'Dest token balance after tx',
+  `from_sol_pre_balance` bigint unsigned DEFAULT NULL COMMENT 'Source SOL balance before tx',
+  `from_sol_post_balance` bigint unsigned DEFAULT NULL COMMENT 'Source SOL balance after tx',
+  `to_sol_pre_balance` bigint unsigned DEFAULT NULL COMMENT 'Dest SOL balance before tx',
+  `to_sol_post_balance` bigint unsigned DEFAULT NULL COMMENT 'Dest SOL balance after tx',
   `tax_bps` smallint unsigned DEFAULT NULL COMMENT 'Token tax in basis points (100=1%). NULL=no tax',
   `tax_amount` bigint unsigned DEFAULT NULL COMMENT 'Raw tax amount (same units as amount column)',
   `dex` varchar(50) DEFAULT NULL COMMENT 'DEX name (Raydium, Orca, Jupiter, etc.)',
@@ -25,6 +35,7 @@ CREATE TABLE `tx_guide` (
   `pool_label` varchar(100) DEFAULT NULL COMMENT 'Pool label from tx_address.label',
   `swap_direction` enum('in','out') DEFAULT NULL COMMENT 'NULL=not a swap, in=received, out=sent',
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_guide_edge` (`tx_id`,`from_address_id`,`to_address_id`,`token_id`,`amount`,`edge_type_id`,`ins_index`),
   KEY `idx_from_time` (`from_address_id`,`block_time`),
   KEY `idx_to_time` (`to_address_id`,`block_time`),
   KEY `idx_from_ata` (`from_token_account_id`),
@@ -34,6 +45,7 @@ CREATE TABLE `tx_guide` (
   KEY `idx_token` (`token_id`),
   KEY `idx_edge_type` (`edge_type_id`),
   KEY `idx_source` (`source_id`,`source_row_id`),
+  KEY `idx_swap_direction` (`swap_direction`),
   CONSTRAINT `tx_guide_ibfk_edge_type` FOREIGN KEY (`edge_type_id`) REFERENCES `tx_guide_type` (`id`),
   CONSTRAINT `tx_guide_ibfk_from` FOREIGN KEY (`from_address_id`) REFERENCES `tx_address` (`id`),
   CONSTRAINT `tx_guide_ibfk_from_ata` FOREIGN KEY (`from_token_account_id`) REFERENCES `tx_address` (`id`),
@@ -42,6 +54,5 @@ CREATE TABLE `tx_guide` (
   CONSTRAINT `tx_guide_ibfk_to_ata` FOREIGN KEY (`to_token_account_id`) REFERENCES `tx_address` (`id`),
   CONSTRAINT `tx_guide_ibfk_token` FOREIGN KEY (`token_id`) REFERENCES `tx_token` (`id`),
   CONSTRAINT `tx_guide_ibfk_tx` FOREIGN KEY (`tx_id`) REFERENCES `tx` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `tx_guide_ibfk_pool` FOREIGN KEY (`pool_address_id`) REFERENCES `tx_address` (`id`),
-  KEY `idx_swap_direction` (`swap_direction`)
+  CONSTRAINT `tx_guide_ibfk_pool` FOREIGN KEY (`pool_address_id`) REFERENCES `tx_address` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=158766 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

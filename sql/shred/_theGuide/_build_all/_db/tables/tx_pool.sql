@@ -12,6 +12,7 @@ CREATE TABLE `tx_pool` (
   `token_account1_id` int unsigned DEFAULT NULL COMMENT 'FK to tx_address - vault/token account 1',
   `token_account2_id` int unsigned DEFAULT NULL COMMENT 'FK to tx_address - vault/token account 2',
   `lp_token_id` bigint DEFAULT NULL COMMENT 'FK to tx_token - LP token mint',
+  `pool_label` varchar(200) DEFAULT NULL COMMENT 'Human-readable pool label from tx_address.label',
   `first_seen_tx_id` bigint DEFAULT NULL COMMENT 'FK to tx - first transaction seen',
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

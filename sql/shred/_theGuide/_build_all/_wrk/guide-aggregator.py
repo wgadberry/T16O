@@ -225,35 +225,42 @@ def get_max_guide_id(cursor) -> int:
 # Guide Loading (from guide-loader.py)
 # =============================================================================
 
+def get_guide_batch_size(cursor, default: int = 1000) -> int:
+    """Get guide batch size from config table (runtime-editable)."""
+    try:
+        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', 'guide_batch_size'))
+        result = cursor.fetchone()
+        try:
+            while cursor.nextset():
+                pass
+        except:
+            pass
+        if result:
+            value = result[0] if isinstance(result, tuple) else result.get('config_value')
+            if value:
+                return int(value)
+    except Exception:
+        pass
+    return default
+
+
 def get_pending_activity_count(cursor) -> int:
-    """Get count of unprocessed activities."""
-    cursor.execute("SELECT COUNT(*) FROM tx_activity WHERE guide_loaded = 0")
+    """Get count of tx records not yet guide-loaded (bit 32)."""
+    cursor.execute("SELECT COUNT(*) FROM tx WHERE tx_state & 32 = 0")
     return cursor.fetchone()[0]
 
 
-def run_guide_loader(cursor, conn, batch_size: int = 10000) -> int:
+def run_guide_loader(cursor, conn, batch_size: int = 1000) -> tuple:
     """
     Execute single batch of sp_tx_guide_loader with deadlock retry.
-    Determines safe range from pending activities (readiness gate).
-    Returns guide_count.
+    Proc selects next batch_size tx records where tx_state bit 32 is unset.
+    Returns (guide_count, last_tx_id).
     """
-    # Readiness gate: find range of shredded but unprocessed tx_ids
-    cursor.execute("""
-        SELECT MIN(tx_id), MAX(tx_id)
-        FROM tx_activity WHERE guide_loaded = 0
-    """)
-    row = cursor.fetchone()
-    if not row or row[0] is None:
-        return 0
-
-    start_tx_id, end_tx_id = row
-
     for attempt in range(MAX_DEADLOCK_RETRIES):
         try:
             cursor.execute("SET @rows = 0, @last = 0")
-            cursor.execute("CALL sp_tx_guide_loader(%s, %s, %s, @rows, @last)",
-                           (batch_size, start_tx_id, end_tx_id))
-            # Consume any result sets from the stored procedure
+            cursor.execute("CALL sp_tx_guide_loader(%s, @rows, @last)",
+                           (batch_size,))
             try:
                 while cursor.nextset():
                     pass
@@ -262,7 +269,7 @@ def run_guide_loader(cursor, conn, batch_size: int = 10000) -> int:
             cursor.execute("SELECT @rows, @last")
             result = cursor.fetchone()
             conn.commit()
-            return result[0] or 0
+            return (result[0] or 0, result[1] or 0)
         except mysql.connector.Error as err:
             if err.errno == 1213 and attempt < MAX_DEADLOCK_RETRIES - 1:
                 backoff = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
@@ -271,7 +278,7 @@ def run_guide_loader(cursor, conn, batch_size: int = 10000) -> int:
                 time.sleep(backoff)
             else:
                 raise
-    return 0
+    return (0, 0)
 
 
 def sync_guide_edges(cursor, conn, batch_size: int = 10000,
@@ -284,17 +291,19 @@ def sync_guide_edges(cursor, conn, batch_size: int = 10000,
     batch_num = 0
 
     while True:
-        guide = run_guide_loader(cursor, conn, batch_size)
+        # Re-read batch size from config each iteration (runtime-editable)
+        batch_size = get_guide_batch_size(cursor, batch_size)
+        guide, last_tx_id = run_guide_loader(cursor, conn, batch_size)
 
-        if guide == 0:
-            break
+        if last_tx_id == 0:
+            break  # No tx records to process
 
         batch_num += 1
         stats['batches'] += 1
         stats['guide'] += guide
 
         if verbose:
-            print(f"    Batch {batch_num}: guide={guide}")
+            print(f"    Batch {batch_num}: guide={guide} tx_id={last_tx_id} (batch_size={batch_size})")
 
         if max_batches > 0 and batch_num >= max_batches:
             if verbose:
@@ -451,9 +460,11 @@ def run_sync(cursor, conn, operations: List[str], batch_size: int = 10000,
         stats['guide']['pending'] = pending
 
         if pending > 0:
+            # Get batch size from config table (runtime-editable), fallback to parameter
+            db_batch_size = get_guide_batch_size(cursor, guide_batch_size)
             if verbose:
-                print(f"  [guide] Processing {pending:,} pending activities...")
-            result = sync_guide_edges(cursor, conn, guide_batch_size, max_batches, verbose)
+                print(f"  [guide] Processing {pending:,} pending tx (batch_size={db_batch_size})...")
+            result = sync_guide_edges(cursor, conn, db_batch_size, max_batches, verbose)
             stats['guide']['batches'] = result['batches']
             stats['guide']['edges'] = result['guide']
         else:

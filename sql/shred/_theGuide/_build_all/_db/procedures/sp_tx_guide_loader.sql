@@ -4,8 +4,6 @@ DROP PROCEDURE IF EXISTS sp_tx_guide_loader//
 
 CREATE PROCEDURE sp_tx_guide_loader(
     IN p_batch_size INT,
-    IN p_start_tx_id BIGINT,
-    IN p_end_tx_id BIGINT,
     OUT p_rows_loaded INT,
     OUT p_last_tx_id BIGINT
 )
@@ -19,52 +17,43 @@ BEGIN
     DECLARE v_create_sink_id INT UNSIGNED DEFAULT 742705;  -- CREATE_ACCOUNT sink address
     DECLARE v_other_count INT DEFAULT 0;
     DECLARE v_funding_count INT DEFAULT 0;
+    DECLARE v_bal_start BIGINT;
+    DECLARE v_bal_end BIGINT;
+    DECLARE v_bal_chunk INT DEFAULT 100;
 
-    SET p_batch_size = COALESCE(p_batch_size, 10000);
+    SET p_batch_size = COALESCE(p_batch_size, 100);
     SET p_rows_loaded = 0;
 
-    -- Determine batch range
-    IF p_start_tx_id IS NULL THEN
-        SELECT COALESCE(MAX(tx_id), 0) + 1 INTO v_start FROM tx_guide;
-    ELSE
-        SET v_start = p_start_tx_id;
-    END IF;
+    -- Pull next batch: tx records not yet guide-loaded (bit 32)
+    DROP TEMPORARY TABLE IF EXISTS tmp_batch;
+    CREATE TEMPORARY TABLE tmp_batch (
+        tx_id BIGINT PRIMARY KEY,
+        block_time BIGINT UNSIGNED,
+        fee BIGINT UNSIGNED,
+        priority_fee BIGINT UNSIGNED
+    ) ENGINE=MEMORY;
 
-    SELECT MIN(id) INTO v_end
-    FROM (SELECT id FROM tx WHERE id >= v_start ORDER BY id LIMIT p_batch_size, 1) sub;
+    INSERT INTO tmp_batch (tx_id, block_time, fee, priority_fee)
+    SELECT id, block_time, fee, priority_fee
+    FROM tx
+    WHERE tx_state & 32 = 0
+    ORDER BY id
+    LIMIT p_batch_size;
 
-    IF v_end IS NULL THEN
-        SELECT MAX(id) + 1 INTO v_end FROM tx WHERE id >= v_start;
-    END IF;
+    -- Derive range for downstream queries
+    SELECT MIN(tx_id), MAX(tx_id) + 1, MAX(tx_id)
+    INTO v_start, v_end, p_last_tx_id
+    FROM tmp_batch;
 
-    IF p_end_tx_id IS NOT NULL AND v_end > p_end_tx_id + 1 THEN
-        SET v_end = p_end_tx_id + 1;
-    END IF;
-
-    IF v_end IS NULL OR v_start >= v_end THEN
-        SET p_last_tx_id = v_start;
+    IF v_start IS NULL THEN
+        SET p_last_tx_id = 0;
         SET p_rows_loaded = 0;
-        -- No SELECT here to avoid unread result issues
-    ELSE
-        -- Create batch table
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;
-        CREATE TEMPORARY TABLE tmp_batch (
-            tx_id BIGINT PRIMARY KEY,
-            block_time BIGINT UNSIGNED,
-            fee BIGINT UNSIGNED,
-            priority_fee BIGINT UNSIGNED
-        ) ENGINE=MEMORY;
-
-        INSERT INTO tmp_batch (tx_id, block_time, fee, priority_fee)
-        SELECT id, block_time, fee, priority_fee
-        FROM tx WHERE id >= v_start AND id < v_end;
-
-        SELECT MAX(tx_id) INTO p_last_tx_id FROM tmp_batch;
-
+    ELSE
         -- ============================================================
         -- TRANSFERS: Single INSERT with dynamic edge_type mapping
         -- ============================================================
-        INSERT INTO tx_guide (
+        INSERT IGNORE INTO tx_guide (
             tx_id, block_time,
             from_address_id, to_address_id,
             from_token_account_id, to_token_account_id,
@@ -74,12 +63,10 @@ BEGIN
         )
         SELECT
             b.tx_id, b.block_time,
-            -- from_address: source owner, or mint for MINT type
             CASE
                 WHEN t.transfer_type = 'ACTIVITY_SPL_MINT' THEN COALESCE(tk.mint_address_id, v_unknown_mint_id)
                 ELSE t.source_owner_address_id
             END,
-            -- to_address: dest owner, or mint for BURN, or sink for CREATE
             CASE
                 WHEN t.transfer_type = 'ACTIVITY_SPL_BURN' THEN COALESCE(tk.mint_address_id, v_unknown_mint_id)
                 ELSE t.destination_owner_address_id
@@ -87,9 +74,8 @@ BEGIN
             t.source_address_id,
             t.destination_address_id,
             t.token_id, t.amount, t.decimals,
-            gt.id,  -- edge_type_id from join
-            1,      -- source_id: tx_transfer
-            t.id, t.ins_index,
+            gt.id,
+            1, t.id, t.ins_index,
             b.fee, b.priority_fee
         FROM tmp_batch b
         JOIN tx_transfer t ON t.tx_id = b.tx_id
@@ -107,21 +93,16 @@ BEGIN
             'ACTIVITY_SPL_CLOSE_ACCOUNT'
         )
         AND (t.source_owner_address_id IS NOT NULL OR t.transfer_type = 'ACTIVITY_SPL_MINT')
-        AND (t.destination_owner_address_id IS NOT NULL OR t.transfer_type = 'ACTIVITY_SPL_BURN')
-        ON DUPLICATE KEY UPDATE
-            amount = VALUES(amount),
-            fee = VALUES(fee),
-            priority_fee = VALUES(priority_fee);
+        AND (t.destination_owner_address_id IS NOT NULL OR t.transfer_type = 'ACTIVITY_SPL_BURN');
 
         SET v_transfer_count = ROW_COUNT();
 
         -- ============================================================
         -- SWAP ENRICHMENT: Update transfer rows with swap metadata
-        -- Matches by tx_id + token_id + amount (exact)
         -- ============================================================
 
         -- swap_in: token received (token_1 side of swap)
-        UPDATE tx_guide g
+        UPDATE IGNORE tx_guide g
         JOIN tx_swap s ON s.tx_id = g.tx_id
           AND s.token_1_id = g.token_id
           AND s.amount_1 = g.amount
@@ -141,7 +122,7 @@ BEGIN
         SET v_swap_count = ROW_COUNT();
 
         -- swap_out: token sent (token_2 side of swap)
-        UPDATE tx_guide g
+        UPDATE IGNORE tx_guide g
         JOIN tx_swap s ON s.tx_id = g.tx_id
           AND s.token_2_id = g.token_id
           AND s.amount_2 = g.amount
@@ -163,7 +144,7 @@ BEGIN
         -- ============================================================
         -- OTHER ACTIVITY EDGES (activities with guide_type but no swap/transfer)
         -- ============================================================
-        INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
+        INSERT IGNORE INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                               token_id, edge_type_id, source_id, source_row_id, ins_index,
                               fee, priority_fee)
         SELECT a.tx_id, b.block_time,
@@ -184,13 +165,12 @@ BEGIN
           AND t.id IS NULL
           AND a.account_address_id IS NOT NULL
           AND a.activity_type NOT LIKE 'ACTIVITY_%SWAP'
-          AND a.activity_type NOT LIKE '%TRANSFER%'
-        ON DUPLICATE KEY UPDATE edge_type_id = VALUES(edge_type_id);
+          AND a.activity_type NOT LIKE '%TRANSFER%';
 
         SET v_other_count = ROW_COUNT();
 
         -- ============================================================
-        -- FUNDING EDGES (funder→funded SOL transfer aggregation)
+        -- FUNDING EDGES (funder->funded SOL transfer aggregation)
         -- ============================================================
         DROP TEMPORARY TABLE IF EXISTS tmp_funded_addresses;
         CREATE TEMPORARY TABLE tmp_funded_addresses (
@@ -245,292 +225,264 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_funded_addresses;
 
         -- ============================================================
-        -- Populate balances with LAG (look backwards if not in same tx)
-        -- Uses token_account_address_id for precise ATA matching
+        -- Populate balances in chunks of v_bal_chunk tx_ids at a time
         -- ============================================================
+        SET v_bal_start = v_start;
 
-        -- from_token_post_balance: match by token account (ATA) for accuracy
-        UPDATE tx_guide g
-        SET g.from_token_post_balance = COALESCE(
-            -- First: try same transaction, match by token account
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.token_account_address_id = g.from_token_account_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- Fallback: same tx by owner (for swap edges without token_account_id)
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.owner_address_id = g.from_address_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- LAG: most recent prior balance for this token account
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.token_account_address_id = g.from_token_account_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1),
-            -- LAG fallback: by owner
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.owner_address_id = g.from_address_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1)
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND g.from_token_post_balance IS NULL AND g.token_id IS NOT NULL;
+        bal_loop: WHILE v_bal_start < v_end DO
+            SET v_bal_end = LEAST(v_bal_start + v_bal_chunk, v_end);
 
-        -- to_token_post_balance: match by token account (ATA) for accuracy
-        UPDATE tx_guide g
-        SET g.to_token_post_balance = COALESCE(
-            -- First: try same transaction, match by token account
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.token_account_address_id = g.to_token_account_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- Fallback: same tx by owner (for swap edges without token_account_id)
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.owner_address_id = g.to_address_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- LAG: most recent prior balance for this token account
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.token_account_address_id = g.to_token_account_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1),
-            -- LAG fallback: by owner
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.owner_address_id = g.to_address_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1)
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND g.to_token_post_balance IS NULL AND g.token_id IS NOT NULL;
+            -- from_token_post_balance
+            UPDATE tx_guide g
+            SET g.from_token_post_balance = COALESCE(
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.token_account_address_id = g.from_token_account_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.owner_address_id = g.from_address_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.token_account_address_id = g.from_token_account_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.owner_address_id = g.from_address_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1)
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND g.from_token_post_balance IS NULL AND g.token_id IS NOT NULL;
 
-        -- from_sol_post_balance: same tx first, then most recent prior
-        UPDATE tx_guide g
-        SET g.from_sol_post_balance = COALESCE(
-            -- First: try same transaction
-            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
-             WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.from_address_id
-             LIMIT 1),
-            -- LAG: most recent prior SOL balance for this address
-            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
-             JOIN tx t ON t.id = sbc.tx_id
-             WHERE sbc.address_id = g.from_address_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, sbc.id DESC
-             LIMIT 1)
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end AND g.from_sol_post_balance IS NULL;
+            -- to_token_post_balance
+            UPDATE tx_guide g
+            SET g.to_token_post_balance = COALESCE(
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.token_account_address_id = g.to_token_account_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.owner_address_id = g.to_address_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.token_account_address_id = g.to_token_account_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.owner_address_id = g.to_address_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1)
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND g.to_token_post_balance IS NULL AND g.token_id IS NOT NULL;
 
-        -- to_sol_post_balance: same tx first, then most recent prior
-        UPDATE tx_guide g
-        SET g.to_sol_post_balance = COALESCE(
-            -- First: try same transaction
-            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
-             WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.to_address_id
-             LIMIT 1),
-            -- LAG: most recent prior SOL balance for this address
-            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
-             JOIN tx t ON t.id = sbc.tx_id
-             WHERE sbc.address_id = g.to_address_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, sbc.id DESC
-             LIMIT 1)
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end AND g.to_sol_post_balance IS NULL;
+            -- from_sol_post_balance
+            UPDATE tx_guide g
+            SET g.from_sol_post_balance = COALESCE(
+                (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+                 WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.from_address_id
+                 LIMIT 1),
+                (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+                 JOIN tx t ON t.id = sbc.tx_id
+                 WHERE sbc.address_id = g.from_address_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, sbc.id DESC
+                 LIMIT 1)
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end AND g.from_sol_post_balance IS NULL;
 
-        -- ============================================================
-        -- Default mint addresses to 0 (they don't hold balances)
-        -- ============================================================
-        UPDATE tx_guide g
-        JOIN tx_address a ON a.id = g.from_address_id
-        SET g.from_token_post_balance = 0, g.from_sol_post_balance = 0
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND a.address_type = 'mint'
-          AND (g.from_token_post_balance IS NULL OR g.from_sol_post_balance IS NULL);
+            -- to_sol_post_balance
+            UPDATE tx_guide g
+            SET g.to_sol_post_balance = COALESCE(
+                (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+                 WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.to_address_id
+                 LIMIT 1),
+                (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+                 JOIN tx t ON t.id = sbc.tx_id
+                 WHERE sbc.address_id = g.to_address_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, sbc.id DESC
+                 LIMIT 1)
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end AND g.to_sol_post_balance IS NULL;
 
-        UPDATE tx_guide g
-        JOIN tx_address a ON a.id = g.to_address_id
-        SET g.to_token_post_balance = 0, g.to_sol_post_balance = 0
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND a.address_type = 'mint'
-          AND (g.to_token_post_balance IS NULL OR g.to_sol_post_balance IS NULL);
+            -- Default mint addresses post-balance to 0
+            UPDATE tx_guide g
+            JOIN tx_address a ON a.id = g.from_address_id
+            SET g.from_token_post_balance = 0, g.from_sol_post_balance = 0
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND a.address_type = 'mint'
+              AND (g.from_token_post_balance IS NULL OR g.from_sol_post_balance IS NULL);
 
-        -- ============================================================
-        -- Populate PRE-balances (for tax detection)
-        -- Uses token_account_address_id for precise ATA matching
-        -- ============================================================
+            UPDATE tx_guide g
+            JOIN tx_address a ON a.id = g.to_address_id
+            SET g.to_token_post_balance = 0, g.to_sol_post_balance = 0
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND a.address_type = 'mint'
+              AND (g.to_token_post_balance IS NULL OR g.to_sol_post_balance IS NULL);
 
-        -- from_token_pre_balance: match by token account (ATA) for accuracy
-        UPDATE tx_guide g
-        SET g.from_token_pre_balance = COALESCE(
-            -- First: try same transaction's pre_balance, match by token account
-            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.token_account_address_id = g.from_token_account_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- Fallback: same tx by owner
-            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.owner_address_id = g.from_address_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- LAG: most recent prior post_balance for this token account
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.token_account_address_id = g.from_token_account_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1),
-            -- LAG fallback: by owner
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.owner_address_id = g.from_address_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1),
-            0  -- Default to 0 if no prior balance
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND g.from_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
+            -- from_token_pre_balance
+            UPDATE tx_guide g
+            SET g.from_token_pre_balance = COALESCE(
+                (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.token_account_address_id = g.from_token_account_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.owner_address_id = g.from_address_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.token_account_address_id = g.from_token_account_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.owner_address_id = g.from_address_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1),
+                0
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND g.from_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
 
-        -- to_token_pre_balance: match by token account (ATA) for accuracy
-        UPDATE tx_guide g
-        SET g.to_token_pre_balance = COALESCE(
-            -- First: try same transaction's pre_balance, match by token account
-            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.token_account_address_id = g.to_token_account_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- Fallback: same tx by owner
-            (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
-             WHERE tbc.tx_id = g.tx_id
-               AND tbc.owner_address_id = g.to_address_id
-               AND tbc.token_id = g.token_id
-             LIMIT 1),
-            -- LAG: most recent prior post_balance for this token account
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.token_account_address_id = g.to_token_account_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1),
-            -- LAG fallback: by owner
-            (SELECT tbc.post_balance FROM tx_token_balance_change tbc
-             JOIN tx t ON t.id = tbc.tx_id
-             WHERE tbc.owner_address_id = g.to_address_id
-               AND tbc.token_id = g.token_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, tbc.id DESC
-             LIMIT 1),
-            0  -- Default to 0 if no prior balance
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND g.to_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
+            -- to_token_pre_balance
+            UPDATE tx_guide g
+            SET g.to_token_pre_balance = COALESCE(
+                (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.token_account_address_id = g.to_token_account_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.pre_balance FROM tx_token_balance_change tbc
+                 WHERE tbc.tx_id = g.tx_id
+                   AND tbc.owner_address_id = g.to_address_id
+                   AND tbc.token_id = g.token_id
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.token_account_address_id = g.to_token_account_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1),
+                (SELECT tbc.post_balance FROM tx_token_balance_change tbc
+                 JOIN tx t ON t.id = tbc.tx_id
+                 WHERE tbc.owner_address_id = g.to_address_id
+                   AND tbc.token_id = g.token_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, tbc.id DESC
+                 LIMIT 1),
+                0
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND g.to_token_pre_balance IS NULL AND g.token_id IS NOT NULL;
 
-        -- from_sol_pre_balance: same tx first, then most recent prior post_balance
-        UPDATE tx_guide g
-        SET g.from_sol_pre_balance = COALESCE(
-            -- First: try same transaction's pre_balance
-            (SELECT sbc.pre_balance FROM tx_sol_balance_change sbc
-             WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.from_address_id
-             LIMIT 1),
-            -- LAG: most recent prior SOL post_balance for this address
-            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
-             JOIN tx t ON t.id = sbc.tx_id
-             WHERE sbc.address_id = g.from_address_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, sbc.id DESC
-             LIMIT 1),
-            0
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end AND g.from_sol_pre_balance IS NULL;
+            -- from_sol_pre_balance
+            UPDATE tx_guide g
+            SET g.from_sol_pre_balance = COALESCE(
+                (SELECT sbc.pre_balance FROM tx_sol_balance_change sbc
+                 WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.from_address_id
+                 LIMIT 1),
+                (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+                 JOIN tx t ON t.id = sbc.tx_id
+                 WHERE sbc.address_id = g.from_address_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, sbc.id DESC
+                 LIMIT 1),
+                0
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end AND g.from_sol_pre_balance IS NULL;
 
-        -- to_sol_pre_balance: same tx first, then most recent prior post_balance
-        UPDATE tx_guide g
-        SET g.to_sol_pre_balance = COALESCE(
-            -- First: try same transaction's pre_balance
-            (SELECT sbc.pre_balance FROM tx_sol_balance_change sbc
-             WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.to_address_id
-             LIMIT 1),
-            -- LAG: most recent prior SOL post_balance for this address
-            (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
-             JOIN tx t ON t.id = sbc.tx_id
-             WHERE sbc.address_id = g.to_address_id
-               AND t.block_time < g.block_time
-             ORDER BY t.block_time DESC, sbc.id DESC
-             LIMIT 1),
-            0
-        )
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end AND g.to_sol_pre_balance IS NULL;
+            -- to_sol_pre_balance
+            UPDATE tx_guide g
+            SET g.to_sol_pre_balance = COALESCE(
+                (SELECT sbc.pre_balance FROM tx_sol_balance_change sbc
+                 WHERE sbc.tx_id = g.tx_id AND sbc.address_id = g.to_address_id
+                 LIMIT 1),
+                (SELECT sbc.post_balance FROM tx_sol_balance_change sbc
+                 JOIN tx t ON t.id = sbc.tx_id
+                 WHERE sbc.address_id = g.to_address_id
+                   AND t.block_time < g.block_time
+                 ORDER BY t.block_time DESC, sbc.id DESC
+                 LIMIT 1),
+                0
+            )
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end AND g.to_sol_pre_balance IS NULL;
 
-        -- Default mint addresses pre-balance to 0
-        UPDATE tx_guide g
-        JOIN tx_address a ON a.id = g.from_address_id
-        SET g.from_token_pre_balance = 0, g.from_sol_pre_balance = 0
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND a.address_type = 'mint'
-          AND (g.from_token_pre_balance IS NULL OR g.from_sol_pre_balance IS NULL);
+            -- Default mint addresses pre-balance to 0
+            UPDATE tx_guide g
+            JOIN tx_address a ON a.id = g.from_address_id
+            SET g.from_token_pre_balance = 0, g.from_sol_pre_balance = 0
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND a.address_type = 'mint'
+              AND (g.from_token_pre_balance IS NULL OR g.from_sol_pre_balance IS NULL);
 
-        UPDATE tx_guide g
-        JOIN tx_address a ON a.id = g.to_address_id
-        SET g.to_token_pre_balance = 0, g.to_sol_pre_balance = 0
-        WHERE g.tx_id >= v_start AND g.tx_id < v_end
-          AND a.address_type = 'mint'
-          AND (g.to_token_pre_balance IS NULL OR g.to_sol_pre_balance IS NULL);
+            UPDATE tx_guide g
+            JOIN tx_address a ON a.id = g.to_address_id
+            SET g.to_token_pre_balance = 0, g.to_sol_pre_balance = 0
+            WHERE g.tx_id >= v_bal_start AND g.tx_id < v_bal_end
+              AND a.address_type = 'mint'
+              AND (g.to_token_pre_balance IS NULL OR g.to_sol_pre_balance IS NULL);
+
+            SET v_bal_start = v_bal_end;
+        END WHILE;
 
         -- ============================================================
         -- Token tax detection: amount sent > amount received
-        -- Compares edge amount to receiver's actual balance change
         -- ============================================================
         UPDATE tx_guide g
         SET
-            g.tax_amount = g.amount - (g.to_token_post_balance - g.to_token_pre_balance),
+            g.tax_amount = CAST(g.amount AS SIGNED) - (CAST(g.to_token_post_balance AS SIGNED) - CAST(g.to_token_pre_balance AS SIGNED)),
             g.tax_bps = ROUND(
-                (g.amount - (g.to_token_post_balance - g.to_token_pre_balance))
-                * 10000 / g.amount
+                (CAST(g.amount AS SIGNED) - (CAST(g.to_token_post_balance AS SIGNED) - CAST(g.to_token_pre_balance AS SIGNED)))
+                / CAST(g.amount AS DECIMAL(30,10)) * 10000
             )
         WHERE g.tx_id >= v_start AND g.tx_id < v_end
           AND g.token_id IS NOT NULL
           AND g.amount > 0
           AND g.to_token_pre_balance IS NOT NULL
           AND g.to_token_post_balance IS NOT NULL
-          AND g.to_token_post_balance > g.to_token_pre_balance
-          AND g.amount > (g.to_token_post_balance - g.to_token_pre_balance)
-          AND g.amount > (g.to_token_post_balance - g.to_token_pre_balance) * 1.005
+          AND CAST(g.to_token_post_balance AS SIGNED) > CAST(g.to_token_pre_balance AS SIGNED)
+          AND CAST(g.amount AS SIGNED) > (CAST(g.to_token_post_balance AS SIGNED) - CAST(g.to_token_pre_balance AS SIGNED))
+          AND CAST(g.amount AS SIGNED) > (CAST(g.to_token_post_balance AS SIGNED) - CAST(g.to_token_pre_balance AS SIGNED)) * 1.005
           AND ROUND(
-              (g.amount - (g.to_token_post_balance - g.to_token_pre_balance))
-              * 10000 / g.amount
+              (CAST(g.amount AS SIGNED) - (CAST(g.to_token_post_balance AS SIGNED) - CAST(g.to_token_pre_balance AS SIGNED)))
+              / CAST(g.amount AS DECIMAL(30,10)) * 10000
           ) BETWEEN 100 AND 4999;
 
         -- ============================================================
-        -- Mark activities as processed
+        -- Stamp tx_state bit 32 = guide loaded
         -- ============================================================
-        UPDATE tx_activity a
-        SET a.guide_loaded = 1
-        WHERE a.tx_id >= v_start AND a.tx_id < v_end
-          AND a.guide_loaded = 0;
+        UPDATE tx t
+        JOIN tmp_batch b ON b.tx_id = t.id
+        SET t.tx_state = t.tx_state | 32;
 
-        -- Return results via OUT params (no SELECT to avoid unread result issues)
         SET p_rows_loaded = v_transfer_count + v_swap_count + v_other_count;
         DROP TEMPORARY TABLE IF EXISTS tmp_batch;
     END IF;
