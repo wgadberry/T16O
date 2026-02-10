@@ -81,6 +81,27 @@ export interface BubbleMapResponse {
   result: BubbleMapResult;
 }
 
+export interface WalletTokenTx {
+  signature: string;
+  block_time: number;
+  block_time_utc: string;
+  type: string;
+  direction: string;
+  amount: number;
+  counterparty?: string;
+  counterparty_label?: string;
+  post_balance?: number;
+  dex?: string;
+  pool_label?: string;
+}
+
+export interface WalletTokenTxResponse {
+  address: string;
+  token_symbol?: string;
+  transactions: WalletTokenTx[];
+  error?: string;
+}
+
 export interface TimeRangeResponse {
   min_time: number;
   max_time: number;

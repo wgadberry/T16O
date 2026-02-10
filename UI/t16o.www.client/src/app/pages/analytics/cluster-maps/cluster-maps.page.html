@@ -234,6 +234,74 @@
           </div>
         </div>
       </p-card>
+
+      <!-- Wallet Transaction History -->
+      <p-card *ngIf="walletTxsAddress">
+        <ng-template #header>
+          <div class="card-header wallet-txs-header">
+            <h3>
+              <i class="pi pi-list"></i>
+              Wallet Transactions
+              <span class="wallet-txs-address">{{ walletTxsAddress.slice(0, 8) }}...{{ walletTxsAddress.slice(-6) }}</span>
+            </h3>
+            <button pButton icon="pi pi-times" class="p-button-text p-button-rounded p-button-sm" (click)="closeWalletTxs()"></button>
+          </div>
+        </ng-template>
+
+        <div *ngIf="walletTxsLoading" class="wallet-txs-loading">
+          <p-progressSpinner [style]="{ width: '30px', height: '30px' }"></p-progressSpinner>
+          <span>Loading transactions...</span>
+        </div>
+
+        <p-message *ngIf="walletTxsError" severity="error" [text]="walletTxsError" styleClass="w-full mb-3"></p-message>
+
+        <div *ngIf="!walletTxsLoading && !walletTxsError && walletTxs.length === 0" class="wallet-txs-empty">
+          No transactions found for this wallet with this token.
+        </div>
+
+        <div *ngIf="walletTxs.length > 0" class="wallet-txs-table-wrapper">
+          <table class="wallet-txs-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Dir</th>
+                <th class="text-right">Amount</th>
+                <th class="text-right">Post Balance</th>
+                <th>Counterparty</th>
+                <th>DEX / Pool</th>
+                <th>Signature</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let tx of walletTxs" class="wallet-tx-row">
+                <td class="tx-time-cell">{{ tx.block_time_utc }}</td>
+                <td>
+                  <span class="edge-type" [ngClass]="tx.type">{{ tx.type }}</span>
+                </td>
+                <td>
+                  <span class="tx-direction" [ngClass]="tx.direction">
+                    <i class="pi" [ngClass]="tx.direction === 'in' ? 'pi-arrow-down-left' : 'pi-arrow-up-right'"></i>
+                    {{ tx.direction }}
+                  </span>
+                </td>
+                <td class="text-right amount-cell">{{ tx.amount | number:'1.0-4' }}</td>
+                <td class="text-right post-balance-cell">{{ tx.post_balance !== null ? (tx.post_balance | number:'1.0-2') : '-' }}</td>
+                <td class="counterparty-cell">
+                  <span [title]="tx.counterparty || ''">{{ tx.counterparty_label || (tx.counterparty ? tx.counterparty.slice(0, 8) + '...' : '-') }}</span>
+                </td>
+                <td class="dex-cell">{{ tx.pool_label || tx.dex || '-' }}</td>
+                <td class="sig-cell">
+                  <span class="sig-link" (click)="navigateToTransaction(tx.signature)" [title]="tx.signature">
+                    {{ tx.signature.slice(0, 8) }}...
+                  </span>
+                  <button pButton icon="pi pi-copy" class="p-button-text p-button-sm copy-btn" (click)="copyToClipboard(tx.signature)" pTooltip="Copy signature"></button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </p-card>
     </div>
   </div>
 </div>

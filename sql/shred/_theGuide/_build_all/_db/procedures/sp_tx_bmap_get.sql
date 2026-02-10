@@ -358,6 +358,7 @@ BEGIN
             balance DECIMAL(30,9) DEFAULT 0,
             sol_balance DECIMAL(20,9) DEFAULT NULL,
             funded_by VARCHAR(44) DEFAULT NULL,
+            last_tx_time BIGINT UNSIGNED DEFAULT NULL,
             -- Interaction summaries (aggregated from edges)
             interactions_pools JSON DEFAULT NULL,
             interactions_programs JSON DEFAULT NULL,
@@ -476,6 +477,92 @@ BEGIN
         SET n.balance = COALESCE(tb.balance, 0);
 
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
+
+        -- ==========================================================================
+        -- STEP 5a-bis: Inject top 20 token holders as nodes (even if not in tx window)
+        -- Scans ALL tx_guide rows for this token to find wallets with highest balances
+        -- Uses same ON DUPLICATE KEY pattern as STEP 5a but without node filter
+        -- ==========================================================================
+        DROP TEMPORARY TABLE IF EXISTS tmp_holder_bal;
+        CREATE TEMPORARY TABLE tmp_holder_bal (
+            address_id INT UNSIGNED PRIMARY KEY,
+            balance DECIMAL(30,9),
+            block_time BIGINT UNSIGNED,
+            guide_id BIGINT UNSIGNED
+        ) ENGINE=MEMORY;
+
+        -- Scan FROM side for all addresses holding this token (up to v_block_time)
+        INSERT INTO tmp_holder_bal (address_id, balance, block_time, guide_id)
+        SELECT g.from_address_id,
+               ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
+               g.block_time, g.id
+        FROM tx_guide g
+        WHERE g.token_id = v_token_id
+          AND g.block_time <= v_block_time
+          AND g.from_token_post_balance IS NOT NULL
+        ON DUPLICATE KEY UPDATE
+            balance = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
+                        VALUES(balance), tmp_holder_bal.balance),
+            block_time = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
+                        VALUES(block_time), tmp_holder_bal.block_time),
+            guide_id = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
+                        VALUES(guide_id), tmp_holder_bal.guide_id);
+
+        -- Scan TO side for all addresses holding this token (up to v_block_time)
+        INSERT INTO tmp_holder_bal (address_id, balance, block_time, guide_id)
+        SELECT g.to_address_id,
+               ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
+               g.block_time, g.id
+        FROM tx_guide g
+        WHERE g.token_id = v_token_id
+          AND g.block_time <= v_block_time
+          AND g.to_token_post_balance IS NOT NULL
+        ON DUPLICATE KEY UPDATE
+            balance = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
+                        VALUES(balance), tmp_holder_bal.balance),
+            block_time = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
+                        VALUES(block_time), tmp_holder_bal.block_time),
+            guide_id = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
+                        VALUES(guide_id), tmp_holder_bal.guide_id);
+
+        -- Copy existing node address_ids to avoid MySQL "Can't reopen table" error
+        DROP TEMPORARY TABLE IF EXISTS tmp_existing_nodes;
+        CREATE TEMPORARY TABLE tmp_existing_nodes AS
+        SELECT address_id FROM tmp_nodes;
+
+        -- Select top 20 holders into a temp table (materializes ORDER BY + LIMIT)
+        -- Only include wallets (not mints, programs, pools, vaults, etc.)
+        DROP TEMPORARY TABLE IF EXISTS tmp_top_holders;
+        CREATE TEMPORARY TABLE tmp_top_holders AS
+        SELECT h.address_id, h.balance
+        FROM tmp_holder_bal h
+        JOIN tx_address a ON a.id = h.address_id
+        WHERE h.address_id NOT IN (SELECT address_id FROM tmp_existing_nodes)
+          AND h.balance > 0
+          AND (a.address_type IN ('wallet', 'unknown') OR a.address_type IS NULL)
+        ORDER BY h.balance DESC
+        LIMIT 20;
+
+        -- Insert top holders as new nodes
+        INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
+        SELECT th.address_id, a.address, COALESCE(a.label, a.address_type), a.address_type,
+               th.balance,
+               f.address
+        FROM tmp_top_holders th
+        JOIN tx_address a ON a.id = th.address_id
+        LEFT JOIN tx_address f ON f.id = a.funded_by_address_id;
+
+        -- Also update balances for existing nodes that had 0 balance (from STEP 5a)
+        -- but now we have a better picture from the full scan
+        -- Set last_tx_time for all nodes that have holder data
+        UPDATE tmp_nodes n
+        JOIN tmp_holder_bal h ON h.address_id = n.address_id
+        SET n.balance = IF(n.balance = 0 AND h.balance > 0, h.balance, n.balance),
+            n.last_tx_time = h.block_time;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_holder_bal;
+        DROP TEMPORARY TABLE IF EXISTS tmp_existing_nodes;
+        DROP TEMPORARY TABLE IF EXISTS tmp_top_holders;
 
         -- ==========================================================================
         -- STEP 5b: SOL balances from tx_guide post-balance columns (temp table approach)
@@ -608,6 +695,8 @@ BEGIN
                 'token_name', n.token_name,
                 'balance', ROUND(n.balance, 6),
                 'sol_balance', ROUND(COALESCE(n.sol_balance, 0), 9),
+                'last_tx_time', n.last_tx_time,
+                'last_tx_time_utc', FROM_UNIXTIME(n.last_tx_time),
                 'funded_by', n.funded_by,
                 'interactions', JSON_OBJECT(
                     'pools', COALESCE(n.interactions_pools, JSON_ARRAY()),

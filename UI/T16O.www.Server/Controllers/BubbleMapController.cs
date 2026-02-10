@@ -131,5 +131,35 @@ namespace T16O.www.Server.Controllers
 
             return Ok(result);
         }
+
+        /// <summary>
+        /// Get a wallet's transaction history with a specific token
+        /// </summary>
+        /// <param name="address">Wallet address (base58)</param>
+        /// <param name="mint_address">Token mint address (base58)</param>
+        /// <param name="limit">Max transactions to return (default: 50)</param>
+        [HttpGet("wallet-txs")]
+        [ProducesResponseType(typeof(WalletTokenTxResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(WalletTokenTxResponse), StatusCodes.Status400BadRequest)]
+        public async Task<ActionResult<WalletTokenTxResponse>> GetWalletTokenTxs(
+            [FromQuery] string address,
+            [FromQuery] string mint_address,
+            [FromQuery] int limit = 50)
+        {
+            if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(mint_address))
+            {
+                return BadRequest(new WalletTokenTxResponse { Error = "address and mint_address are required" });
+            }
+
+            _logger.LogInformation("GetWalletTokenTxs called for address={Address}, mint={Mint}", address, mint_address);
+            var result = await _bubbleMapService.GetWalletTokenTxsAsync(address, mint_address, Math.Min(limit, 100));
+
+            if (!string.IsNullOrEmpty(result.Error))
+            {
+                return StatusCode(500, result);
+            }
+
+            return Ok(result);
+        }
     }
 }

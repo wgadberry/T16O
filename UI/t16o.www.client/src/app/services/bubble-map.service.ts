@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { BubbleMapResponse, TimeRangeResponse } from '../models/bubble-map.models';
+import { BubbleMapResponse, TimeRangeResponse, WalletTokenTxResponse } from '../models/bubble-map.models';
 
 export interface BubbleMapQueryParams {
   token_name?: string;
@@ -63,5 +63,14 @@ export class BubbleMapService {
       `${this.apiUrl}/fetch-wallet`,
       { address }
     );
+  }
+
+  getWalletTokenTxs(address: string, mintAddress: string, limit: number = 50): Observable<WalletTokenTxResponse> {
+    const params = new HttpParams()
+      .set('address', address)
+      .set('mint_address', mintAddress)
+      .set('limit', limit.toString());
+
+    return this.http.get<WalletTokenTxResponse>(`${this.apiUrl}/wallet-txs`, { params });
   }
 }

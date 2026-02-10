@@ -8,6 +8,7 @@ namespace T16O.www.Server.Services
     {
         Task<BubbleMapResponse> GetBubbleMapDataAsync(BubbleMapQueryParams queryParams);
         Task<TimeRangeResponse> GetTimeRangeAsync(string? tokenSymbol, string? mintAddress);
+        Task<WalletTokenTxResponse> GetWalletTokenTxsAsync(string address, string mintAddress, int limit = 50);
     }
 
     public class BubbleMapService : IBubbleMapService
@@ -36,7 +37,7 @@ namespace T16O.www.Server.Services
                     await connection.OpenAsync();
 
                     // Use CALL syntax with positional ? placeholders like MySqlConnector expects
-                    var sql = "CALL sp_tx_bmap_get_token_state(?, ?, ?, ?, ?, ?)";
+                    var sql = "CALL sp_tx_bmap_get(?, ?, ?, ?, ?, ?)";
 
                     await using var command = new MySqlCommand(sql, connection)
                     {
@@ -176,6 +177,84 @@ namespace T16O.www.Server.Services
             {
                 _logger.LogError(ex, "Error getting time range");
                 return new TimeRangeResponse { Error = $"Database error: {ex.Message}" };
+            }
+        }
+
+        public async Task<WalletTokenTxResponse> GetWalletTokenTxsAsync(string address, string mintAddress, int limit = 50)
+        {
+            try
+            {
+                await using var connection = new MySqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                var sql = @"
+                    SELECT
+                        t.signature,
+                        t.block_time,
+                        FROM_UNIXTIME(t.block_time) AS block_time_utc,
+                        gt.type_code,
+                        CASE WHEN g.from_address_id = wa.id THEN 'out' ELSE 'in' END AS direction,
+                        ROUND(g.amount / POW(10, COALESCE(g.decimals, tk.decimals, 9)), 9) AS amount,
+                        CASE WHEN g.from_address_id = wa.id THEN ca.address ELSE fa.address END AS counterparty,
+                        CASE WHEN g.from_address_id = wa.id
+                             THEN COALESCE(ca.label, ca.address_type)
+                             ELSE COALESCE(fa.label, fa.address_type)
+                        END AS counterparty_label,
+                        CASE WHEN g.from_address_id = wa.id
+                             THEN ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, tk.decimals, 9)), 9)
+                             ELSE ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, tk.decimals, 9)), 9)
+                        END AS post_balance,
+                        g.dex,
+                        g.pool_label
+                    FROM tx_guide g
+                    JOIN tx t ON t.id = g.tx_id
+                    JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+                    JOIN tx_address wa ON wa.address = @address
+                    JOIN tx_token tk ON tk.id = g.token_id
+                    JOIN tx_address mint ON mint.id = tk.mint_address_id AND mint.address = @mintAddress
+                    JOIN tx_address fa ON fa.id = g.from_address_id
+                    LEFT JOIN tx_address ca ON ca.id = g.to_address_id
+                    WHERE (g.from_address_id = wa.id OR g.to_address_id = wa.id)
+                      AND g.token_id = tk.id
+                    ORDER BY t.block_time DESC
+                    LIMIT @limit";
+
+                await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 30 };
+                command.Parameters.AddWithValue("@address", address);
+                command.Parameters.AddWithValue("@mintAddress", mintAddress);
+                command.Parameters.AddWithValue("@limit", limit);
+
+                var txs = new List<WalletTokenTx>();
+                await using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    txs.Add(new WalletTokenTx
+                    {
+                        Signature = reader.GetString(0),
+                        BlockTime = reader.GetInt64(1),
+                        BlockTimeUtc = reader.GetDateTime(2).ToString("yyyy-MM-dd HH:mm:ss"),
+                        Type = reader.GetString(3),
+                        Direction = reader.GetString(4),
+                        Amount = reader.IsDBNull(5) ? 0 : reader.GetDecimal(5),
+                        Counterparty = reader.IsDBNull(6) ? null : reader.GetString(6),
+                        CounterpartyLabel = reader.IsDBNull(7) ? null : reader.GetString(7),
+                        PostBalance = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+                        Dex = reader.IsDBNull(9) ? null : reader.GetString(9),
+                        PoolLabel = reader.IsDBNull(10) ? null : reader.GetString(10)
+                    });
+                }
+
+                return new WalletTokenTxResponse
+                {
+                    Address = address,
+                    TokenSymbol = null, // filled by caller if needed
+                    Transactions = txs
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting wallet token txs for {Address}", address);
+                return new WalletTokenTxResponse { Address = address, Error = $"Database error: {ex.Message}" };
             }
         }
     }

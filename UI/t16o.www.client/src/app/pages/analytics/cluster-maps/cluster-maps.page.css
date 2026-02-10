@@ -557,6 +557,147 @@
   color: #ef4444;
 }
 
+/* Wallet Transaction History */
+.wallet-txs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.wallet-txs-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.wallet-txs-address {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--primary-color);
+  font-weight: 400;
+}
+
+.wallet-txs-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  color: var(--text-color-secondary);
+}
+
+.wallet-txs-empty {
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--text-color-secondary);
+  font-style: italic;
+}
+
+.wallet-txs-table-wrapper {
+  overflow-x: auto;
+}
+
+.wallet-txs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.wallet-txs-table th {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-color-secondary);
+  border-bottom: 1px solid var(--surface-border);
+  white-space: nowrap;
+}
+
+.wallet-txs-table th.text-right {
+  text-align: right;
+}
+
+.wallet-tx-row td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--surface-border);
+  vertical-align: middle;
+}
+
+.wallet-tx-row:hover {
+  background: var(--surface-hover);
+}
+
+.tx-time-cell {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--text-color-secondary);
+  white-space: nowrap;
+}
+
+.tx-direction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.tx-direction.in {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.tx-direction.out {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.amount-cell {
+  font-family: monospace;
+  font-weight: 500;
+}
+
+.post-balance-cell {
+  font-family: monospace;
+  color: var(--text-color-secondary);
+}
+
+.text-right {
+  text-align: right;
+}
+
+.counterparty-cell {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dex-cell {
+  color: var(--text-color-secondary);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.sig-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.sig-link {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--primary-color);
+  cursor: pointer;
+}
+
+.sig-link:hover {
+  text-decoration: underline;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .cluster-maps-layout {

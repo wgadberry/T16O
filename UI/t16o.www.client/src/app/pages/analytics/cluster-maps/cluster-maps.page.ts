@@ -1,7 +1,7 @@
 import { Component, OnInit, OnDestroy, ElementRef, ViewChild, AfterViewInit } from '@angular/core';
 import * as d3 from 'd3';
 import { BubbleMapService, BubbleMapQueryParams } from '../../../services/bubble-map.service';
-import { BubbleMapResponse, BubbleMapNode, BubbleMapEdge } from '../../../models/bubble-map.models';
+import { BubbleMapResponse, BubbleMapNode, BubbleMapEdge, WalletTokenTx } from '../../../models/bubble-map.models';
 
 interface D3Node extends d3.SimulationNodeDatum {
   id: string;
@@ -11,6 +11,7 @@ interface D3Node extends d3.SimulationNodeDatum {
   balanceUsd: number;
   isPool: boolean;
   isProgram: boolean;
+  isHolder: boolean;
   fundedBy: string[];
   color: string;
   radius: number;
@@ -53,6 +54,12 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   selectedNode: D3Node | null = null;
   queryPanelExpanded = true;
   tokenInfoPanelExpanded = true;
+
+  // Wallet transaction panel
+  walletTxs: WalletTokenTx[] = [];
+  walletTxsLoading = false;
+  walletTxsAddress = '';
+  walletTxsError = '';
 
   // Mascot image for larger bubbles
   private readonly mascotImagePath = 'images/cfuck_mascot.jpg';
@@ -349,6 +356,14 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
     this.nodes = this.transformNodes(data.result.nodes);
     this.links = this.transformLinks(data.result.edges, this.nodes);
 
+    // Mark disconnected nodes (no edges) as holders so they cluster closer
+    const connectedIds = new Set<string>();
+    this.links.forEach(l => {
+      connectedIds.add(typeof l.source === 'string' ? l.source : l.source.id);
+      connectedIds.add(typeof l.target === 'string' ? l.target : l.target.id);
+    });
+    this.nodes.forEach(n => n.isHolder = !connectedIds.has(n.id));
+
     // Clear previous elements
     const mainGroup = this.svg.select('.main-group');
     mainGroup.selectAll('*').remove();
@@ -426,13 +441,20 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
       .text(d => d.label);
 
     // Setup simulation
+    // Holders group to the right, transaction cluster stays left-center
+    const hasHolders = this.nodes.some(n => n.isHolder);
     this.simulation = d3.forceSimulation<D3Node>(this.nodes)
       .force('link', d3.forceLink<D3Node, D3Link>(this.links)
         .id(d => d.id)
         .distance(100))
       .force('charge', d3.forceManyBody().strength(-300))
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide<D3Node>().radius(d => d.radius + 5));
+      .force('centerY', d3.forceY<D3Node>(height / 2).strength(0.05))
+      .force('collision', d3.forceCollide<D3Node>().radius(d => d.radius + 5))
+      .force('groupX', d3.forceX<D3Node>(d =>
+        hasHolders
+          ? (d.isHolder ? width * 0.75 : width * 0.35)
+          : width / 2
+      ).strength(d => hasHolders ? (d.isHolder ? 0.15 : 0.05) : 0.05));
 
     this.simulation.on('tick', () => {
       link
@@ -506,6 +528,7 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
         balanceUsd: balanceUsd,
         isPool: isPool,
         isProgram: isProgram,
+        isHolder: false,
         fundedBy: fundedBy,
         color: color,
         radius: radius
@@ -614,10 +637,50 @@ export class ClusterMapsPage implements OnInit, OnDestroy, AfterViewInit {
   private onNodeClick(event: MouseEvent, d: D3Node): void {
     event.stopPropagation();
     this.selectedNode = d;
+
+    // Load wallet transaction history if this node has a token balance
+    if (d.balance > 0 && !d.isPool && !d.isProgram && this.currentData?.result?.token?.mint) {
+      this.loadWalletTxs(d.id, this.currentData.result.token.mint);
+    } else {
+      this.walletTxs = [];
+      this.walletTxsAddress = '';
+      this.walletTxsError = '';
+    }
   }
 
   closeDetailsPanel(): void {
     this.selectedNode = null;
+    this.walletTxs = [];
+    this.walletTxsAddress = '';
+    this.walletTxsError = '';
+  }
+
+  private loadWalletTxs(address: string, mintAddress: string): void {
+    this.walletTxsLoading = true;
+    this.walletTxsAddress = address;
+    this.walletTxsError = '';
+    this.walletTxs = [];
+
+    this.bubbleMapService.getWalletTokenTxs(address, mintAddress).subscribe({
+      next: (data) => {
+        this.walletTxsLoading = false;
+        if (data.error) {
+          this.walletTxsError = data.error;
+        } else {
+          this.walletTxs = data.transactions;
+        }
+      },
+      error: (err) => {
+        this.walletTxsLoading = false;
+        this.walletTxsError = err.message || 'Failed to load transactions';
+      }
+    });
+  }
+
+  closeWalletTxs(): void {
+    this.walletTxs = [];
+    this.walletTxsAddress = '';
+    this.walletTxsError = '';
   }
 
   toggleQueryPanel(): void {

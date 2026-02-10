@@ -239,6 +239,63 @@ namespace T16O.www.Server.Models
     }
 
     /// <summary>
+    /// A single transaction row for a wallet's token activity
+    /// </summary>
+    public class WalletTokenTx
+    {
+        [JsonPropertyName("signature")]
+        public string Signature { get; set; } = string.Empty;
+
+        [JsonPropertyName("block_time")]
+        public long BlockTime { get; set; }
+
+        [JsonPropertyName("block_time_utc")]
+        public string BlockTimeUtc { get; set; } = string.Empty;
+
+        [JsonPropertyName("type")]
+        public string Type { get; set; } = string.Empty;
+
+        [JsonPropertyName("direction")]
+        public string Direction { get; set; } = string.Empty;
+
+        [JsonPropertyName("amount")]
+        public decimal Amount { get; set; }
+
+        [JsonPropertyName("counterparty")]
+        public string? Counterparty { get; set; }
+
+        [JsonPropertyName("counterparty_label")]
+        public string? CounterpartyLabel { get; set; }
+
+        [JsonPropertyName("post_balance")]
+        public decimal? PostBalance { get; set; }
+
+        [JsonPropertyName("dex")]
+        public string? Dex { get; set; }
+
+        [JsonPropertyName("pool_label")]
+        public string? PoolLabel { get; set; }
+    }
+
+    /// <summary>
+    /// Response for wallet token transaction history
+    /// </summary>
+    public class WalletTokenTxResponse
+    {
+        [JsonPropertyName("address")]
+        public string Address { get; set; } = string.Empty;
+
+        [JsonPropertyName("token_symbol")]
+        public string? TokenSymbol { get; set; }
+
+        [JsonPropertyName("transactions")]
+        public List<WalletTokenTx> Transactions { get; set; } = new();
+
+        [JsonPropertyName("error")]
+        public string? Error { get; set; }
+    }
+
+    /// <summary>
     /// Query parameters for the bubble map API
     /// </summary>
     public class BubbleMapQueryParams
