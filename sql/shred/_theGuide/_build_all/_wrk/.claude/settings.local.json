@@ -30,7 +30,8 @@
       "Bash(sqlcmd:*)",
       "Bash(rabbitmqctl export_definitions:*)",
       "Bash(docker ps:*)",
-      "Bash(docker exec:*)"
+      "Bash(docker exec:*)",
+      "Bash(wmic:*)"
     ]
   }
 }
