@@ -82,6 +82,10 @@ TX_STATE_PROCESSING = 1  # Claimed by shredder, in progress
 # Max retry attempts for detailed rows before giving up
 MAX_DETAILED_ATTEMPTS = 3
 
+# Purge completed staging rows every N batches (daemon mode)
+PURGE_EVERY_N_BATCHES = 10
+PURGE_MIN_AGE_SECONDS = 60  # Only purge rows older than this
+
 # Track completed correlations to avoid duplicate responses
 _completed_correlations = set()
 
@@ -642,6 +646,58 @@ class ShredderProcessor:
 
 
 # =============================================================================
+# Staging Cleanup
+# =============================================================================
+
+def purge_completed_staging(cursor, conn, min_age_seconds: int = PURGE_MIN_AGE_SECONDS) -> int:
+    """
+    Delete staging rows that have been fully processed (tx_state=shredded).
+    Also NULLs tx_json on fully-processed tx records (tx_state & 60 = 60)
+    to reclaim blob storage after all pipeline stages are complete.
+    Only deletes rows older than min_age_seconds to avoid racing with
+    correlation completion checks.
+    Returns number of staging rows deleted.
+    """
+    # NULL out tx_json on fully-processed tx records (decode+detail+shred+guide all done)
+    # Batch size is runtime-configurable via config table
+    json_null_limit = 50
+    try:
+        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', 'guide_batch_size_tx_json_null'))
+        result = cursor.fetchone()
+        try:
+            while cursor.nextset():
+                pass
+        except:
+            pass
+        if result:
+            val = result[0] if isinstance(result, tuple) else result.get('config_value')
+            if val:
+                json_null_limit = int(val)
+    except:
+        pass
+
+    cursor.execute("""
+        UPDATE t16o_db.tx
+        SET tx_json = NULL
+        WHERE tx_json IS NOT NULL
+          AND tx_state & 60 = 60
+        LIMIT %s
+    """, (json_null_limit,))
+    if cursor.rowcount > 0:
+        conn.commit()
+
+    cursor.execute(f"""
+        DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+        WHERE tx_state = %s
+          AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
+        LIMIT 1000
+    """, (TX_STATE_SHREDDED, min_age_seconds))
+    deleted = cursor.rowcount
+    conn.commit()
+    return deleted
+
+
+# =============================================================================
 # Daemon Mode
 # =============================================================================
 
@@ -704,6 +760,7 @@ def run_daemon(batch_size: int = 10, interval: int = 5, dry_run: bool = False):
 
     consecutive_empty = 0
     max_empty_before_slow = 10
+    batch_counter = 0
 
     while True:
         try:
@@ -717,6 +774,13 @@ def run_daemon(batch_size: int = 10, interval: int = 5, dry_run: bool = False):
 
             timestamp = datetime.now().strftime('%H:%M:%S')
             summary = processor.process_batch(batch_size, mq_channel)
+
+            # Periodic purge of completed staging rows
+            batch_counter += 1
+            if batch_counter % PURGE_EVERY_N_BATCHES == 0:
+                purged = purge_completed_staging(processor.cursor, processor.db_conn)
+                if purged > 0:
+                    print(f"[{timestamp}] Purged {purged} completed staging rows")
 
             if summary['processed'] > 0:
                 corr_info = f", completed_correlations={len(summary['correlations_completed'])}" if summary['correlations_completed'] else ""
@@ -781,6 +845,17 @@ def run_once(batch_size: int = 100, dry_run: bool = False):
             total_decoded += summary['decoded_count']
             total_detailed += summary['detailed_count']
             total_errors += summary['errors']
+
+        # Purge all completed staging rows
+        if not dry_run:
+            total_purged = 0
+            while True:
+                purged = purge_completed_staging(processor.cursor, conn, min_age_seconds=0)
+                total_purged += purged
+                if purged < 1000:
+                    break
+            if total_purged > 0:
+                print(f"  Purged {total_purged} completed staging rows")
 
         print(f"\n[DONE] Total processed: {total_processed} "
               f"(decoded={total_decoded}, detailed={total_detailed}, errors={total_errors})")

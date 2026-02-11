@@ -83,27 +83,28 @@ BEGIN
     -- PHASE 4: Batch updates
     -- =========================================================================
 
-    -- Link transfers to activity records
+    -- Link transfers to activity records (explicit JOIN, no subquery)
     UPDATE tx_transfer t
+    JOIN tmp_batch_tx_signatures b ON b.tx_id = t.tx_id AND b.is_new = 1
     JOIN tx_activity a ON a.tx_id = t.tx_id
                        AND a.ins_index = t.ins_index
                        AND a.outer_ins_index = t.outer_ins_index
     SET t.activity_id = a.id
-    WHERE t.tx_id IN (SELECT tx_id FROM tmp_batch_tx_signatures WHERE is_new = 1)
-      AND t.activity_id IS NULL;
+    WHERE t.activity_id IS NULL;
 
-    -- Link swaps to activity records
+    -- Link swaps to activity records (explicit JOIN, no subquery)
     UPDATE tx_swap s
+    JOIN tmp_batch_tx_signatures b ON b.tx_id = s.tx_id AND b.is_new = 1
     JOIN tx_activity a ON a.tx_id = s.tx_id
                        AND a.ins_index = s.ins_index
                        AND a.outer_ins_index = s.outer_ins_index
     SET s.activity_id = a.id
-    WHERE s.tx_id IN (SELECT tx_id FROM tmp_batch_tx_signatures WHERE is_new = 1)
-      AND s.activity_id IS NULL;
+    WHERE s.activity_id IS NULL;
 
-    -- Mark all new tx as shredded (add bit 4)
-    UPDATE tx SET tx_state = tx_state | 4
-    WHERE id IN (SELECT tx_id FROM tmp_batch_tx_signatures WHERE is_new = 1);
+    -- Mark all new tx as shredded (explicit JOIN, no subquery)
+    UPDATE tx t
+    JOIN tmp_batch_tx_signatures b ON b.tx_id = t.id AND b.is_new = 1
+    SET t.tx_state = t.tx_state | 4;
 
     -- Cleanup
     DROP TEMPORARY TABLE IF EXISTS tmp_batch_tx_signatures;

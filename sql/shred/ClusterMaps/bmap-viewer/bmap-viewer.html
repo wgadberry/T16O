@@ -710,6 +710,10 @@
         .tx-flow-actions .copy-btn { background: none; border: none; cursor: pointer; padding: 2px; color: #9ca3af; font-size: 12px; }
         .tx-flow-actions .copy-btn:hover { color: #3b82f6; }
 
+        .copy-addr { background: none; border: none; cursor: pointer; padding: 1px 4px; color: var(--text-secondary); font-size: 11px; opacity: 0.6; transition: opacity 0.2s, color 0.2s; vertical-align: middle; }
+        .copy-addr:hover { opacity: 1; color: var(--accent); }
+        .copy-addr.copied { color: var(--success); opacity: 1; }
+
         /* Main Layout with Left Sidebar */
         .main-layout { display: flex; gap: 15px; }
         .left-sidebar { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 15px; }
@@ -1184,13 +1188,13 @@
                     <div class="data-content">
                         ${(nodes || []).map(n => `
                             <div class="node">
-                                <div class="address">${n.address}</div>
+                                <div class="address">${n.address} <button class="copy-addr" onclick="copyAddr('${n.address}', this)" title="Copy address">\u{1F4CB}</button></div>
                                 <div class="label">${n.label || 'Unknown'}${n.pool_label ? ` - ${n.pool_label}` : ''}${n.token_name ? ` - ${n.token_name}` : ''}</div>
                                 <div class="stats">
                                     <span>Balance: <span class="stat-value">${formatNumber(n.balance)}</span></span>
                                     <span>SOL: <span class="stat-value">${n.sol_balance?.toFixed(4) || '0'}</span></span>
                                 </div>
-                                ${n.funded_by ? `<div class="label" style="margin-top: 5px;">Funded by: ${n.funded_by.slice(0, 20)}...</div>` : ''}
+                                ${n.funded_by ? `<div class="label" style="margin-top: 5px;">Funded by: ${n.funded_by.slice(0, 8)}...${n.funded_by.slice(-4)} <button class="copy-addr" onclick="copyAddr('${n.funded_by}', this)" title="Copy funder address">\u{1F4CB}</button></div>` : ''}
                                 ${n.interactions && (n.interactions.dexes?.length || n.interactions.pools?.length || n.interactions.programs?.length) ? `
                                 <div style="margin-top: 6px; font-size: 11px; color: var(--text-secondary);">
                                     ${n.interactions.dexes?.length ? `<div>DEXes: <span style="color: var(--warning);">${n.interactions.dexes.join(', ')}</span></div>` : ''}
@@ -1347,12 +1351,14 @@
                 return;
             }
 
-            // Identify the signer (wallet node)
-            let signerAddr = null;
-            for (const n of (nodes || [])) {
-                if (n.label === 'wallet' || n.label === 'Token Creator') {
-                    signerAddr = n.address;
-                    break;
+            // Identify the signer from proc-provided field, fallback to first wallet node
+            let signerAddr = currentData?.result?.txs?.signer || null;
+            if (!signerAddr) {
+                for (const n of (nodes || [])) {
+                    if (n.label === 'wallet' || n.label === 'Token Creator') {
+                        signerAddr = n.address;
+                        break;
+                    }
                 }
             }
             if (!signerAddr) signerAddr = flowEdges[0].source;
@@ -1381,7 +1387,7 @@
             // Make copyToClipboard available globally for inline handlers
             window.copyToClipboard = (text) => {
                 navigator.clipboard.writeText(text).then(() => {
-                    // Brief visual feedback could be added here
+                    showToast(`Copied ${text.slice(0,8)}...${text.slice(-4)}`, 'success');
                 }).catch(() => {});
             };
 
@@ -1398,7 +1404,7 @@
 
             // Render the actions panel
             const signerNode = nodeMap.get(signerAddr);
-            const signerLabel = signerNode?.pool_label || signerNode?.label || 'Signer';
+            const signerLabel = 'Signer';
 
             // Group edges by program/dex for instruction grouping
             const groupedActions = [];
@@ -1430,6 +1436,8 @@
             function getActionIcon(type) {
                 if (type === 'create_ata') return '<span class="action-icon create">+</span>';
                 if (type === 'close_ata') return '<span class="action-icon close">x</span>';
+                if (type === 'swap_out') return '<span class="action-icon" style="color:#22c55e">buy</span>';
+                if (type === 'swap_in') return '<span class="action-icon" style="color:#ef4444">sell</span>';
                 return '<span class="action-icon transfer">↗</span>';
             }
 
@@ -1445,6 +1453,12 @@
                 }
                 if (e.type === 'close_ata') {
                     return `Close Token Account <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span> and redeem <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol || 'SOL'}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span>`;
+                }
+                if (e.type === 'swap_out') {
+                    return `Buy <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol}</span> from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${fromLabel}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span>`;
+                }
+                if (e.type === 'swap_in') {
+                    return `Sell <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol}</span> from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${toLabel}</span>`;
                 }
                 return `Transfer from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span> for <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol || 'tokens'}</span>`;
             }
@@ -1486,274 +1500,318 @@
             // Render SVG Flow Diagram
             // ==============================
             const width = svgContainer.clientWidth || 650;
-            const height = Math.max(600, flowEdges.length * 70 + 150);
-
-            const svgEl = d3.select(svgContainer).append('svg')
-                .attr('width', width)
-                .attr('height', height)
-                .style('background', '#fafafa');
-
-            const gEl = svgEl.append('g');
-
-            // Zoom
-            const zoomBehavior = d3.zoom()
-                .scaleExtent([0.3, 3])
-                .on('zoom', (event) => gEl.attr('transform', event.transform));
-            svgEl.call(zoomBehavior);
-
-            // Layout constants
-            const MARGIN = { top: 60, right: 40, bottom: 40, left: 40 };
-            const SIGNER_W = 200;
-            const SIGNER_H = 50;
-            const BOX_W = 180;
-            const BOX_H = 32;
-            const CP_W = 220;
-            const CP_H = 55;
-            const INTRA_GROUP_SPACING = 36;  // tight spacing within same ins_index
-            const INTER_GROUP_SPACING = 58;  // larger gap between different ins_index groups
-
-            // Calculate vertical positions — bundle edges with same ins_index closer together
-            const boxStartY = MARGIN.top + 40;
-            let currentY = 0;
-            const boxPositions = flowEdges.map((e, i) => {
-                if (i > 0) {
-                    const sameGroup = e.ins_index === flowEdges[i - 1].ins_index;
-                    currentY += sameGroup ? INTRA_GROUP_SPACING : INTER_GROUP_SPACING;
-                }
-                return { edge: e, x: width / 2 - BOX_W / 2, y: boxStartY + currentY };
-            });
-
-            // Position signer on the left, vertically centered
-            const totalBoxHeight = currentY + BOX_H;
-            const signerX = MARGIN.left;
-            const signerY = boxStartY + totalBoxHeight / 2 - SIGNER_H / 2;
-
-            // Position counterparties on the right
-            const cpX = width - MARGIN.right - CP_W;
-            const cpSpacing = Math.min(70, totalBoxHeight / Math.max(counterparties.length, 1));
-            const cpStartY = boxStartY + (totalBoxHeight - counterparties.length * cpSpacing) / 2;
-            const cpPositions = new Map();
-            counterparties.forEach((cp, i) => {
-                cpPositions.set(cp.address, cpStartY + i * cpSpacing);
-            });
-
-            // Arrow markers (outgoing=red, incoming=green, passthrough=amber)
-            const defs = gEl.append('defs');
-            [['outgoing','#ef4444'], ['incoming','#22c55e'], ['passthrough','#f59e0b']].forEach(([dir, color]) => {
-                defs.append('marker')
-                    .attr('id', `arrow-${dir}`)
-                    .attr('viewBox', '0 0 10 6')
-                    .attr('refX', 8)
-                    .attr('refY', 3)
-                    .attr('markerWidth', 8)
-                    .attr('markerHeight', 6)
-                    .attr('orient', 'auto')
-                    .append('path')
-                    .attr('d', 'M0,0 L10,3 L0,6 Z')
-                    .attr('fill', color);
-            });
-
-            // Draw flow lines with proper direction
-            const lineGroup = gEl.append('g');
-            const signerCenterY = signerY + SIGNER_H / 2;
-            const signerRight = signerX + SIGNER_W;
-
-            boxPositions.forEach(({ edge: e, x: boxX, y: boxY }) => {
-                const boxCenterY = boxY + BOX_H / 2;
-                const boxLeft = boxX;
-                const boxRight = boxX + BOX_W;
-                const signerIsSource = e.source === signerAddr;
-                const signerIsTarget = e.target === signerAddr;
-
-                const drawLine = (x1, y1, x2, y2, color, arrowId) => {
-                    lineGroup.append('path')
-                        .attr('d', `M${x1},${y1} Q${(x1 + x2) / 2},${y2} ${x2},${y2}`)
-                        .attr('fill', 'none')
-                        .attr('stroke', color)
-                        .attr('stroke-width', 1.5)
-                        .attr('stroke-dasharray', '6,4')
-                        .attr('stroke-opacity', 0.7)
-                        .attr('marker-end', `url(#arrow-${arrowId})`);
-                };
-
-                if (signerIsSource) {
-                    // Outgoing: signer → box → target
-                    drawLine(signerRight, signerCenterY, boxLeft, boxCenterY, '#ef4444', 'outgoing');
-                    const cpY = cpPositions.get(e.target);
-                    if (cpY !== undefined) {
-                        drawLine(boxRight, boxCenterY, cpX, cpY + CP_H / 2, '#ef4444', 'outgoing');
-                    }
-                } else if (signerIsTarget) {
-                    // Incoming: source → box → signer (right to left)
-                    const cpY = cpPositions.get(e.source);
-                    if (cpY !== undefined) {
-                        drawLine(cpX, cpY + CP_H / 2, boxRight, boxCenterY, '#22c55e', 'incoming');
-                    }
-                    drawLine(boxLeft, boxCenterY, signerRight, signerCenterY, '#22c55e', 'incoming');
-                } else {
-                    // Pass-through: source(cp) → box → target(cp) — both on right
-                    const srcY = cpPositions.get(e.source);
-                    const tgtY = cpPositions.get(e.target);
-                    if (srcY !== undefined) {
-                        drawLine(cpX, srcY + CP_H / 2, boxRight, boxCenterY, '#f59e0b', 'passthrough');
-                    }
-                    if (tgtY !== undefined) {
-                        drawLine(boxRight, boxCenterY, cpX, tgtY + CP_H / 2, '#f59e0b', 'passthrough');
-                    }
-                }
-            });
-
-            // Draw transfer boxes in center column
-            const boxGroup = gEl.append('g');
-            boxPositions.forEach(({ edge: e, x, y }) => {
-                const signerIsSource = e.source === signerAddr;
-                const signerIsTarget = e.target === signerAddr;
-                const bgColor = signerIsSource ? '#fef2f2' : signerIsTarget ? '#f0fdf4' : '#fffbeb';
-                const borderColor = signerIsSource ? '#fecaca' : signerIsTarget ? '#bbf7d0' : '#fde68a';
-                const textColor = signerIsSource ? '#dc2626' : signerIsTarget ? '#16a34a' : '#d97706';
-                const tokenColor = getTokenColor(e.token_symbol);
-                const amount = formatNumber(e.amount);
-                const symbol = e.token_symbol || '';
-
-                // Box background
-                boxGroup.append('rect')
-                    .attr('x', x)
-                    .attr('y', y)
-                    .attr('width', BOX_W)
-                    .attr('height', BOX_H)
-                    .attr('rx', 6)
-                    .attr('fill', bgColor)
-                    .attr('stroke', borderColor)
-                    .attr('stroke-width', 1);
-
-                // Token dot
-                boxGroup.append('circle')
-                    .attr('cx', x + 14)
-                    .attr('cy', y + BOX_H / 2)
-                    .attr('r', 6)
-                    .attr('fill', tokenColor);
-
-                // Amount and symbol text
-                boxGroup.append('text')
-                    .attr('x', x + 26)
-                    .attr('y', y + BOX_H / 2)
-                    .attr('dominant-baseline', 'central')
-                    .attr('fill', textColor)
-                    .attr('font-size', '12px')
-                    .attr('font-weight', '500')
-                    .text(`${amount} ${symbol} [${e.stepLabel}]`);
-            });
-
-            // Draw signer node
-            const signerGroup = gEl.append('g');
-            signerGroup.append('rect')
-                .attr('x', signerX)
-                .attr('y', signerY)
-                .attr('width', SIGNER_W)
-                .attr('height', SIGNER_H)
-                .attr('rx', 8)
-                .attr('fill', '#fff')
-                .attr('stroke', '#e5e7eb')
-                .attr('stroke-width', 1);
-
-            // Signer badge
-            signerGroup.append('rect')
-                .attr('x', signerX + 8)
-                .attr('y', signerY + 6)
-                .attr('width', 45)
-                .attr('height', 16)
-                .attr('rx', 4)
-                .attr('fill', '#dcfce7');
-            signerGroup.append('text')
-                .attr('x', signerX + 30)
-                .attr('y', signerY + 14)
-                .attr('text-anchor', 'middle')
-                .attr('dominant-baseline', 'central')
-                .attr('fill', '#16a34a')
-                .attr('font-size', '9px')
-                .attr('font-weight', '600')
-                .text('Signer');
-
-            // Signer icon and address
-            signerGroup.append('text')
-                .attr('x', signerX + 14)
-                .attr('y', signerY + 36)
-                .attr('fill', '#3b82f6')
-                .attr('font-size', '12px')
-                .text('👛');
-            signerGroup.append('text')
-                .attr('x', signerX + 30)
-                .attr('y', signerY + 36)
-                .attr('dominant-baseline', 'central')
-                .attr('fill', '#3b82f6')
-                .attr('font-size', '11px')
-                .attr('font-family', 'monospace')
-                .text(shortAddr(signerAddr));
-
-            // Draw counterparty nodes
-            const cpGroup = gEl.append('g');
-            counterparties.forEach(cp => {
-                const y = cpPositions.get(cp.address);
-                if (y === undefined) return;
-                const n = nodeMap.get(cp.address) || {};
-                const label = n.pool_label || n.dex || n.label || n.address_type || shortAddr(cp.address);
-                const icon = getProtocolIcon(label);
-
-                cpGroup.append('rect')
-                    .attr('x', cpX)
-                    .attr('y', y)
-                    .attr('width', CP_W)
-                    .attr('height', CP_H)
-                    .attr('rx', 8)
-                    .attr('fill', '#fff')
-                    .attr('stroke', '#e5e7eb')
-                    .attr('stroke-width', 1);
-
-                // Protocol icon
-                cpGroup.append('text')
-                    .attr('x', cpX + 14)
-                    .attr('y', y + 18)
-                    .attr('fill', icon.color)
-                    .attr('font-size', '14px')
-                    .text(icon.emoji);
-
-                // Label
-                cpGroup.append('text')
-                    .attr('x', cpX + 32)
-                    .attr('y', y + 20)
-                    .attr('fill', icon.color)
-                    .attr('font-size', '12px')
-                    .attr('font-weight', '500')
-                    .text(label.length > 24 ? label.slice(0, 24) + '...' : label);
-
-                // Address
-                cpGroup.append('text')
-                    .attr('x', cpX + 14)
-                    .attr('y', y + 40)
-                    .attr('fill', '#6b7280')
-                    .attr('font-size', '10px')
-                    .attr('font-family', 'monospace')
-                    .text(shortAddr(cp.address));
-            });
+            const height = Math.max(500, 400);
 
             function getProtocolIcon(label) {
-                const lowerLabel = label.toLowerCase();
+                const lowerLabel = (label || '').toLowerCase();
                 if (lowerLabel.includes('raydium')) return { emoji: '🔮', color: '#8b5cf6' };
                 if (lowerLabel.includes('orca')) return { emoji: '🐋', color: '#f97316' };
                 if (lowerLabel.includes('jupiter')) return { emoji: '🪐', color: '#22c55e' };
                 if (lowerLabel.includes('phantom') || lowerLabel.includes('fee')) return { emoji: '👻', color: '#8b5cf6' };
                 if (lowerLabel.includes('meteora')) return { emoji: '☄️', color: '#3b82f6' };
                 if (lowerLabel.includes('pump') || lowerLabel.includes('bonding')) return { emoji: '💊', color: '#22c55e' };
+                if (lowerLabel.includes('okx') || lowerLabel.includes('router')) return { emoji: '🔄', color: '#f59e0b' };
+                if (lowerLabel.includes('pool') || lowerLabel.includes('market') || lowerLabel.includes('vault')) return { emoji: '🏦', color: '#8b5cf6' };
+                if (lowerLabel === 'wallet') return { emoji: '👛', color: '#3b82f6' };
                 return { emoji: '📍', color: '#6b7280' };
             }
 
-            // Center view
-            const contentWidth = cpX + CP_W + MARGIN.right;
-            const contentHeight = boxStartY + totalBoxHeight + 50;
-            const scale = Math.min(width / contentWidth, height / contentHeight, 1) * 0.85;
-            const translateX = (width - contentWidth * scale) / 2;
-            const translateY = Math.max(10, (height - contentHeight * scale) / 2);
-            svgEl.call(zoomBehavior.transform, d3.zoomIdentity.translate(translateX, translateY).scale(scale));
+            // Build unique graph nodes from edge addresses
+            const nodeAddrs = new Set();
+            flowEdges.forEach(e => { nodeAddrs.add(e.source); nodeAddrs.add(e.target); });
+
+            const graphNodes = [...nodeAddrs].map(addr => {
+                const n = nodeMap.get(addr) || {};
+                const isSigner = addr === signerAddr;
+                const label = isSigner ? 'Signer' : (n.pool_label || n.label || n.address_type || shortAddr(addr));
+                const icon = getProtocolIcon(label);
+                return {
+                    id: addr, label, shortAddr: shortAddr(addr), isSigner,
+                    addressType: n.address_type || 'unknown', icon,
+                    x: isSigner ? width * 0.25 : width * 0.5 + (Math.random() - 0.5) * width * 0.3,
+                    y: height * 0.5 + (Math.random() - 0.5) * height * 0.3
+                };
+            });
+
+            // Build graph links with parallel-edge offsets
+            const edgeTypeColors = {
+                'swap_in': '#8b5cf6', 'swap_out': '#8b5cf6',
+                'spl_transfer': '#3b82f6', 'sol_transfer': '#3b82f6',
+                'burn': '#ef4444', 'mint': '#22c55e',
+                'create_ata': '#06b6d4', 'close_ata': '#0891b2',
+                'default': '#6b7280'
+            };
+
+            const pairCounts = {};
+            flowEdges.forEach(e => {
+                const key = [e.source, e.target].sort().join('|');
+                pairCounts[key] = (pairCounts[key] || 0) + 1;
+            });
+
+            const pairSeen = {};
+            const graphLinks = flowEdges.map(e => {
+                const key = [e.source, e.target].sort().join('|');
+                pairSeen[key] = (pairSeen[key] || 0) + 1;
+                const total = pairCounts[key];
+                const idx = pairSeen[key];
+                const offset = (idx - (total + 1) / 2) * 20;
+                const color = edgeTypeColors[e.type] || edgeTypeColors.default;
+                return {
+                    source: e.source, target: e.target, edge: e,
+                    color, tokenColor: getTokenColor(e.token_symbol),
+                    parallelOffset: total > 1 ? offset : 0
+                };
+            });
+
+            // SVG + zoom
+            const svgEl = d3.select(svgContainer).append('svg')
+                .attr('width', width)
+                .attr('height', height)
+                .style('background', '#fafafa');
+
+            const gEl = svgEl.append('g');
+            const zoomBehavior = d3.zoom()
+                .scaleExtent([0.3, 4])
+                .on('zoom', (event) => gEl.attr('transform', event.transform));
+            svgEl.call(zoomBehavior);
+
+            // Arrow markers per color
+            const defs = gEl.append('defs');
+            const uniqueColors = [...new Set(Object.values(edgeTypeColors))];
+            uniqueColors.forEach((color, i) => {
+                defs.append('marker')
+                    .attr('id', `fa-${i}`)
+                    .attr('viewBox', '0 0 10 6')
+                    .attr('refX', 10).attr('refY', 3)
+                    .attr('markerWidth', 7).attr('markerHeight', 5)
+                    .attr('orient', 'auto')
+                    .append('path')
+                    .attr('d', 'M0,0 L10,3 L0,6 Z')
+                    .attr('fill', color);
+            });
+            const getArrowId = (color) => `fa-${uniqueColors.indexOf(color)}`;
+
+            // Drop shadow filter for nodes
+            const filter = defs.append('filter').attr('id', 'node-shadow')
+                .attr('x', '-10%').attr('y', '-10%').attr('width', '130%').attr('height', '130%');
+            filter.append('feDropShadow')
+                .attr('dx', 0).attr('dy', 1).attr('stdDeviation', 2).attr('flood-opacity', 0.1);
+
+            const NODE_MIN_W = 150, NODE_H = 42;
+            // Measure text to auto-size node widths
+            const measureCtx = document.createElement('canvas').getContext('2d');
+            measureCtx.font = '500 11px sans-serif';
+            graphNodes.forEach(d => {
+                const textW = measureCtx.measureText(d.label).width;
+                d.nodeW = Math.max(NODE_MIN_W, textW + 60); // 30px left pad + 30px right pad
+            });
+
+            // Helper: compute curved path between two points with offset
+            function edgePath(d) {
+                const sx = d.source.x, sy = d.source.y;
+                const tx = d.target.x, ty = d.target.y;
+                const dx = tx - sx, dy = ty - sy;
+                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                // Shorten line to stop at node boundaries
+                const pad = 40;
+                const ux = dx / dist, uy = dy / dist;
+                const x1 = sx + ux * pad, y1 = sy + uy * pad;
+                const x2 = tx - ux * pad, y2 = ty - uy * pad;
+                // Perpendicular offset for parallel edges
+                // Normalize direction so A→B and B→A curve to opposite sides
+                // by flipping offset when source id > target id
+                const flip = (d.source.id || '') > (d.target.id || '') ? -1 : 1;
+                const offset = d.parallelOffset * flip;
+                const nx = -uy * offset;
+                const ny = ux * offset;
+                const mx = (x1 + x2) / 2 + nx, my = (y1 + y2) / 2 + ny;
+                return { path: `M${x1},${y1} Q${mx},${my} ${x2},${y2}`, mx, my };
+            }
+
+            // Draw edges (curved paths)
+            const linkGroup = gEl.append('g');
+            const links = linkGroup.selectAll('path')
+                .data(graphLinks).join('path')
+                .attr('fill', 'none')
+                .attr('stroke', d => {
+                    if (d.edge.type === 'swap_out') return '#22c55e';
+                    if (d.edge.type === 'swap_in') return '#ef4444';
+                    return d.color;
+                })
+                .attr('stroke-width', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? 3 : 2)
+                .attr('stroke-opacity', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? 0.8 : 0.5)
+                .attr('marker-end', d => `url(#${getArrowId(d.color)})`);
+
+            // Edge midpoint dots — hover target for amount tooltip
+            const edgeDotGroup = gEl.append('g');
+            const edgeDots = edgeDotGroup.selectAll('g')
+                .data(graphLinks).join('g')
+                .style('cursor', 'pointer');
+
+            edgeDots.append('circle')
+                .attr('r', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? 12 : 8)
+                .attr('fill', d => {
+                    if (d.edge.type === 'swap_out') return '#22c55e';
+                    if (d.edge.type === 'swap_in') return '#ef4444';
+                    return d.tokenColor;
+                })
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 2);
+
+            edgeDots.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'central')
+                .attr('fill', '#fff')
+                .attr('font-size', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? '8px' : '7px')
+                .attr('font-weight', 'bold')
+                .attr('pointer-events', 'none')
+                .text(d => {
+                    if (d.edge.type === 'swap_out') return 'BUY';
+                    if (d.edge.type === 'swap_in') return 'SELL';
+                    return d.edge.stepLabel;
+                });
+
+            // Tooltip div
+            const tooltip = d3.select(svgContainer).append('div')
+                .style('position', 'absolute')
+                .style('background', 'rgba(15,15,30,0.95)')
+                .style('color', '#fff')
+                .style('padding', '8px 12px')
+                .style('border-radius', '8px')
+                .style('font-size', '12px')
+                .style('line-height', '1.5')
+                .style('pointer-events', 'none')
+                .style('opacity', 0)
+                .style('z-index', '100')
+                .style('white-space', 'nowrap')
+                .style('box-shadow', '0 4px 12px rgba(0,0,0,0.3)')
+                .style('border', '1px solid rgba(255,255,255,0.1)');
+
+            edgeDots
+                .on('mouseenter', function(event, d) {
+                    const e = d.edge;
+                    const isSwap = e.type === 'swap_in' || e.type === 'swap_out';
+                    d3.select(this).select('circle').transition().duration(150).attr('r', isSwap ? 16 : 12);
+                    const typeLabel = e.type === 'swap_out' ? 'Buy' : e.type === 'swap_in' ? 'Sell' : e.type.replace(/_/g, ' ');
+                    const typeColor = e.type === 'swap_out' ? '#22c55e' : e.type === 'swap_in' ? '#ef4444' : '#9ca3af';
+                    tooltip.html(
+                        `<strong style="color:${d.tokenColor}">[${e.stepLabel}] ${formatNumber(e.amount)} ${e.token_symbol || 'SOL'}</strong><br>` +
+                        `<span style="color:${typeColor};font-weight:600">${typeLabel}</span>` +
+                        (e.dex ? `<br>DEX: ${e.dex}` : '') +
+                        (e.pool_label ? `<br>Pool: ${e.pool_label}` : '') +
+                        (e.tax_bps ? `<br><span style="color:#ef4444">Tax: ${(e.tax_bps / 100).toFixed(1)}% (${formatNumber(e.tax_amount)} ${e.token_symbol})</span>` : '') +
+                        `<br><span style="color:#6b7280">${getNodeLabel(e.source)} → ${getNodeLabel(e.target)}</span>`
+                    ).style('opacity', 1);
+                    const rect = svgContainer.getBoundingClientRect();
+                    tooltip.style('left', (event.clientX - rect.left + 16) + 'px')
+                           .style('top', (event.clientY - rect.top - 10) + 'px');
+                })
+                .on('mousemove', function(event) {
+                    const rect = svgContainer.getBoundingClientRect();
+                    tooltip.style('left', (event.clientX - rect.left + 16) + 'px')
+                           .style('top', (event.clientY - rect.top - 10) + 'px');
+                })
+                .on('mouseleave', function(event, d) {
+                    const isSwap = d.edge.type === 'swap_in' || d.edge.type === 'swap_out';
+                    d3.select(this).select('circle').transition().duration(150).attr('r', isSwap ? 12 : 8);
+                    tooltip.style('opacity', 0);
+                });
+
+            // Draw nodes (draggable)
+            const nodeGroup = gEl.append('g');
+            const nodeEls = nodeGroup.selectAll('g')
+                .data(graphNodes).join('g')
+                .style('cursor', 'grab')
+                .call(d3.drag()
+                    .on('start', (event, d) => {
+                        if (!event.active) forceSim.alphaTarget(0.3).restart();
+                        d.fx = d.x; d.fy = d.y;
+                    })
+                    .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
+                    .on('end', (event, d) => {
+                        if (!event.active) forceSim.alphaTarget(0);
+                        d.fx = null; d.fy = null;
+                    })
+                );
+
+            // Node background rect
+            nodeEls.append('rect')
+                .attr('x', d => -d.nodeW / 2).attr('y', -NODE_H / 2)
+                .attr('width', d => d.nodeW).attr('height', NODE_H)
+                .attr('rx', 10)
+                .attr('fill', d => d.isSigner ? '#f0fdf4' : '#fff')
+                .attr('stroke', d => d.isSigner ? '#22c55e' : '#e5e7eb')
+                .attr('stroke-width', d => d.isSigner ? 2 : 1)
+                .attr('filter', 'url(#node-shadow)');
+
+            // Signer badge
+            nodeEls.filter(d => d.isSigner).append('rect')
+                .attr('x', d => -d.nodeW / 2 + 6).attr('y', -NODE_H / 2 + 4)
+                .attr('width', 42).attr('height', 14).attr('rx', 3).attr('fill', '#dcfce7');
+            nodeEls.filter(d => d.isSigner).append('text')
+                .attr('x', d => -d.nodeW / 2 + 27).attr('y', -NODE_H / 2 + 11)
+                .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
+                .attr('fill', '#16a34a').attr('font-size', '8px').attr('font-weight', '600')
+                .text('Signer');
+
+            // Icon
+            nodeEls.append('text')
+                .attr('x', d => -d.nodeW / 2 + 14)
+                .attr('y', d => d.isSigner ? 6 : 0)
+                .attr('dominant-baseline', 'central')
+                .attr('font-size', '14px')
+                .text(d => d.icon.emoji);
+
+            // Label
+            nodeEls.append('text')
+                .attr('x', d => -d.nodeW / 2 + 30)
+                .attr('y', d => d.isSigner ? -1 : -6)
+                .attr('dominant-baseline', 'central')
+                .attr('fill', d => d.icon.color)
+                .attr('font-size', '11px').attr('font-weight', '500')
+                .text(d => d.label);
+
+            // Address
+            nodeEls.append('text')
+                .attr('x', d => -d.nodeW / 2 + 30)
+                .attr('y', d => d.isSigner ? 13 : 8)
+                .attr('dominant-baseline', 'central')
+                .attr('fill', '#9ca3af')
+                .attr('font-size', '9px').attr('font-family', 'monospace')
+                .text(d => d.shortAddr);
+
+            // Copy icon on nodes
+            nodeEls.append('text')
+                .attr('x', d => d.nodeW / 2 - 16)
+                .attr('y', d => d.isSigner ? 13 : 8)
+                .attr('dominant-baseline', 'central')
+                .attr('font-size', '10px')
+                .attr('fill', '#9ca3af')
+                .attr('cursor', 'pointer')
+                .text('\u{1F4CB}')
+                .on('click', (event, d) => {
+                    event.stopPropagation();
+                    copyAddr(d.id, null);
+                })
+                .on('mouseenter', function() { d3.select(this).attr('fill', '#3b82f6'); })
+                .on('mouseleave', function() { d3.select(this).attr('fill', '#9ca3af'); });
+
+            // Force simulation
+            const forceSim = d3.forceSimulation(graphNodes)
+                .force('link', d3.forceLink(graphLinks).id(d => d.id).distance(180).strength(0.8))
+                .force('charge', d3.forceManyBody().strength(-500))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => d.nodeW / 2 + 10))
+                .force('x', d3.forceX(d => d.isSigner ? width * 0.2 : width * 0.55).strength(0.05))
+                .on('tick', () => {
+                    graphLinks.forEach(d => {
+                        const ep = edgePath(d);
+                        d._mx = ep.mx; d._my = ep.my; d._path = ep.path;
+                    });
+                    links.attr('d', d => d._path);
+                    edgeDots.attr('transform', d => `translate(${d._mx},${d._my})`);
+                    nodeEls.attr('transform', d => `translate(${d.x},${d.y})`);
+                });
         }
 
         // Bubble Map Variables
@@ -2038,7 +2096,7 @@
                             ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
                         </div>` : ''}
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
-                            Click to fetch wallet transactions
+                            Click to copy address &bull; Double-click to fetch txns
                         </div>
                     `)
                     .style('left', (event.pageX + 10) + 'px')
@@ -2048,6 +2106,10 @@
                     tooltip.transition().duration(500).style('opacity', 0);
                 })
                 .on('click', (event, d) => {
+                    event.stopPropagation();
+                    copyAddr(d.id, null);
+                })
+                .on('dblclick', (event, d) => {
                     event.stopPropagation();
                     tooltip.style('opacity', 0);
                     fetchWalletTransactions(d.id);
@@ -2258,6 +2320,7 @@
                          title="${funder}">
                         <div class="funder-dot"></div>
                         <div class="funder-address">${funder.slice(0, 8)}...${funder.slice(-6)}</div>
+                        <button class="copy-addr" onclick="event.stopPropagation(); copyAddr('${funder}', this)" title="Copy address">\u{1F4CB}</button>
                         <div class="funder-count">${count}</div>
                     </div>
                 `;
@@ -2745,7 +2808,7 @@
                             ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
                         </div>` : ''}
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
-                            Click to fetch wallet transactions
+                            Click to copy address &bull; Double-click to fetch txns
                         </div>
                     `)
                     .style('left', (event.pageX + 10) + 'px')
@@ -2755,6 +2818,10 @@
                     tooltip.transition().duration(500).style('opacity', 0);
                 })
                 .on('click', (event, d) => {
+                    event.stopPropagation();
+                    copyAddr(d.id, null);
+                })
+                .on('dblclick', (event, d) => {
                     event.stopPropagation();
                     tooltip.style('opacity', 0);
                     fetchWalletTransactions(d.id);
@@ -2955,6 +3022,13 @@
             setTimeout(() => {
                 toast.classList.remove('show');
             }, 4000);
+        }
+
+        function copyAddr(addr, btn) {
+            navigator.clipboard.writeText(addr).then(() => {
+                if (btn) { btn.classList.add('copied'); btn.textContent = '\u2713'; setTimeout(() => { btn.classList.remove('copied'); btn.textContent = '\u{1F4CB}'; }, 1200); }
+                showToast(`Copied ${addr.slice(0,8)}...${addr.slice(-4)}`, 'success');
+            }).catch(() => {});
         }
 
         function assignStepLabels(edges) {

@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import json
+import re
 import time
 import sys
 from typing import Optional, Dict, List, Set, Tuple
@@ -935,16 +936,24 @@ class AddressHistoryWorker:
             update_fields.append("label = COALESCE(label, %s)")  # Don't overwrite existing labels
             update_values.append(label)
 
+        mapped_type = None
+
         if tags is not None:
             update_fields.append("account_tags = %s")
             update_values.append(json.dumps(tags) if tags else None)
 
             # Derive address_type from account_tags (more specific than account_type)
             tags_lower = [t.lower() for t in tags] if tags else []
-            mapped_type = None
+            label_lower = (label or '').lower()
 
-            # Priority order: most specific first
-            if 'pool' in tags_lower:
+            # Priority order: label-based vault check first (vault authorities/LP vaults
+            # often carry a 'pool' tag but are NOT pools — they own token accounts).
+            # Must exclude labels where "vault" is a token name inside parens,
+            # e.g. "Pump.fun AMM (VAULT-WSOL) Market" is a legit pool.
+            if ('vault' in label_lower
+                    and not re.search(r'\([^)]*vault[^)]*\)', label_lower)):
+                mapped_type = 'vault'
+            elif 'pool' in tags_lower:
                 mapped_type = 'pool'
             elif 'market' in tags_lower:
                 mapped_type = 'market'
@@ -999,6 +1008,52 @@ class AddressHistoryWorker:
             SET {', '.join(update_fields)}
             WHERE address = %s AND funded_by_address_id IS NULL
         """, update_values)
+
+        # Ensure tx_pool record exists for pool/lp_token addresses
+        # Label format: "Meteora (PAPER-WSOL) Pool 1" or "Raydium (KOINZ) LP Token"
+        if mapped_type in ('pool', 'lp_token') and target_id:
+            self.cursor.execute(
+                "SELECT 1 FROM tx_pool WHERE pool_address_id = %s", (target_id,))
+            if not self.cursor.fetchone():
+                program_id = None
+                token1_id = None
+                token2_id = None
+
+                if label:
+                    # DEX name is everything before the opening paren
+                    paren_match = re.match(r'^(.+?)\s*\((.+?)\)', label)
+                    if paren_match:
+                        dex_name = paren_match.group(1).strip()
+                        token_part = paren_match.group(2).strip()
+
+                        # Look up DEX program
+                        if dex_name:
+                            self.cursor.execute(
+                                "SELECT id FROM tx_program WHERE name = %s LIMIT 1",
+                                (dex_name,))
+                            prog_row = self.cursor.fetchone()
+                            if prog_row:
+                                program_id = prog_row['id']
+
+                        # Parse tokens: "PAPER-WSOL" → token1=PAPER, token2=WSOL
+                        #                "KOINZ"     → token1=KOINZ
+                        symbols = [s.strip() for s in token_part.split('-', 1)]
+                        for i, sym in enumerate(symbols[:2]):
+                            if sym:
+                                self.cursor.execute(
+                                    "SELECT id FROM tx_token WHERE token_symbol = %s LIMIT 1",
+                                    (sym,))
+                                tok_row = self.cursor.fetchone()
+                                if tok_row:
+                                    if i == 0:
+                                        token1_id = tok_row['id']
+                                    else:
+                                        token2_id = tok_row['id']
+
+                self.cursor.execute("""
+                    INSERT INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (target_id, program_id, token1_id, token2_id, label))
 
         # Create tx_funding_edge record with full details
         # Amount from Solscan is in lamports, convert to SOL

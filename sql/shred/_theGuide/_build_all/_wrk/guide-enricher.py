@@ -306,9 +306,30 @@ MULTI_META_BATCH_SIZE = 50
 def enrich_tokens(session, cursor, conn, limit: int, max_attempts: int,
                   delay: float, verbose: bool = True) -> Dict[str, int]:
     """Enrich tokens with metadata from Solscan using /v2.0/token/meta/multi.
+    Phase 0: Local label-based backfill (sp_tx_token_backfill)
+    Phase 1: Solscan API for remaining tokens.
     Fetches up to 50 addresses per API call. Returns stats."""
-    stats = {'processed': 0, 'updated': 0, 'failed': 0}
+    stats = {'processed': 0, 'updated': 0, 'failed': 0, 'backfill_updated': 0}
 
+    # Phase 0: Backfill from tx_address labels (LP tokens, etc.)
+    try:
+        cursor.execute("CALL sp_tx_token_backfill(@updated)")
+        try:
+            while cursor.nextset():
+                pass
+        except:
+            pass
+        cursor.execute("SELECT @updated")
+        row = cursor.fetchone()
+        bf_updated = row[0] or 0
+        stats['backfill_updated'] = bf_updated
+        if verbose and bf_updated > 0:
+            print(f"  [tokens] Phase 0: backfill updated={bf_updated}")
+    except Exception as e:
+        if verbose:
+            print(f"  [tokens] Phase 0: backfill error: {e}")
+
+    # Phase 1: Solscan API enrichment
     tokens = get_tokens_needing_metadata(cursor, limit, max_attempts)
     if not tokens:
         if verbose:

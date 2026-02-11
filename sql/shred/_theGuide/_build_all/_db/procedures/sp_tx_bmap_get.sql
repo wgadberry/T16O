@@ -49,6 +49,7 @@ BEGIN
     DECLARE v_signature VARCHAR(88);
     DECLARE v_block_time BIGINT UNSIGNED;
     DECLARE v_tx_id BIGINT;
+    DECLARE v_signer_address VARCHAR(44);
 
     DECLARE v_half_limit TINYINT UNSIGNED;
 
@@ -212,6 +213,12 @@ BEGIN
         -- Always show all tokens in the transaction (not just the searched token)
         -- The token_id is used for navigation (finding prev/next), but display is unfiltered
         SET v_signature_only_mode = 1;
+
+        -- Resolve signer from tx.signer_address_id
+        SELECT a.address INTO v_signer_address
+        FROM tx t
+        JOIN tx_address a ON a.id = t.signer_address_id
+        WHERE t.id = v_tx_id;
 
         -- ==========================================================================
         -- STEP 3: Build sliding window of tx_ids (prev N + current + next N)
@@ -406,6 +413,24 @@ BEGIN
         JOIN tmp_display_window w ON w.tx_id = g.tx_id
         JOIN tx_address pa ON pa.id = g.pool_address_id
         WHERE g.pool_address_id IS NOT NULL;
+
+        -- Remove vault nodes that have no visible edges in the bmap output.
+        -- Swap edges are routed through pool_address_id, so a vault's swap edges
+        -- render as pool→wallet — the vault never appears as source/target.
+        -- Keep vaults that have non-swap edges to/from non-vaults (e.g. fee transfers).
+        DELETE n FROM tmp_nodes n
+        WHERE n.address_type = 'vault'
+          AND NOT EXISTS (
+              SELECT 1 FROM tx_guide g
+              JOIN tmp_display_window w ON w.tx_id = g.tx_id
+              JOIN tx_address fa ON fa.id = g.from_address_id
+              JOIN tx_address ta ON ta.id = g.to_address_id
+              JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+              WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id OR g.token_id IS NULL)
+                AND gt.type_code NOT IN ('swap_in', 'swap_out')
+                AND NOT (fa.address_type = 'vault' AND ta.address_type = 'vault')
+                AND (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+          );
 
         -- Enrich pool nodes with pool_label from tx_guide
         UPDATE tmp_nodes n
@@ -699,6 +724,8 @@ BEGIN
             LEFT JOIN tx_token tk ON tk.id = g.token_id
             WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id OR g.token_id IS NULL)
               AND gt.type_code NOT IN ('swap_in', 'swap_out')
+              -- Filter out vault self-loops (vault activity is represented through pool routing)
+              AND NOT (fa.address_type = 'vault' AND ta.address_type = 'vault')
         ) edges;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
@@ -753,6 +780,7 @@ BEGIN
                 ),
                 'txs', JSON_OBJECT(
                     'signature', v_signature,
+                    'signer', v_signer_address,
                     'block_time', v_block_time,
                     'block_time_utc', FROM_UNIXTIME(v_block_time),
                     'edge_types', COALESCE(v_current_edge_types, JSON_ARRAY()),

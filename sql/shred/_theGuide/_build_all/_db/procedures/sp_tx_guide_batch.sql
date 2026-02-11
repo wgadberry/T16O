@@ -149,26 +149,7 @@ BEGIN
     ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
     SET p_guide_count = p_guide_count + ROW_COUNT();
 
-    -- 4. FUNDING EDGES
-    INSERT INTO tx_funding_edge (from_address_id, to_address_id, total_sol, transfer_count,
-                                  first_transfer_time, last_transfer_time)
-    SELECT t.source_owner_address_id, t.destination_owner_address_id,
-           SUM(t.amount) / 1e9, COUNT(*), MIN(b.block_time), MAX(b.block_time)
-    FROM tmp_batch b
-    JOIN tx_transfer t ON t.activity_id = b.activity_id
-    JOIN tx_address a ON a.id = t.destination_owner_address_id
-    WHERE t.token_id = v_sol_token_id
-      AND a.funded_by_address_id = t.source_owner_address_id
-      AND t.source_owner_address_id IS NOT NULL
-      AND t.destination_owner_address_id IS NOT NULL
-    GROUP BY t.source_owner_address_id, t.destination_owner_address_id
-    ON DUPLICATE KEY UPDATE
-        total_sol = total_sol + VALUES(total_sol),
-        transfer_count = transfer_count + VALUES(transfer_count),
-        last_transfer_time = GREATEST(last_transfer_time, VALUES(last_transfer_time));
-    SET p_funding_count = ROW_COUNT();
-
-    -- 5. TOKEN PARTICIPANTS
+    -- 4. TOKEN PARTICIPANTS
     -- To avoid "Can't reopen table", we use a second temporary table
     -- to flatten the data before the final aggregation.
     DROP TEMPORARY TABLE IF EXISTS tmp_part_stage;
@@ -214,7 +195,7 @@ BEGIN
         net_position = net_position + VALUES(net_position);
     SET p_participant_count = ROW_COUNT();
 
-    -- 6. FINALIZE
+    -- 5. FINALIZE
     UPDATE tx_activity a JOIN tmp_batch b ON b.activity_id = a.id SET a.guide_loaded = 1;
     
     DROP TEMPORARY TABLE IF EXISTS tmp_batch;

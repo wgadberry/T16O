@@ -16,16 +16,15 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_token_balance`(
     OUT p_count INT
 )
 BEGIN
-    -- Feature flag constant
+    
     DECLARE FEATURE_BALANCE_CHANGES INT UNSIGNED DEFAULT 1;
     DECLARE v_collect_all_balances BOOLEAN;
 
-    SET v_collect_all_balances = (p_features & FEATURE_BALANCE_CHANGES) = FEATURE_BALANCE_CHANGES;
-
-    -- Note: No DELETE needed - we only process new txs that don't have balance records yet
+    SET v_collect_all_balances = (p_features & FEATURE_BALANCE_CHANGES) = FEATURE_BALANCE_CHANGES;    
 
     INSERT IGNORE INTO tx_token_balance_change (
         tx_id,
+        block_time,
         token_account_address_id,
         owner_address_id,
         token_id,
@@ -37,6 +36,7 @@ BEGIN
     )
     SELECT
         tx.id,
+        b.block_time,
         ata.id,
         owner.id,
         tok.id,
@@ -53,6 +53,7 @@ BEGIN
         p_txs_json,
         '$.data[*]' COLUMNS (
             tx_hash VARCHAR(88) PATH '$.tx_hash',
+			block_time BIGINT PATH '$.block_id',
             NESTED PATH '$.token_bal_change[*]' COLUMNS (
                 address VARCHAR(44) PATH '$.address',
                 owner VARCHAR(44) PATH '$.owner',
@@ -65,18 +66,15 @@ BEGIN
             )
         )
     ) AS b
-    -- Join to tx table to get tx_id from signature
+    
     JOIN tx ON tx.signature = b.tx_hash
-    -- JOINs for lookups
     JOIN tx_address ata ON ata.address = b.address
     JOIN tx_address owner ON owner.address = b.owner
     JOIN tx_address mint ON mint.address = b.token_address
     JOIN tx_token tok ON tok.mint_address_id = mint.id
     WHERE b.address IS NOT NULL
       AND b.owner IS NOT NULL
-      AND b.token_address IS NOT NULL
-      -- Note: Include change_amount = 0 to capture pre/post balance data for viewer
-      -- Filter by owner: collect all OR owner is in searched list
+      AND b.token_address IS NOT NULL      
       AND (v_collect_all_balances
            OR p_searched_addresses IS NULL
            OR JSON_CONTAINS(p_searched_addresses, JSON_QUOTE(b.owner)));

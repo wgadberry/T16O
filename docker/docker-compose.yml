@@ -1,63 +1,78 @@
+version: '3.8'
+
+# T16O V1 Infrastructure
+# Usage:
+#   Start:   docker-compose -f docker-compose.v1.yml up -d
+#   Stop:    docker-compose -f docker-compose.v1.yml down
+#   Logs:    docker-compose -f docker-compose.v1.yml logs -f
+#   Status:  docker-compose -f docker-compose.v1.yml ps
+#
+# NOTE: Does NOT create database schema - run SQL scripts manually after MySQL is ready
+
 services:
-  rabbitmq:
-    image: rabbitmq:3-management-alpine
-    container_name: t16o-rabbitmq
-    hostname: t16o-rabbitmq
+  mysql:
+    image: mysql:8.0
+    container_name: t16o_v1_mysql
+    restart: unless-stopped
     ports:
-      - "5672:5672"    # AMQP port
-      - "15672:15672"  # Management UI
+      - "3396:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: t16o_db
+    command:
+      - --skip-log-bin
+      - --innodb_buffer_pool_size=8G
+      - --innodb_buffer_pool_instances=4
+      - --innodb_log_buffer_size=256M
+      - --innodb_redo_log_capacity=2G
+      - --innodb_flush_log_at_trx_commit=2
+      - --innodb_io_capacity=8000
+      - --innodb_io_capacity_max=16000
+      - --tmp_table_size=512M
+      - --max_heap_table_size=512M
+      - --sort_buffer_size=32M
+      - --join_buffer_size=32M
+      - --read_buffer_size=32M
+      - --read_rnd_buffer_size=32M
+      - --concurrent_insert=2
+      - --max_connections=200
+      - --thread_cache_size=16
+      - --table_open_cache=4000
+      - --table_definition_cache=2000
+      - --innodb_file_per_table=ON
+      - --innodb_stats_on_metadata=OFF
+    volumes:
+      - t16o_v1_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: t16o_v1_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5692:5672"    # AMQP
+      - "15692:15672"  # Management UI
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin123
-      RABBITMQ_DEFAULT_VHOST: t16o
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
-      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
-    networks:
-      - t16o-network
+      - t16o_v1_rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
-
-  mysql:
-    image: mysql:8.0
-    container_name: t16o-mysql
-    ports:
-      - "3307:3306"
-    environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: t16o
-      MYSQL_USER: t16o
-      MYSQL_PASSWORD: t16o123
-    command:
-      - --innodb-flush-log-at-trx-commit=2
-      - --innodb-buffer-pool-size=2147483648
-      - --innodb-log-buffer-size=268435456
-      - --innodb-io-capacity=8000
-      - --innodb-io-capacity-max=16000
-      - --innodb-redo-log-capacity=2147483648
-      - --skip-log-bin
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./mysql/init:/docker-entrypoint-initdb.d:ro
-    networks:
-      - t16o-network
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
 
   influxdb:
     image: influxdb:2.7
-    container_name: t16o-influxdb
+    container_name: t16o_v1_influxdb
+    restart: unless-stopped
     ports:
-      - "8086:8086"    # HTTP API + UI
+      - "8086:8086"
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: admin
@@ -67,27 +82,20 @@ services:
       DOCKER_INFLUXDB_INIT_RETENTION: 7d
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: t16o-metrics-token
     volumes:
-      - influxdb_data:/var/lib/influxdb2
-      - influxdb_config:/etc/influxdb2
-    networks:
-      - t16o-network
+      - t16o_v1_influxdb_data:/var/lib/influxdb2
+      - t16o_v1_influxdb_config:/etc/influxdb2
     healthcheck:
       test: ["CMD", "influx", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
 
 volumes:
-  rabbitmq_data:
-    driver: local
-  mysql_data:
-    driver: local
-  influxdb_data:
-    driver: local
-  influxdb_config:
-    driver: local
-
-networks:
-  t16o-network:
-    driver: bridge
+  t16o_v1_mysql_data:
+    name: t16o_v1_mysql_data
+  t16o_v1_rabbitmq_data:
+    name: t16o_v1_rabbitmq_data
+  t16o_v1_influxdb_data:
+    name: t16o_v1_influxdb_data
+  t16o_v1_influxdb_config:
+    name: t16o_v1_influxdb_config

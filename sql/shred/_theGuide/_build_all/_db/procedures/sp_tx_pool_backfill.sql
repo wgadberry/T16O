@@ -51,45 +51,64 @@ BEGIN
         p.attempt_cnt = p.attempt_cnt + 1
     WHERE (p.token1_id IS NULL OR p.token2_id IS NULL /* OR p.program_id IS NULL */ OR p.pool_label IS NULL)
       AND a.label IS NOT NULL
-      and p.attempt_cnt < 5;
+      and p.attempt_cnt < 10;
 
     SET p_labels_updated = ROW_COUNT();
 
-    -- Step 3: Copy token_account/program data from "Market" siblings to non-Market pools
+	-- Step 3: Copy token_account/program data from "Market" siblings to non-Market pools
     -- Match on DEX + token pair parsed from labels (avoids SOL/WSOL token_id mismatch)
-	-- 1) Materialize the "Market" rows into a temp table
-	CREATE TEMPORARY TABLE tmp_market_pools AS
-	SELECT fn_parse_dex(pool_label)        AS dex,
-		   fn_parse_token_pair(pool_label) AS token_pair,
-		   token_account1_id,
-		   token_account2_id,
-		   lp_token_id,
-		   program_id
-	FROM   tx_pool
-	WHERE  pool_label LIKE '%Market%'
-	  AND  token_account1_id IS NOT NULL;
+    --
+    -- Pre-compute both sides into indexed temp tables to avoid UDF calls
+    -- in the JOIN condition (was: 937 × 7617 = ~7.1M fn evaluations per cycle)
 
-	-- 2) (optional but helps)
-	ALTER TABLE tmp_market_pools
-	  ADD INDEX idx_lookup (dex, token_pair);
+    DROP TABLE IF EXISTS tmp_market_source;
+    CREATE TEMPORARY TABLE tmp_market_source (
+        dex         VARCHAR(100),
+        token_pair  VARCHAR(100),
+        token_account1_id BIGINT UNSIGNED,
+        token_account2_id BIGINT UNSIGNED,
+        lp_token_id       BIGINT UNSIGNED,
+        program_id        BIGINT UNSIGNED,
+        INDEX idx_dex_pair (dex, token_pair)
+    ) AS
+    SELECT fn_parse_dex(pool_label)        AS dex,
+           fn_parse_token_pair(pool_label) AS token_pair,
+           token_account1_id,
+           token_account2_id,
+           lp_token_id,
+           program_id
+    FROM   tx_pool
+    WHERE  pool_label LIKE '%Market%'
+      AND  token_account1_id IS NOT NULL;
 
-	-- 3) Update without self-reference
-	UPDATE tx_pool p
-	JOIN   tmp_market_pools m
-		   ON fn_parse_dex(p.pool_label)        = m.dex
-		  AND fn_parse_token_pair(p.pool_label) = m.token_pair
-	SET    p.token_account1_id = COALESCE(p.token_account1_id, m.token_account1_id),
-		   p.token_account2_id = COALESCE(p.token_account2_id, m.token_account2_id),
-		   p.lp_token_id       = COALESCE(p.lp_token_id,       m.lp_token_id),
-		   p.program_id        = COALESCE(p.program_id,         m.program_id)
-	WHERE  p.token_account1_id IS NULL
-	  AND  p.pool_label IS NOT NULL
-	  AND  p.pool_label NOT LIKE '%Market%';
+    DROP TABLE IF EXISTS tmp_target_pools;
+    CREATE TEMPORARY TABLE tmp_target_pools (
+        pool_id     BIGINT UNSIGNED PRIMARY KEY,
+        dex         VARCHAR(100),
+        token_pair  VARCHAR(100),
+        INDEX idx_dex_pair (dex, token_pair)
+    ) AS
+    SELECT p.id AS pool_id,
+           fn_parse_dex(p.pool_label)        AS dex,
+           fn_parse_token_pair(p.pool_label) AS token_pair
+    FROM   tx_pool p
+    WHERE  p.token_account1_id IS NULL
+      AND  p.pool_label IS NOT NULL
+      AND  p.pool_label NOT LIKE '%Market%';
 
-	-- 4) Cleanup
-	DROP TEMPORARY TABLE tmp_market_pools;
+    -- Only UPDATE rows that actually match — no UDF calls, indexed JOIN
+    UPDATE tx_pool p
+    JOIN   tmp_target_pools t ON t.pool_id = p.id
+    JOIN   tmp_market_source m ON m.dex = t.dex AND m.token_pair = t.token_pair
+    SET    p.token_account1_id = COALESCE(p.token_account1_id, m.token_account1_id),
+           p.token_account2_id = COALESCE(p.token_account2_id, m.token_account2_id),
+           p.lp_token_id       = COALESCE(p.lp_token_id,       m.lp_token_id),
+           p.program_id        = COALESCE(p.program_id,         m.program_id);
 
     SET p_accounts_copied = ROW_COUNT();
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_market_source;
+    DROP TEMPORARY TABLE IF EXISTS tmp_target_pools;
 
 END //
 

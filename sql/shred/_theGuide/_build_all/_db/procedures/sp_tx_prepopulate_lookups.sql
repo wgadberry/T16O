@@ -15,22 +15,17 @@ CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_prepopulate_lookups`(
     IN p_features INT UNSIGNED
 )
 BEGIN
-    -- Feature flag constants
+    
     DECLARE FEATURE_ALL_ADDRESSES INT UNSIGNED DEFAULT 2;
     DECLARE v_collect_all_addresses BOOLEAN;
 
-    -- Check if ALL_ADDRESSES feature is enabled
-    SET v_collect_all_addresses = (p_features & FEATURE_ALL_ADDRESSES) = FEATURE_ALL_ADDRESSES;
-
-    -- =========================================================================
-    -- PHASE 1a: Pre-populate tx_address with CORE addresses (always collected)
-    -- Core = wallets (signers, owners), mints, programs
-    -- =========================================================================
+    
+    SET v_collect_all_addresses = (p_features & FEATURE_ALL_ADDRESSES) = FEATURE_ALL_ADDRESSES;    
+    
     INSERT IGNORE INTO tx_address (address, address_type)
     SELECT DISTINCT addr, addr_type FROM (
-        -- =========================
-        -- CORE: Wallets from one_line_summary
-        -- =========================
+              
+        
         SELECT t.signer_account AS addr, 'wallet' AS addr_type
         FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
             signer_account VARCHAR(44) PATH '$.one_line_summary.data.account'
@@ -45,7 +40,7 @@ BEGIN
 
         UNION
 
-        -- CORE: Mints from one_line_summary
+        
         SELECT t.token_1, 'mint'
         FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
             token_1 VARCHAR(44) PATH '$.one_line_summary.data.token_1'
@@ -67,17 +62,15 @@ BEGIN
 
         UNION
 
-        -- CORE: Programs from one_line_summary
+        
         SELECT t.agg_program, 'program'
         FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
             agg_program VARCHAR(44) PATH '$.one_line_summary.program_id'
         )) t WHERE t.agg_program IS NOT NULL AND t.agg_program != 'null'
 
         UNION
-
-        -- =========================
-        -- CORE: Wallets and mints from transfers
-        -- =========================
+       
+        
         SELECT t.source_owner, 'wallet'
         FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
             source_owner VARCHAR(44) PATH '$.source_owner'
@@ -106,7 +99,7 @@ BEGIN
 
         UNION
 
-        -- CORE: Programs from transfers
+        
         SELECT t.program_id, 'program'
         FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
             program_id VARCHAR(44) PATH '$.program_id'
@@ -121,9 +114,9 @@ BEGIN
 
         UNION
 
-        -- =========================
-        -- CORE: Wallets, mints, programs from activities
-        -- =========================
+        
+        
+        
         SELECT a.program_id, 'program'
         FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
             program_id VARCHAR(44) PATH '$.program_id'
@@ -181,16 +174,16 @@ BEGIN
     ) AS core_addresses
     WHERE NOT EXISTS (SELECT 1 FROM tx_address x WHERE x.address = core_addresses.addr);
 
-    -- =========================================================================
-    -- PHASE 1a-ext: Pre-populate EXTENDED addresses (ATAs, vaults, pools)
-    -- Only when FEATURE_ALL_ADDRESSES is enabled
-    -- =========================================================================
+    
+    
+    
+    
     IF v_collect_all_addresses THEN
         INSERT IGNORE INTO tx_address (address, address_type)
         SELECT DISTINCT addr, addr_type FROM (
-            -- =========================
-            -- EXTENDED: ATAs from transfers
-            -- =========================
+            
+            
+            
             SELECT t.source AS addr, 'ata' AS addr_type
             FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
                 source VARCHAR(44) PATH '$.source'
@@ -205,9 +198,9 @@ BEGIN
 
             UNION
 
-            -- =========================
-            -- EXTENDED: ATAs from activities
-            -- =========================
+            
+            
+            
             SELECT a.new_account, 'ata'
             FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
                 new_account VARCHAR(44) PATH '$.data.new_account'
@@ -222,9 +215,9 @@ BEGIN
 
             UNION
 
-            -- =========================
-            -- EXTENDED: Pools from activities
-            -- =========================
+            
+            
+            
             SELECT a.amm_id, 'pool'
             FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
                 amm_id VARCHAR(44) PATH '$.data.amm_id'
@@ -232,7 +225,7 @@ BEGIN
 
             UNION
 
-            -- owner_2 is often a pool address in swap activities
+            
             SELECT a.owner_2, 'wallet'
             FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
                 owner_2 VARCHAR(44) PATH '$.data.owner_2'
@@ -240,9 +233,9 @@ BEGIN
 
             UNION
 
-            -- =========================
-            -- EXTENDED: Vaults from activities (pool liquidity accounts)
-            -- =========================
+            
+            
+            
             SELECT a.token_account_1_1, 'vault'
             FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
                 token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1'
@@ -273,27 +266,27 @@ BEGIN
         WHERE NOT EXISTS (SELECT 1 FROM tx_address x WHERE x.address = extended_addresses.addr);
     END IF;
 
-    -- =========================================================================
-    -- PHASE 1b: Pre-populate tx_token for all mints
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_token (mint_address_id)
     SELECT a.id
     FROM tx_address a
     WHERE a.address_type = 'mint'
       AND NOT EXISTS (SELECT 1 FROM tx_token t WHERE t.mint_address_id = a.id);
 
-    -- =========================================================================
-    -- PHASE 1c: Pre-populate tx_program for all programs
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_program (program_address_id)
     SELECT a.id
     FROM tx_address a
     WHERE a.address_type = 'program'
       AND NOT EXISTS (SELECT 1 FROM tx_program p WHERE p.program_address_id = a.id);
 
-    -- =========================================================================
-    -- PHASE 1d: Pre-populate tx_pool for all pools (only if extended)
-    -- =========================================================================
+    
+    
+    
     IF v_collect_all_addresses THEN
         INSERT IGNORE INTO tx_pool (pool_address_id)
         SELECT a.id
@@ -301,9 +294,7 @@ BEGIN
         WHERE a.address_type = 'pool'
           AND NOT EXISTS (SELECT 1 FROM tx_pool p WHERE p.pool_address_id = a.id);
 
-        -- =========================================================================
-        -- PHASE 1e: Reclassify owner_2 addresses as pools when amm_id is present
-        -- =========================================================================
+        
         UPDATE tx_address a
         SET a.address_type = 'pool'
         WHERE a.address_type = 'wallet'
@@ -319,27 +310,28 @@ BEGIN
               AND j.amm_id != 'null'
           );
 
-        -- Also insert any newly reclassified pools into tx_pool
+        
         INSERT IGNORE INTO tx_pool (pool_address_id)
         SELECT a.id
         FROM tx_address a
         WHERE a.address_type = 'pool'
           AND NOT EXISTS (SELECT 1 FROM tx_pool p WHERE p.pool_address_id = a.id);
+          
     END IF;
 
-    -- =========================================================================
-    -- PHASE 1f: Tag newly created addresses with request_log_id for billing
-    -- Only tags addresses that were collected in this run
-    -- =========================================================================
+    
+    
+    
+    
     IF p_request_log_id IS NOT NULL THEN
-        -- Always tag CORE addresses
+        
         UPDATE tx_address
         SET request_log_id = p_request_log_id
         WHERE request_log_id IS NULL
           AND address_type IN ('wallet', 'mint', 'program')
           AND address IN (
             SELECT DISTINCT addr FROM (
-                -- Wallets
+                
                 SELECT t.signer_account AS addr FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
                     signer_account VARCHAR(44) PATH '$.one_line_summary.data.account'
                 )) t WHERE t.signer_account IS NOT NULL AND t.signer_account != 'null'
@@ -368,7 +360,7 @@ BEGIN
                     owner_1 VARCHAR(44) PATH '$.data.owner_1'
                 )) a WHERE a.owner_1 IS NOT NULL AND a.owner_1 != 'null'
                 UNION
-                -- Mints
+                
                 SELECT t.token_1 FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
                     token_1 VARCHAR(44) PATH '$.one_line_summary.data.token_1'
                 )) t WHERE t.token_1 IS NOT NULL AND t.token_1 != 'null'
@@ -401,7 +393,7 @@ BEGIN
                     fee_token VARCHAR(44) PATH '$.data.fee_token'
                 )) a WHERE a.fee_token IS NOT NULL AND a.fee_token != 'null'
                 UNION
-                -- Programs
+                
                 SELECT t.agg_program FROM JSON_TABLE(p_txs_json, '$.data[*]' COLUMNS (
                     agg_program VARCHAR(44) PATH '$.one_line_summary.program_id'
                 )) t WHERE t.agg_program IS NOT NULL AND t.agg_program != 'null'
@@ -424,7 +416,7 @@ BEGIN
             ) AS core_addrs
           );
 
-        -- Tag EXTENDED addresses only if feature enabled
+        
         IF v_collect_all_addresses THEN
             UPDATE tx_address
             SET request_log_id = p_request_log_id
@@ -432,7 +424,7 @@ BEGIN
               AND address_type IN ('ata', 'vault', 'pool')
               AND address IN (
                 SELECT DISTINCT addr FROM (
-                    -- ATAs
+                    
                     SELECT t.source AS addr FROM JSON_TABLE(p_txs_json, '$.data[*].transfers[*]' COLUMNS (
                         source VARCHAR(44) PATH '$.source'
                     )) t WHERE t.source IS NOT NULL AND t.source != 'null'
@@ -449,7 +441,7 @@ BEGIN
                         init_account VARCHAR(44) PATH '$.data.init_account'
                     )) a WHERE a.init_account IS NOT NULL AND a.init_account != 'null'
                     UNION
-                    -- Pools
+                    
                     SELECT a.amm_id FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
                         amm_id VARCHAR(44) PATH '$.data.amm_id'
                     )) a WHERE a.amm_id IS NOT NULL AND a.amm_id != 'null'
@@ -458,7 +450,7 @@ BEGIN
                         owner_2 VARCHAR(44) PATH '$.data.owner_2'
                     )) a WHERE a.owner_2 IS NOT NULL AND a.owner_2 != 'null'
                     UNION
-                    -- Vaults
+                    
                     SELECT a.token_account_1_1 FROM JSON_TABLE(p_txs_json, '$.data[*].activities[*]' COLUMNS (
                         token_account_1_1 VARCHAR(44) PATH '$.data.token_account_1_1'
                     )) a WHERE a.token_account_1_1 IS NOT NULL AND a.token_account_1_1 != 'null'
