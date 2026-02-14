@@ -387,14 +387,24 @@ ALTER TABLE tx DROP COLUMN is_guide_loaded;
 -- type_state: never written by any SP/worker, always 0
 ALTER TABLE tx DROP COLUMN type_state;
 
+-- --------------------------------------------------------------------------
+-- Step 3d: Add functional index for guide_loader batch selection
+-- --------------------------------------------------------------------------
+-- tx_state is VARCHAR(16) used with bitwise AND — without this index,
+-- WHERE tx_state & 32 = 0 ORDER BY id forces a full table scan.
+-- Functional index pre-computes the bitmask so MySQL can do a ref lookup.
+ALTER TABLE tx ADD INDEX idx_tx_guide_pending ((tx_state & 32), id);
+
 -- ============================================================================
 -- SUMMARY
 -- ============================================================================
 -- Tier 1: Dropped 1 redundant index (idx_tx_blocktime)
 -- Tier 2: Dropped 6 FK constraints + 6 indexes (agg_*/signer)
--- Tier 3: Updated 1 SP, 2 functions, 3 views; dropped 2 columns
+-- Tier 3: Updated 1 SP, 2 functions, 3 views; dropped 2 columns;
+--         added functional index for guide_loader batch selection
 --
 -- tx table after migration:
---   Indexes:  PRIMARY, uk_signature, idx_block_time, idx_tx_state, idx_tx_request_log_id
+--   Indexes:  PRIMARY, uk_signature, idx_block_time, idx_tx_state,
+--             idx_tx_request_log_id, idx_tx_guide_pending (functional)
 --   Removed:  7 indexes, 6 FK constraints, 2 columns
 -- ============================================================================
