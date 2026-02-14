@@ -13,6 +13,10 @@ BEGIN
     -- Uses fn_parse_dex, fn_parse_token_a, fn_parse_token_b to parse labels
     -- 1. Creates missing tx_pool records with program + token lookups
     -- 2. Updates pool_label on existing records that are missing it
+    -- 3. Copies token_account/program from "Market" siblings
+    --
+    -- All steps use temp tables to isolate the small working set BEFORE
+    -- calling UDFs, avoiding fn_parse_* on every row in the full table.
     -- ================================================================
 
     SET p_created = 0;
@@ -20,48 +24,68 @@ BEGIN
     SET p_accounts_copied = 0;
 
     -- Step 1: Insert missing tx_pool records from pool/lp_token addresses
-    INSERT IGNORE INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label,attempt_cnt)
-    SELECT
-        a.id                    AS pool_address_id,
-        pr.id                   AS program_id,
-        t1.id                   AS token1_id,
-        t2.id                   AS token2_id,
-        a.label                 AS pool_label,
-        1						AS attempt_cnt
+    -- Materialize the small set of missing addresses first, then parse labels
+    DROP TEMPORARY TABLE IF EXISTS tmp_missing_pools;
+    CREATE TEMPORARY TABLE tmp_missing_pools (
+        address_id INT UNSIGNED PRIMARY KEY,
+        label      VARCHAR(255)
+    ) ENGINE=MEMORY AS
+    SELECT a.id AS address_id, a.label
     FROM tx_address a
     LEFT JOIN tx_pool p ON p.pool_address_id = a.id
-    LEFT JOIN tx_program pr ON pr.name LIKE CONCAT(fn_parse_dex(a.label), '%')
-    LEFT JOIN tx_token t1 ON t1.token_symbol = fn_parse_token_a(a.label)
-    LEFT JOIN tx_token t2 ON t2.token_symbol = fn_parse_token_b(a.label)
     WHERE a.address_type IN ('pool', 'lp_token')
       AND p.id IS NULL;
 
+    INSERT IGNORE INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label, attempt_cnt)
+    SELECT
+        m.address_id,
+        pr.id,
+        t1.id,
+        t2.id,
+        m.label,
+        1
+    FROM tmp_missing_pools m
+    LEFT JOIN tx_program pr ON pr.name LIKE CONCAT(fn_parse_dex(m.label), '%')
+    LEFT JOIN tx_token t1 ON t1.token_symbol = fn_parse_token_a(m.label)
+    LEFT JOIN tx_token t2 ON t2.token_symbol = fn_parse_token_b(m.label);
+
     SET p_created = ROW_COUNT();
+    DROP TEMPORARY TABLE IF EXISTS tmp_missing_pools;
 
     -- Step 2: Backfill token1/token2/program on existing tx_pool records missing them
-    UPDATE tx_pool p
+    -- Materialize candidates first, then do expensive label-based JOINs
+    DROP TEMPORARY TABLE IF EXISTS tmp_backfill_pools;
+    CREATE TEMPORARY TABLE tmp_backfill_pools (
+        pool_id    BIGINT UNSIGNED PRIMARY KEY,
+        address_id INT UNSIGNED,
+        label      VARCHAR(255),
+        INDEX idx_addr (address_id)
+    ) ENGINE=MEMORY AS
+    SELECT p.id AS pool_id, p.pool_address_id AS address_id, a.label
+    FROM tx_pool p
     JOIN tx_address a ON a.id = p.pool_address_id
-    LEFT JOIN tx_program pr ON pr.name LIKE CONCAT(fn_parse_dex(a.label), '%')
-    LEFT JOIN tx_token t1 ON t1.token_symbol = fn_parse_token_a(a.label)
-    LEFT JOIN tx_token t2 ON t2.token_symbol = fn_parse_token_b(a.label)
-    SET p.program_id = COALESCE(p.program_id, pr.id),
-        p.token1_id  = COALESCE(p.token1_id, t1.id),
-        p.token2_id  = COALESCE(p.token2_id, t2.id),
-        p.pool_label = COALESCE(p.pool_label, a.label),
-        p.attempt_cnt = p.attempt_cnt + 1
-    WHERE (p.token1_id IS NULL OR p.token2_id IS NULL /* OR p.program_id IS NULL */ OR p.pool_label IS NULL)
+    WHERE (p.token1_id IS NULL OR p.token2_id IS NULL OR p.pool_label IS NULL)
       AND a.label IS NOT NULL
-      and p.attempt_cnt < 10;
+      AND p.attempt_cnt < 10;
+
+    UPDATE tx_pool p
+    JOIN tmp_backfill_pools b ON b.pool_id = p.id
+    LEFT JOIN tx_program pr ON pr.name LIKE CONCAT(fn_parse_dex(b.label), '%')
+    LEFT JOIN tx_token t1 ON t1.token_symbol = fn_parse_token_a(b.label)
+    LEFT JOIN tx_token t2 ON t2.token_symbol = fn_parse_token_b(b.label)
+    SET p.program_id  = COALESCE(p.program_id, pr.id),
+        p.token1_id   = COALESCE(p.token1_id, t1.id),
+        p.token2_id   = COALESCE(p.token2_id, t2.id),
+        p.pool_label  = COALESCE(p.pool_label, b.label),
+        p.attempt_cnt = p.attempt_cnt + 1;
 
     SET p_labels_updated = ROW_COUNT();
+    DROP TEMPORARY TABLE IF EXISTS tmp_backfill_pools;
 
-	-- Step 3: Copy token_account/program data from "Market" siblings to non-Market pools
+    -- Step 3: Copy token_account/program data from "Market" siblings to non-Market pools
     -- Match on DEX + token pair parsed from labels (avoids SOL/WSOL token_id mismatch)
-    --
-    -- Pre-compute both sides into indexed temp tables to avoid UDF calls
-    -- in the JOIN condition (was: 937 × 7617 = ~7.1M fn evaluations per cycle)
-
-    DROP TABLE IF EXISTS tmp_market_source;
+    -- Pre-compute both sides into indexed temp tables to avoid UDF calls in JOIN
+    DROP TEMPORARY TABLE IF EXISTS tmp_market_source;
     CREATE TEMPORARY TABLE tmp_market_source (
         dex         VARCHAR(100),
         token_pair  VARCHAR(100),
@@ -81,7 +105,7 @@ BEGIN
     WHERE  pool_label LIKE '%Market%'
       AND  token_account1_id IS NOT NULL;
 
-    DROP TABLE IF EXISTS tmp_target_pools;
+    DROP TEMPORARY TABLE IF EXISTS tmp_target_pools;
     CREATE TEMPORARY TABLE tmp_target_pools (
         pool_id     BIGINT UNSIGNED PRIMARY KEY,
         dex         VARCHAR(100),
