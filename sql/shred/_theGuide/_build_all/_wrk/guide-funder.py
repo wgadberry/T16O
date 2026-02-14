@@ -885,8 +885,8 @@ class AddressHistoryWorker:
 
     def save_funding_info(self, target_address: str, funding_info: Dict, request_log_id: int = None):
         """
-        Save funding info to tx_address table and create tx_funding_edge.
-        Also aggregates existing transfers from tx_guide for complete edge data.
+        Save funding info to tx_address table.
+        Updates funded_by_address_id and related fields.
         funding_info has: funder, signature, amount, block_time, label, tags, account_type, active_age
         request_log_id: Links discovered funder address to the request for billing
         """
@@ -1054,64 +1054,6 @@ class AddressHistoryWorker:
                     INSERT INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (target_id, program_id, token1_id, token2_id, label))
-
-        # Create tx_funding_edge record with full details
-        # Amount from Solscan is in lamports, convert to SOL
-        sol_amount = float(amount) / 1e9 if amount else 0
-
-        if funder_id and target_id:
-            # First, aggregate existing transfers from tx_guide between these addresses
-            self.cursor.execute("""
-                SELECT
-                    SUM(CASE WHEN gt.type_code IN ('sol_transfer', 'wallet_funded')
-                        THEN g.amount / POW(10, COALESCE(g.decimals, 9))
-                        ELSE 0 END) as guide_sol,
-                    SUM(CASE WHEN gt.type_code = 'spl_transfer'
-                        THEN g.amount / POW(10, COALESCE(g.decimals, 9))
-                        ELSE 0 END) as guide_tokens,
-                    COUNT(*) as guide_count,
-                    MIN(g.block_time) as first_time,
-                    MAX(g.block_time) as last_time
-                FROM tx_guide g
-                JOIN tx_guide_type gt ON gt.id = g.edge_type_id
-                WHERE g.from_address_id = %s AND g.to_address_id = %s
-                  AND gt.type_code IN ('sol_transfer', 'spl_transfer', 'wallet_funded')
-            """, (funder_id, target_id))
-            guide_row = self.cursor.fetchone()
-
-            # Combine Solscan amount with tx_guide aggregates
-            guide_sol = float(guide_row['guide_sol'] or 0) if guide_row else 0
-            guide_tokens = float(guide_row['guide_tokens'] or 0) if guide_row else 0
-            guide_count = int(guide_row['guide_count'] or 0) if guide_row else 0
-            guide_first = guide_row['first_time'] if guide_row else None
-            guide_last = guide_row['last_time'] if guide_row else None
-
-            # Total SOL includes Solscan discovery + tx_guide history
-            total_sol = sol_amount + guide_sol
-            total_tokens = guide_tokens
-            total_count = 1 + guide_count  # 1 for Solscan + guide count
-
-            # Determine time range
-            first_time = block_time
-            last_time = block_time
-            if guide_first and (first_time is None or guide_first < first_time):
-                first_time = guide_first
-            if guide_last and (last_time is None or guide_last > last_time):
-                last_time = guide_last
-
-            self.cursor.execute("""
-                INSERT INTO tx_funding_edge (
-                    from_address_id, to_address_id,
-                    total_sol, total_tokens, transfer_count,
-                    first_transfer_time, last_transfer_time
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    total_sol = VALUES(total_sol),
-                    total_tokens = VALUES(total_tokens),
-                    transfer_count = VALUES(transfer_count),
-                    first_transfer_time = LEAST(COALESCE(first_transfer_time, VALUES(first_transfer_time)), VALUES(first_transfer_time)),
-                    last_transfer_time = GREATEST(COALESCE(last_transfer_time, VALUES(last_transfer_time)), VALUES(last_transfer_time))
-            """, (funder_id, target_id, total_sol, total_tokens, total_count, first_time, last_time))
 
         self.db_conn.commit()
 
@@ -1827,16 +1769,6 @@ def main():
                     WHERE address = %s AND funded_by_address_id IS NULL
                 """, update_values)
 
-                sol_amount = float(amount) / 1e9 if amount else 0
-                if funder_id and target_id:
-                    self.cursor.execute("""
-                        INSERT INTO tx_funding_edge (from_address_id, to_address_id, total_sol, transfer_count, first_transfer_time, last_transfer_time)
-                        VALUES (%s, %s, %s, 1, %s, %s)
-                        ON DUPLICATE KEY UPDATE
-                            total_sol = VALUES(total_sol),
-                            transfer_count = transfer_count + 1,
-                            last_transfer_time = VALUES(last_transfer_time)
-                    """, (funder_id, target_id, sol_amount, block_time, block_time))
                 self.db_conn.commit()
 
             def get_missing_addresses(self, limit: int) -> list:
