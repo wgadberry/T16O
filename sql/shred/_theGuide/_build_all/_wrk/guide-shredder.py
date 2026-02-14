@@ -652,39 +652,12 @@ class ShredderProcessor:
 def purge_completed_staging(cursor, conn, min_age_seconds: int = PURGE_MIN_AGE_SECONDS) -> int:
     """
     Delete staging rows that have been fully processed (tx_state=shredded).
-    Also NULLs tx_json on fully-processed tx records (tx_state & 60 = 60)
-    to reclaim blob storage after all pipeline stages are complete.
     Only deletes rows older than min_age_seconds to avoid racing with
     correlation completion checks.
     Returns number of staging rows deleted.
     """
-    # NULL out tx_json on fully-processed tx records (decode+detail+shred+guide all done)
-    # Batch size is runtime-configurable via config table
-    json_null_limit = 50
-    try:
-        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', 'guide_batch_size_tx_json_null'))
-        result = cursor.fetchone()
-        try:
-            while cursor.nextset():
-                pass
-        except:
-            pass
-        if result:
-            val = result[0] if isinstance(result, tuple) else result.get('config_value')
-            if val:
-                json_null_limit = int(val)
-    except:
-        pass
-
-    cursor.execute("""
-        UPDATE t16o_db.tx
-        SET tx_json = NULL
-        WHERE tx_json IS NOT NULL
-          AND tx_state & 60 = 60
-        LIMIT %s
-    """, (json_null_limit,))
-    if cursor.rowcount > 0:
-        conn.commit()
+    # tx_json is no longer written to the tx table, so no need to NULL it out
+    # (previously NULLed fully-processed rows where tx_state & 60 = 60)
 
     cursor.execute(f"""
         DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
