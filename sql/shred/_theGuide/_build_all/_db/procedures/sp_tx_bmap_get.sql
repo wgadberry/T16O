@@ -172,12 +172,13 @@ BEGIN
             END IF;
         ELSEIF p_block_time IS NOT NULL THEN
             -- Find nearest tx to provided block_time for this token
+            -- Uses idx_token_blocktime (token_id, block_time) for efficient seek
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
             JOIN tx t ON t.id = g.tx_id
             WHERE g.token_id = v_token_id
-            ORDER BY ABS(CAST(t.block_time AS SIGNED) - CAST(p_block_time AS SIGNED))
+            ORDER BY ABS(CAST(g.block_time AS SIGNED) - CAST(p_block_time AS SIGNED))
             LIMIT 1;
 
             IF v_tx_id IS NULL THEN
@@ -189,13 +190,13 @@ BEGIN
                 SET v_token_id = NULL;
             END IF;
         ELSE
-            -- Most recent tx for this token
+            -- Most recent tx for this token (uses idx_token_blocktime)
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
             JOIN tx t ON t.id = g.tx_id
             WHERE g.token_id = v_token_id
-            ORDER BY t.block_time DESC
+            ORDER BY g.block_time DESC
             LIMIT 1;
 
             IF v_tx_id IS NULL THEN
@@ -243,12 +244,12 @@ BEGIN
                    -1 * (@prev_row := @prev_row + 1)
             FROM (SELECT @prev_row := 0) init,
                  (
-                    SELECT DISTINCT t.id, t.signature, t.block_time
+                    SELECT DISTINCT t.id, t.signature, g.block_time
                     FROM tx_guide g
                     JOIN tx t ON t.id = g.tx_id
                     WHERE g.token_id = ', v_token_id, '
-                      AND t.block_time < ', v_block_time, '
-                    ORDER BY t.block_time DESC
+                      AND g.block_time < ', v_block_time, '
+                    ORDER BY g.block_time DESC
                     LIMIT 5
                  ) t
             ORDER BY t.block_time DESC
@@ -264,12 +265,12 @@ BEGIN
                    @next_row := @next_row + 1
             FROM (SELECT @next_row := 0) init,
                  (
-                    SELECT DISTINCT t.id, t.signature, t.block_time
+                    SELECT DISTINCT t.id, t.signature, g.block_time
                     FROM tx_guide g
                     JOIN tx t ON t.id = g.tx_id
                     WHERE g.token_id = ', v_token_id, '
-                      AND t.block_time > ', v_block_time, '
-                    ORDER BY t.block_time ASC
+                      AND g.block_time > ', v_block_time, '
+                    ORDER BY g.block_time ASC
                     LIMIT 5
                  ) t
             ORDER BY t.block_time ASC
