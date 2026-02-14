@@ -10,8 +10,7 @@ BEGIN
     SET FOREIGN_KEY_CHECKS = 0;
     
 	TRUNCATE TABLE tx_request_log;
-    TRUNCATE TABLE tx_funding_edge;
-    TRUNCATE TABLE tx_token_participant;    
+    TRUNCATE TABLE tx_token_participant;
     TRUNCATE TABLE tx_guide;
     TRUNCATE TABLE tx_activity;
 	TRUNCATE TABLE tx_bmap_state;

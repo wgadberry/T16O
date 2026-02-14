@@ -13,7 +13,7 @@ BEGIN
     DECLARE v_transfer_count INT DEFAULT 0;
     DECLARE v_swap_count INT DEFAULT 0;
     DECLARE v_other_count INT DEFAULT 0;
-    DECLARE v_funding_count INT DEFAULT 0;
+
 
     -- Cache guide_type IDs once instead of subquerying per UPDATE
     DECLARE v_gt_spl_transfer INT;
@@ -202,59 +202,6 @@ BEGIN
       AND a.activity_type NOT LIKE '%TRANSFER%';
 
     SET v_other_count = ROW_COUNT();
-
-    -- ============================================================
-    -- FUNDING EDGES
-    -- ============================================================
-    DROP TEMPORARY TABLE IF EXISTS tmp_funded_addresses;
-    CREATE TEMPORARY TABLE tmp_funded_addresses (
-        address_id INT UNSIGNED PRIMARY KEY,
-        funder_id INT UNSIGNED,
-        INDEX idx_funder (funder_id)
-    ) ENGINE=MEMORY;
-
-    INSERT IGNORE INTO tmp_funded_addresses (address_id, funder_id)
-    SELECT DISTINCT s.account_address_id, a.funded_by_address_id
-    FROM tx_swap s
-    JOIN tx_address a ON a.id = s.account_address_id
-    WHERE s.tx_id >= v_start AND s.tx_id < v_end
-      AND a.funded_by_address_id IS NOT NULL
-      AND s.account_address_id IS NOT NULL;
-
-    INSERT IGNORE INTO tmp_funded_addresses (address_id, funder_id)
-    SELECT DISTINCT t.source_owner_address_id, a.funded_by_address_id
-    FROM tx_transfer t
-    JOIN tx_address a ON a.id = t.source_owner_address_id
-    WHERE t.tx_id >= v_start AND t.tx_id < v_end
-      AND a.funded_by_address_id IS NOT NULL
-      AND t.source_owner_address_id IS NOT NULL;
-
-    INSERT IGNORE INTO tmp_funded_addresses (address_id, funder_id)
-    SELECT DISTINCT t.destination_owner_address_id, a.funded_by_address_id
-    FROM tx_transfer t
-    JOIN tx_address a ON a.id = t.destination_owner_address_id
-    WHERE t.tx_id >= v_start AND t.tx_id < v_end
-      AND a.funded_by_address_id IS NOT NULL
-      AND t.destination_owner_address_id IS NOT NULL;
-
-    INSERT INTO tx_funding_edge (from_address_id, to_address_id, total_sol,
-                                  transfer_count, first_transfer_time, last_transfer_time)
-    SELECT tf.funder_id, tf.address_id,
-           SUM(CASE WHEN t.token_id = v_sol_token_id THEN t.amount ELSE 0 END) / 1e9,
-           COUNT(*), MIN(b.block_time), MAX(b.block_time)
-    FROM tmp_funded_addresses tf
-    JOIN tx_transfer t ON t.source_owner_address_id = tf.funder_id
-                      AND t.destination_owner_address_id = tf.address_id
-                      AND t.tx_id >= v_start AND t.tx_id < v_end
-    JOIN tmp_batch b ON b.tx_id = t.tx_id
-    GROUP BY tf.funder_id, tf.address_id
-    ON DUPLICATE KEY UPDATE
-        total_sol = total_sol + VALUES(total_sol),
-        transfer_count = transfer_count + VALUES(transfer_count),
-        last_transfer_time = GREATEST(last_transfer_time, VALUES(last_transfer_time));
-
-    SET v_funding_count = ROW_COUNT();
-    DROP TEMPORARY TABLE IF EXISTS tmp_funded_addresses;
 
     -- ============================================================
     -- BALANCE POPULATION (replaces the entire chunk loop)
