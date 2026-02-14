@@ -1,10 +1,10 @@
--- tx_state_phase: Reference table for type_state bitmask values
+-- tx_state_phase: Reference table for tx_state bitmask values
 -- Each row defines a processing phase with its bit position and value
 --
 -- Usage:
 --   SELECT bit_value FROM tx_state_phase WHERE phase_code = 'SHREDDED';
---   UPDATE tx SET type_state = type_state | 1 WHERE ...;  -- Set SHREDDED bit
---   SELECT * FROM tx WHERE type_state & 2 = 0;            -- Find not DECODED
+--   UPDATE tx SET tx_state = tx_state | 1 WHERE ...;  -- Set SHREDDED bit
+--   SELECT * FROM tx WHERE tx_state & 2 = 0;          -- Find not DECODED
 
 DROP TABLE IF EXISTS tx_state_phase;
 

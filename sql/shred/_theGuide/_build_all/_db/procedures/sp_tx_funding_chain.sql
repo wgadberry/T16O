@@ -7,7 +7,7 @@ DROP PROCEDURE IF EXISTS `sp_tx_funding_chain`;;
 
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_funding_chain`(
     IN p_wallet_address VARCHAR(44),
-    IN p_min_type_state BIGINT UNSIGNED,
+    IN p_min_tx_state BIGINT UNSIGNED,
     IN p_max_depth INT,
     IN p_direction VARCHAR(10)
 )
@@ -19,7 +19,7 @@ BEGIN
     
     SET p_max_depth = COALESCE(p_max_depth, 10);
     SET p_direction = COALESCE(p_direction, 'up');
-    SET p_min_type_state = COALESCE(p_min_type_state, 0);
+    SET p_min_tx_state = COALESCE(p_min_tx_state, 0);
 
     
     SELECT id INTO v_start_id
@@ -45,7 +45,7 @@ BEGIN
             funder_label VARCHAR(100),
             funding_sol DECIMAL(20,9),
             funding_tx_signature VARCHAR(88),
-            type_state BIGINT UNSIGNED,
+            tx_state BIGINT UNSIGNED,
             first_seen_utc DATETIME,
             PRIMARY KEY (wallet_id)
         );
@@ -68,7 +68,7 @@ BEGIN
             f.label,
             w.funding_amount / 1e9,
             t.signature,
-            COALESCE(t.type_state, 0),
+            COALESCE(CAST(t.tx_state AS UNSIGNED), 0),
             FROM_UNIXTIME(w.first_seen_block_time)
         FROM tx_address w
         LEFT JOIN tx_address f ON w.funded_by_address_id = f.id
@@ -99,13 +99,13 @@ BEGIN
                     f.label,
                     w.funding_amount / 1e9,
                     t.signature,
-                    COALESCE(t.type_state, 0),
+                    COALESCE(CAST(t.tx_state AS UNSIGNED), 0),
                     FROM_UNIXTIME(w.first_seen_block_time)
                 FROM tx_address w
                 LEFT JOIN tx_address f ON w.funded_by_address_id = f.id
                 LEFT JOIN tx t ON w.funding_tx_id = t.id
                 INNER JOIN tmp_frontier tf ON w.id = tf.funder_id
-                WHERE (p_min_type_state = 0 OR COALESCE(t.type_state, 0) >= p_min_type_state);
+                WHERE (p_min_tx_state = 0 OR COALESCE(CAST(t.tx_state AS UNSIGNED), 0) >= p_min_tx_state);
 
                 SET v_found = v_found + ROW_COUNT();
             END IF;
@@ -129,13 +129,13 @@ BEGIN
                     f.label,
                     w.funding_amount / 1e9,
                     t.signature,
-                    COALESCE(t.type_state, 0),
+                    COALESCE(CAST(t.tx_state AS UNSIGNED), 0),
                     FROM_UNIXTIME(w.first_seen_block_time)
                 FROM tx_address w
                 LEFT JOIN tx_address f ON w.funded_by_address_id = f.id
                 LEFT JOIN tx t ON w.funding_tx_id = t.id
                 INNER JOIN tmp_frontier tf ON w.funded_by_address_id = tf.wallet_id
-                WHERE (p_min_type_state = 0 OR COALESCE(t.type_state, 0) >= p_min_type_state);
+                WHERE (p_min_tx_state = 0 OR COALESCE(CAST(t.tx_state AS UNSIGNED), 0) >= p_min_tx_state);
 
                 SET v_found = v_found + ROW_COUNT();
             END IF;
@@ -151,7 +151,7 @@ BEGIN
             funder_label,
             funding_sol,
             funding_tx_signature,
-            type_state,
+            tx_state,
             first_seen_utc
         FROM tmp_chain
         ORDER BY depth, direction, wallet_address;

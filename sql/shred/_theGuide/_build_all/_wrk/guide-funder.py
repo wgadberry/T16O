@@ -1962,6 +1962,7 @@ def main():
         if args.sync_db_missing:
             total_limit = args.limit if args.limit > 0 else float('inf')
             batch_num = 0
+            daemon_request_log_id = None
 
             print(f"Sync DB Missing Mode")
             print(f"  Limit: {args.limit if args.limit > 0 else 'unlimited'}")
@@ -2019,13 +2020,6 @@ def main():
                     # In dry-run, simulate progress
                     worker.addresses_processed += len(addresses_to_process)
                 else:
-                    # Create daemon request_log entry for billing
-                    daemon_request_log_id = log_daemon_request(
-                        worker.cursor, worker.db_conn,
-                        worker='funder', action='discover',
-                        batch_size=len(addresses_to_process)
-                    )
-
                     initialized = []
                     batch_funders_found = 0
                     batch_funders_not_found = 0
@@ -2093,16 +2087,22 @@ def main():
                         if api_batch_start + api_batch_size < total_to_process:
                             time.sleep(1.0)
 
-                    # Update daemon request_log entry with results
-                    update_daemon_request(
-                        worker.cursor, worker.db_conn, daemon_request_log_id,
-                        status='completed',
-                        result={
-                            'processed': len(initialized),
-                            'funders_found': batch_funders_found,
-                            'funders_not_found': batch_funders_not_found
-                        }
-                    )
+                    # Only log to tx_request_log if we actually updated rows
+                    if batch_funders_found > 0:
+                        daemon_request_log_id = log_daemon_request(
+                            worker.cursor, worker.db_conn,
+                            worker='funder', action='discover',
+                            batch_size=len(addresses_to_process)
+                        )
+                        update_daemon_request(
+                            worker.cursor, worker.db_conn, daemon_request_log_id,
+                            status='completed',
+                            result={
+                                'processed': len(initialized),
+                                'funders_found': batch_funders_found,
+                                'funders_not_found': batch_funders_not_found
+                            }
+                        )
 
                     worker.mark_addresses_initialized(initialized)
 
@@ -2166,13 +2166,6 @@ def main():
                         print(f"    ... and {len(candidate_addresses) - 5} more")
                     worker.addresses_processed += len(candidate_addresses)
                 else:
-                    # Create daemon request_log entry for billing
-                    daemon_request_log_id = log_daemon_request(
-                        worker.cursor, worker.db_conn,
-                        worker='funder', action='metadata_backfill',
-                        batch_size=len(candidate_addresses)
-                    )
-
                     batch_metadata_found = 0
                     batch_metadata_not_found = 0
 
@@ -2231,16 +2224,22 @@ def main():
                         if api_batch_start + api_batch_size < total_to_process:
                             time.sleep(1.0)
 
-                    # Update daemon request_log entry with results
-                    update_daemon_request(
-                        worker.cursor, worker.db_conn, daemon_request_log_id,
-                        status='completed',
-                        result={
-                            'processed': worker.addresses_processed,
-                            'metadata_found': batch_metadata_found,
-                            'metadata_not_found': batch_metadata_not_found
-                        }
-                    )
+                    # Only log to tx_request_log if we actually updated rows
+                    if batch_metadata_found > 0:
+                        daemon_request_log_id = log_daemon_request(
+                            worker.cursor, worker.db_conn,
+                            worker='funder', action='metadata_backfill',
+                            batch_size=len(candidate_addresses)
+                        )
+                        update_daemon_request(
+                            worker.cursor, worker.db_conn, daemon_request_log_id,
+                            status='completed',
+                            result={
+                                'processed': worker.addresses_processed,
+                                'metadata_found': batch_metadata_found,
+                                'metadata_not_found': batch_metadata_not_found
+                            }
+                        )
 
                     # Mark all processed addresses as initialized
                     worker.mark_addresses_initialized(candidate_addresses)

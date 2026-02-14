@@ -1,7 +1,7 @@
 """
 tx_state.py: Transaction processing state bitmask constants
 
-Each constant represents a bit in the tx.type_state column.
+Each constant represents a bit in the tx.tx_state column (varchar, implicitly cast to int for bitwise ops).
 Use bitwise OR (|) to set bits, bitwise AND (&) to check bits.
 
 Example:
@@ -21,7 +21,7 @@ Example:
 
 
 class TxState:
-    """Bitmask constants for tx.type_state column"""
+    """Bitmask constants for tx.tx_state column"""
 
     # Bit 0: Basic transaction data inserted
     SHREDDED = 1
@@ -110,6 +110,6 @@ class TxState:
 
 
 # SQL helper for updates (use in f-strings)
-SQL_SET_STATE = "type_state = type_state | {phase}"
-SQL_CHECK_MISSING = "type_state & {phase} = 0"
-SQL_CHECK_HAS = "type_state & {phase} = {phase}"
+SQL_SET_STATE = "tx_state = tx_state | {phase}"
+SQL_CHECK_MISSING = "tx_state & {phase} = 0"
+SQL_CHECK_HAS = "tx_state & {phase} = {phase}"
