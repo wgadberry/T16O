@@ -433,14 +433,11 @@ BEGIN
                 AND (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
           );
 
-        -- Enrich pool nodes with pool_label from tx_guide
+        -- Enrich pool nodes with pool_label from tx_pool (indexed on pool_address_id)
         UPDATE tmp_nodes n
-        SET n.pool_label = (
-            SELECT g.pool_label FROM tx_guide g
-            WHERE g.pool_address_id = n.address_id AND g.pool_label IS NOT NULL
-            LIMIT 1
-        )
-        WHERE n.pool_label IS NULL AND n.address_type = 'pool';
+        JOIN tx_pool p ON p.pool_address_id = n.address_id
+        SET n.pool_label = p.pool_label
+        WHERE n.pool_label IS NULL AND n.address_type = 'pool' AND p.pool_label IS NOT NULL;
 
         -- Enrich mint nodes with token_name
         UPDATE tmp_nodes n
@@ -449,8 +446,9 @@ BEGIN
         WHERE tk.token_name IS NOT NULL;
 
         -- ==========================================================================
-        -- STEP 5a: Token balances from tx_guide post-balance columns (temp table approach)
+        -- STEP 5a: Token balances from tx_guide post-balance columns
         -- Two queries (from-side + to-side) with ON DUPLICATE KEY to get latest balance
+        -- Uses idx_from_token_time / idx_to_token_time for efficient (address, token, time) seeks
         -- ==========================================================================
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
         CREATE TEMPORARY TABLE tmp_token_bal (
@@ -471,12 +469,9 @@ BEGIN
           AND g.block_time <= v_block_time
           AND g.from_token_post_balance IS NOT NULL
         ON DUPLICATE KEY UPDATE
-            balance = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(balance), tmp_token_bal.balance),
-            block_time = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(block_time), tmp_token_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(guide_id), tmp_token_bal.guide_id);
+            balance = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(balance), tmp_token_bal.balance),
+            block_time = GREATEST(VALUES(block_time), tmp_token_bal.block_time),
+            guide_id = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(guide_id), tmp_token_bal.guide_id);
 
         -- Get token balances from TO side (uses idx_to_token_time)
         INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
@@ -489,12 +484,9 @@ BEGIN
           AND g.block_time <= v_block_time
           AND g.to_token_post_balance IS NOT NULL
         ON DUPLICATE KEY UPDATE
-            balance = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(balance), tmp_token_bal.balance),
-            block_time = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(block_time), tmp_token_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(guide_id), tmp_token_bal.guide_id);
+            balance = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(balance), tmp_token_bal.balance),
+            block_time = GREATEST(VALUES(block_time), tmp_token_bal.block_time),
+            guide_id = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(guide_id), tmp_token_bal.guide_id);
 
         -- Apply token balances to nodes
         UPDATE tmp_nodes n
@@ -504,9 +496,28 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
 
         -- ==========================================================================
-        -- STEP 5b: SOL balances from tx_guide post-balance columns (temp table approach)
-        -- Two queries (from-side + to-side) with ON DUPLICATE KEY to get latest balance
+        -- STEP 5b: SOL balances from tx_guide post-balance columns (two-step approach)
+        -- Step A: GROUP BY + MAX(block_time) per address to find latest SOL balance time
+        -- Step B: Fetch actual balance from that specific (address, block_time) row
+        -- This avoids inserting thousands of rows per address via ON DUPLICATE KEY
         -- ==========================================================================
+
+        -- Step A: Find max block_time with SOL balance per node (FROM side)
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
+        CREATE TEMPORARY TABLE tmp_sol_max (
+            address_id INT UNSIGNED PRIMARY KEY,
+            max_bt BIGINT UNSIGNED
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_sol_max (address_id, max_bt)
+        SELECT g.from_address_id, MAX(g.block_time)
+        FROM tx_guide g
+        WHERE g.from_address_id IN (SELECT address_id FROM tmp_nodes)
+          AND g.block_time <= v_block_time
+          AND g.from_sol_post_balance IS NOT NULL
+        GROUP BY g.from_address_id;
+
+        -- Step B: Fetch FROM-side balance at that block_time
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
         CREATE TEMPORARY TABLE tmp_sol_bal (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -515,39 +526,47 @@ BEGIN
             guide_id BIGINT UNSIGNED
         ) ENGINE=MEMORY;
 
-        -- Get SOL balances from FROM side (uses idx_from_time)
-        INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
-        SELECT g.from_address_id,
+        INSERT IGNORE INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
+        SELECT m.address_id,
                ROUND(g.from_sol_post_balance / 1e9, 9),
                g.block_time, g.id
-        FROM tx_guide g
-        WHERE g.from_address_id IN (SELECT address_id FROM tmp_nodes)
-          AND g.block_time <= v_block_time
-          AND g.from_sol_post_balance IS NOT NULL
-        ON DUPLICATE KEY UPDATE
-            sol_balance = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                            VALUES(sol_balance), tmp_sol_bal.sol_balance),
-            block_time = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(block_time), tmp_sol_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(guide_id), tmp_sol_bal.guide_id);
+        FROM tmp_sol_max m
+        JOIN tx_guide g ON g.from_address_id = m.address_id
+          AND g.block_time = m.max_bt
+          AND g.from_sol_post_balance IS NOT NULL;
 
-        -- Get SOL balances from TO side (uses idx_to_time)
-        INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
-        SELECT g.to_address_id,
-               ROUND(g.to_sol_post_balance / 1e9, 9),
-               g.block_time, g.id
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
+
+        -- Step A: Find max block_time with SOL balance per node (TO side)
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
+        CREATE TEMPORARY TABLE tmp_sol_max (
+            address_id INT UNSIGNED PRIMARY KEY,
+            max_bt BIGINT UNSIGNED
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_sol_max (address_id, max_bt)
+        SELECT g.to_address_id, MAX(g.block_time)
         FROM tx_guide g
         WHERE g.to_address_id IN (SELECT address_id FROM tmp_nodes)
           AND g.block_time <= v_block_time
           AND g.to_sol_post_balance IS NOT NULL
+        GROUP BY g.to_address_id;
+
+        -- Step B: Fetch TO-side balance, keep whichever side is more recent
+        INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
+        SELECT m.address_id,
+               ROUND(g.to_sol_post_balance / 1e9, 9),
+               g.block_time, g.id
+        FROM tmp_sol_max m
+        JOIN tx_guide g ON g.to_address_id = m.address_id
+          AND g.block_time = m.max_bt
+          AND g.to_sol_post_balance IS NOT NULL
         ON DUPLICATE KEY UPDATE
-            sol_balance = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                            VALUES(sol_balance), tmp_sol_bal.sol_balance),
-            block_time = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(block_time), tmp_sol_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(guide_id), tmp_sol_bal.guide_id);
+            sol_balance = IF(VALUES(block_time) >= tmp_sol_bal.block_time, VALUES(sol_balance), tmp_sol_bal.sol_balance),
+            block_time = GREATEST(VALUES(block_time), tmp_sol_bal.block_time),
+            guide_id = IF(VALUES(block_time) >= tmp_sol_bal.block_time, VALUES(guide_id), tmp_sol_bal.guide_id);
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
 
         -- Apply SOL balances to nodes
         UPDATE tmp_nodes n
