@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import json
+import random
 import re
 import time
 import sys
@@ -105,6 +106,33 @@ DB_CONFIG = {
     'ssl_verify_identity': False,
     'autocommit': True,  # Prevent table locks when idle
 }
+
+# Deadlock retry settings
+MAX_DEADLOCK_RETRIES = 5
+DEADLOCK_BASE_DELAY = 0.1
+
+
+def execute_with_deadlock_retry(cursor, conn, query, params=None,
+                                 max_retries=MAX_DEADLOCK_RETRIES):
+    """Execute a query with deadlock retry logic. Returns rowcount."""
+    for attempt in range(max_retries):
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            conn.commit()
+            return cursor.rowcount
+        except mysql.connector.Error as e:
+            if e.errno in (1213, 1205) and attempt < max_retries - 1:
+                conn.rollback()
+                delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                print(f"    [!] Deadlock (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s...")
+                time.sleep(delay)
+            else:
+                raise
+    return 0
+
 
 # SOL token addresses for funding detection
 SOL_TOKEN = 'So11111111111111111111111111111111111111111'
@@ -822,12 +850,11 @@ class AddressHistoryWorker:
             return
 
         placeholders = ','.join(['%s'] * len(addresses))
-        self.cursor.execute(f"""
+        execute_with_deadlock_retry(self.cursor, self.db_conn, f"""
             UPDATE tx_address
             SET init_tx_fetched = 1
             WHERE address IN ({placeholders})
         """, addresses)
-        self.db_conn.commit()
 
     def claim_addresses(self, addresses: List[str], force: bool = False) -> List[str]:
         """
@@ -846,25 +873,24 @@ class AddressHistoryWorker:
         for addr in addresses:
             if force:
                 # Force mode: claim any address not currently being processed (init_tx_fetched != 2)
-                self.cursor.execute("""
+                execute_with_deadlock_retry(self.cursor, self.db_conn, """
                     UPDATE tx_address
                     SET init_tx_fetched = 2
                     WHERE address = %s AND (init_tx_fetched != 2 OR init_tx_fetched IS NULL)
                 """, (addr,))
             else:
                 # Normal mode: only claim if init_tx_fetched is still 0 (or NULL)
-                self.cursor.execute("""
+                execute_with_deadlock_retry(self.cursor, self.db_conn, """
                     UPDATE tx_address
                     SET init_tx_fetched = 2
                     WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
                 """, (addr,))
             if self.cursor.rowcount > 0:
                 claimed.append(addr)
-        self.db_conn.commit()
         return claimed
 
     def ensure_addresses_exist(self, addresses: List[str]):
-        """Ensure all addresses exist in tx_address table"""
+        """Ensure all addresses exist in tx_address table. Uses deadlock retry for INSERT."""
         if not addresses:
             return
 
@@ -877,11 +903,22 @@ class AddressHistoryWorker:
         new_addresses = [addr for addr in addresses if addr not in existing]
         if new_addresses:
             values = [(addr, 'unknown') for addr in new_addresses]
-            self.cursor.executemany("""
-                INSERT INTO tx_address (address, address_type)
-                VALUES (%s, %s)
-            """, values)
-            self.db_conn.commit()
+            for attempt in range(MAX_DEADLOCK_RETRIES):
+                try:
+                    self.cursor.executemany("""
+                        INSERT INTO tx_address (address, address_type)
+                        VALUES (%s, %s)
+                    """, values)
+                    self.db_conn.commit()
+                    break
+                except mysql.connector.Error as e:
+                    if e.errno in (1213, 1205) and attempt < MAX_DEADLOCK_RETRIES - 1:
+                        self.db_conn.rollback()
+                        delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                        print(f"    [!] Deadlock in ensure_addresses_exist (attempt {attempt + 1}/{MAX_DEADLOCK_RETRIES}), retrying in {delay:.2f}s...")
+                        time.sleep(delay)
+                    else:
+                        raise
 
     def save_funding_info(self, target_address: str, funding_info: Dict, request_log_id: int = None):
         """
@@ -901,161 +938,172 @@ class AddressHistoryWorker:
         account_type = funding_info.get('account_type')
         active_age = funding_info.get('active_age')
 
-        # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
-        # Mark as init_tx_fetched=1 to prevent recursive funder lookups (we don't need to find the funder's funder)
-        # Set request_log_id for billing linkage (only on new addresses)
-        self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
-        funder_row = self.cursor.fetchone()
-        if funder_row:
-            funder_id = funder_row['id']
-        else:
-            self.cursor.execute("""
-                INSERT INTO tx_address (address, address_type, init_tx_fetched, request_log_id)
-                VALUES (%s, 'wallet', 1, %s)
-            """, (funder, request_log_id))
-            funder_id = self.cursor.lastrowid
+        for attempt in range(MAX_DEADLOCK_RETRIES):
+            try:
+                # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
+                # Mark as init_tx_fetched=1 to prevent recursive funder lookups (we don't need to find the funder's funder)
+                # Set request_log_id for billing linkage (only on new addresses)
+                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
+                funder_row = self.cursor.fetchone()
+                if funder_row:
+                    funder_id = funder_row['id']
+                else:
+                    self.cursor.execute("""
+                        INSERT INTO tx_address (address, address_type, init_tx_fetched, request_log_id)
+                        VALUES (%s, 'wallet', 1, %s)
+                    """, (funder, request_log_id))
+                    funder_id = self.cursor.lastrowid
 
-        # Get target address ID
-        self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
-        target_row = self.cursor.fetchone()
-        target_id = target_row['id'] if target_row else None
+                # Get target address ID
+                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
+                target_row = self.cursor.fetchone()
+                target_id = target_row['id'] if target_row else None
 
-        # Build dynamic UPDATE with available metadata fields
-        update_fields = ["funded_by_address_id = %s"]
-        update_values = [funder_id]
+                # Build dynamic UPDATE with available metadata fields
+                update_fields = ["funded_by_address_id = %s"]
+                update_values = [funder_id]
 
-        if amount is not None:
-            update_fields.append("funding_amount = %s")
-            update_values.append(amount)
+                if amount is not None:
+                    update_fields.append("funding_amount = %s")
+                    update_values.append(amount)
 
-        if block_time is not None:
-            update_fields.append("first_seen_block_time = %s")
-            update_values.append(block_time)
+                if block_time is not None:
+                    update_fields.append("first_seen_block_time = %s")
+                    update_values.append(block_time)
 
-        if label is not None:
-            update_fields.append("label = COALESCE(label, %s)")  # Don't overwrite existing labels
-            update_values.append(label)
+                if label is not None:
+                    update_fields.append("label = COALESCE(label, %s)")  # Don't overwrite existing labels
+                    update_values.append(label)
 
-        mapped_type = None
+                mapped_type = None
 
-        if tags is not None:
-            update_fields.append("account_tags = %s")
-            update_values.append(json.dumps(tags) if tags else None)
+                if tags is not None:
+                    update_fields.append("account_tags = %s")
+                    update_values.append(json.dumps(tags) if tags else None)
 
-            # Derive address_type from account_tags (more specific than account_type)
-            tags_lower = [t.lower() for t in tags] if tags else []
-            label_lower = (label or '').lower()
+                    # Derive address_type from account_tags (more specific than account_type)
+                    tags_lower = [t.lower() for t in tags] if tags else []
+                    label_lower = (label or '').lower()
 
-            # Priority order: label-based vault check first (vault authorities/LP vaults
-            # often carry a 'pool' tag but are NOT pools — they own token accounts).
-            # Must exclude labels where "vault" is a token name inside parens,
-            # e.g. "Pump.fun AMM (VAULT-WSOL) Market" is a legit pool.
-            if ('vault' in label_lower
-                    and not re.search(r'\([^)]*vault[^)]*\)', label_lower)):
-                mapped_type = 'vault'
-            elif 'pool' in tags_lower:
-                mapped_type = 'pool'
-            elif 'market' in tags_lower:
-                mapped_type = 'market'
-            elif any('vault' in tag for tag in tags_lower):
-                mapped_type = 'vault'
-            elif 'lptoken' in tags_lower:
-                mapped_type = 'lp_token'
-            elif 'dex_wallet' in tags_lower:
-                mapped_type = 'dex_wallet'
-            elif 'fee_vault' in tags_lower:
-                mapped_type = 'fee_vault'
-            elif 'arbitrage_bot' in tags_lower:
-                mapped_type = 'bot'
-            elif 'token_creator' in tags_lower:
-                mapped_type = 'wallet'
-                # Set label for token creators (type stays wallet for tax detection)
-                update_fields.append("label = COALESCE(label, %s)")
-                update_values.append('Token Creator')
-            elif 'memecoin' in tags_lower:
-                mapped_type = 'mint'
-            elif account_type == 'token_account':
-                mapped_type = 'ata'
-            elif account_type == 'mint':
-                mapped_type = 'mint'
-            elif account_type == 'address':
-                mapped_type = 'wallet'
+                    # Priority order: label-based vault check first (vault authorities/LP vaults
+                    # often carry a 'pool' tag but are NOT pools — they own token accounts).
+                    # Must exclude labels where "vault" is a token name inside parens,
+                    # e.g. "Pump.fun AMM (VAULT-WSOL) Market" is a legit pool.
+                    if ('vault' in label_lower
+                            and not re.search(r'\([^)]*vault[^)]*\)', label_lower)):
+                        mapped_type = 'vault'
+                    elif 'pool' in tags_lower:
+                        mapped_type = 'pool'
+                    elif 'market' in tags_lower:
+                        mapped_type = 'market'
+                    elif any('vault' in tag for tag in tags_lower):
+                        mapped_type = 'vault'
+                    elif 'lptoken' in tags_lower:
+                        mapped_type = 'lp_token'
+                    elif 'dex_wallet' in tags_lower:
+                        mapped_type = 'dex_wallet'
+                    elif 'fee_vault' in tags_lower:
+                        mapped_type = 'fee_vault'
+                    elif 'arbitrage_bot' in tags_lower:
+                        mapped_type = 'bot'
+                    elif 'token_creator' in tags_lower:
+                        mapped_type = 'wallet'
+                        # Set label for token creators (type stays wallet for tax detection)
+                        update_fields.append("label = COALESCE(label, %s)")
+                        update_values.append('Token Creator')
+                    elif 'memecoin' in tags_lower:
+                        mapped_type = 'mint'
+                    elif account_type == 'token_account':
+                        mapped_type = 'ata'
+                    elif account_type == 'mint':
+                        mapped_type = 'mint'
+                    elif account_type == 'address':
+                        mapped_type = 'wallet'
 
-            if mapped_type:
-                # Override unknown, wallet, and ata (ata is often incorrectly assigned)
-                update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
-                update_values.append(mapped_type)
+                    if mapped_type:
+                        # Override unknown, wallet, and ata (ata is often incorrectly assigned)
+                        update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
+                        update_values.append(mapped_type)
 
-        elif account_type is not None:
-            # Fallback: use account_type if no tags
-            mapped_type = account_type
-            if account_type == 'token_account':
-                mapped_type = 'ata'
-            elif account_type == 'address':
-                mapped_type = 'wallet'
-            update_fields.append("address_type = CASE WHEN address_type = 'unknown' THEN %s ELSE address_type END")
-            update_values.append(mapped_type)
+                elif account_type is not None:
+                    # Fallback: use account_type if no tags
+                    mapped_type = account_type
+                    if account_type == 'token_account':
+                        mapped_type = 'ata'
+                    elif account_type == 'address':
+                        mapped_type = 'wallet'
+                    update_fields.append("address_type = CASE WHEN address_type = 'unknown' THEN %s ELSE address_type END")
+                    update_values.append(mapped_type)
 
-        if active_age is not None:
-            update_fields.append("active_age_days = %s")
-            update_values.append(active_age)
+                if active_age is not None:
+                    update_fields.append("active_age_days = %s")
+                    update_values.append(active_age)
 
-        update_values.append(target_address)
+                update_values.append(target_address)
 
-        # Execute update with all available fields
-        self.cursor.execute(f"""
-            UPDATE tx_address
-            SET {', '.join(update_fields)}
-            WHERE address = %s AND funded_by_address_id IS NULL
-        """, update_values)
+                # Execute update with all available fields
+                self.cursor.execute(f"""
+                    UPDATE tx_address
+                    SET {', '.join(update_fields)}
+                    WHERE address = %s AND funded_by_address_id IS NULL
+                """, update_values)
 
-        # Ensure tx_pool record exists for pool/lp_token addresses
-        # Label format: "Meteora (PAPER-WSOL) Pool 1" or "Raydium (KOINZ) LP Token"
-        if mapped_type in ('pool', 'lp_token') and target_id:
-            self.cursor.execute(
-                "SELECT 1 FROM tx_pool WHERE pool_address_id = %s", (target_id,))
-            if not self.cursor.fetchone():
-                program_id = None
-                token1_id = None
-                token2_id = None
+                # Ensure tx_pool record exists for pool/lp_token addresses
+                # Label format: "Meteora (PAPER-WSOL) Pool 1" or "Raydium (KOINZ) LP Token"
+                if mapped_type in ('pool', 'lp_token') and target_id:
+                    self.cursor.execute(
+                        "SELECT 1 FROM tx_pool WHERE pool_address_id = %s", (target_id,))
+                    if not self.cursor.fetchone():
+                        program_id = None
+                        token1_id = None
+                        token2_id = None
 
-                if label:
-                    # DEX name is everything before the opening paren
-                    paren_match = re.match(r'^(.+?)\s*\((.+?)\)', label)
-                    if paren_match:
-                        dex_name = paren_match.group(1).strip()
-                        token_part = paren_match.group(2).strip()
+                        if label:
+                            # DEX name is everything before the opening paren
+                            paren_match = re.match(r'^(.+?)\s*\((.+?)\)', label)
+                            if paren_match:
+                                dex_name = paren_match.group(1).strip()
+                                token_part = paren_match.group(2).strip()
 
-                        # Look up DEX program
-                        if dex_name:
-                            self.cursor.execute(
-                                "SELECT id FROM tx_program WHERE name = %s LIMIT 1",
-                                (dex_name,))
-                            prog_row = self.cursor.fetchone()
-                            if prog_row:
-                                program_id = prog_row['id']
+                                # Look up DEX program
+                                if dex_name:
+                                    self.cursor.execute(
+                                        "SELECT id FROM tx_program WHERE name = %s LIMIT 1",
+                                        (dex_name,))
+                                    prog_row = self.cursor.fetchone()
+                                    if prog_row:
+                                        program_id = prog_row['id']
 
-                        # Parse tokens: "PAPER-WSOL" → token1=PAPER, token2=WSOL
-                        #                "KOINZ"     → token1=KOINZ
-                        symbols = [s.strip() for s in token_part.split('-', 1)]
-                        for i, sym in enumerate(symbols[:2]):
-                            if sym:
-                                self.cursor.execute(
-                                    "SELECT id FROM tx_token WHERE token_symbol = %s LIMIT 1",
-                                    (sym,))
-                                tok_row = self.cursor.fetchone()
-                                if tok_row:
-                                    if i == 0:
-                                        token1_id = tok_row['id']
-                                    else:
-                                        token2_id = tok_row['id']
+                                # Parse tokens: "PAPER-WSOL" → token1=PAPER, token2=WSOL
+                                #                "KOINZ"     → token1=KOINZ
+                                symbols = [s.strip() for s in token_part.split('-', 1)]
+                                for i, sym in enumerate(symbols[:2]):
+                                    if sym:
+                                        self.cursor.execute(
+                                            "SELECT id FROM tx_token WHERE token_symbol = %s LIMIT 1",
+                                            (sym,))
+                                        tok_row = self.cursor.fetchone()
+                                        if tok_row:
+                                            if i == 0:
+                                                token1_id = tok_row['id']
+                                            else:
+                                                token2_id = tok_row['id']
 
-                self.cursor.execute("""
-                    INSERT INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (target_id, program_id, token1_id, token2_id, label))
+                        self.cursor.execute("""
+                            INSERT INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (target_id, program_id, token1_id, token2_id, label))
 
-        self.db_conn.commit()
+                self.db_conn.commit()
+                break  # Success, exit retry loop
+            except mysql.connector.Error as e:
+                if e.errno in (1213, 1205) and attempt < MAX_DEADLOCK_RETRIES - 1:
+                    self.db_conn.rollback()
+                    delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                    print(f"    [!] Deadlock in save_funding_info (attempt {attempt + 1}/{MAX_DEADLOCK_RETRIES}), retrying in {delay:.2f}s...")
+                    time.sleep(delay)
+                else:
+                    raise
 
     def find_funder_for_address(self, address: str) -> Optional[Dict]:
         """
@@ -1166,13 +1214,12 @@ class AddressHistoryWorker:
         # This ensures the client who requested funder processing is billed, not the original creator
         if force and request_log_id and claimed:
             placeholders = ','.join(['%s'] * len(claimed))
-            self.cursor.execute(f"""
+            rowcount = execute_with_deadlock_retry(self.cursor, self.db_conn, f"""
                 UPDATE tx_address
                 SET request_log_id = %s
                 WHERE address IN ({placeholders})
             """, [request_log_id] + claimed)
-            self.db_conn.commit()
-            print(f"  Updated {self.cursor.rowcount} addresses with request_log_id={request_log_id}")
+            print(f"  Updated {rowcount} addresses with request_log_id={request_log_id}")
 
         # Step 5: Find funders using batch API
         # Get batch_size from config table (runtime_editable, checked each iteration)
@@ -1598,20 +1645,30 @@ def main():
                 new_addresses = [addr for addr in addresses if addr not in existing]
                 if new_addresses:
                     values = [(addr, 'unknown') for addr in new_addresses]
-                    self.cursor.executemany("""
-                        INSERT INTO tx_address (address, address_type) VALUES (%s, %s)
-                    """, values)
-                    self.db_conn.commit()
+                    for attempt in range(MAX_DEADLOCK_RETRIES):
+                        try:
+                            self.cursor.executemany("""
+                                INSERT INTO tx_address (address, address_type) VALUES (%s, %s)
+                            """, values)
+                            self.db_conn.commit()
+                            break
+                        except mysql.connector.Error as e:
+                            if e.errno in (1213, 1205) and attempt < MAX_DEADLOCK_RETRIES - 1:
+                                self.db_conn.rollback()
+                                delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                                print(f"    [!] Deadlock in ensure_addresses_exist (attempt {attempt + 1}/{MAX_DEADLOCK_RETRIES}), retrying in {delay:.2f}s...")
+                                time.sleep(delay)
+                            else:
+                                raise
 
             def mark_addresses_initialized(self, addresses):
                 if not addresses or self.dry_run:
                     return
                 placeholders = ','.join(['%s'] * len(addresses))
-                self.cursor.execute(f"""
+                execute_with_deadlock_retry(self.cursor, self.db_conn, f"""
                     UPDATE tx_address SET init_tx_fetched = 1
                     WHERE address IN ({placeholders})
                 """, addresses)
-                self.db_conn.commit()
 
             def claim_addresses(self, addresses):
                 """Atomically claim addresses (0/NULL -> 2). Returns claimed list."""
@@ -1619,13 +1676,12 @@ def main():
                     return addresses
                 claimed = []
                 for addr in addresses:
-                    self.cursor.execute("""
+                    execute_with_deadlock_retry(self.cursor, self.db_conn, """
                         UPDATE tx_address SET init_tx_fetched = 2
                         WHERE address = %s AND (init_tx_fetched = 0 OR init_tx_fetched IS NULL)
                     """, (addr,))
                     if self.cursor.rowcount > 0:
                         claimed.append(addr)
-                self.db_conn.commit()
                 return claimed
 
             def find_funder_for_address(self, address):
@@ -1674,102 +1730,113 @@ def main():
                 account_type = funding_info.get('account_type')
                 active_age = funding_info.get('active_age')
 
-                # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
-                # Mark as init_tx_fetched=1 to prevent recursive funder lookups
-                # Set request_log_id for billing linkage (only on new addresses)
-                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
-                funder_row = self.cursor.fetchone()
-                if funder_row:
-                    funder_id = funder_row['id']
-                else:
-                    self.cursor.execute("""
-                        INSERT INTO tx_address (address, address_type, init_tx_fetched, request_log_id)
-                        VALUES (%s, 'wallet', 1, %s)
-                    """, (funder, request_log_id))
-                    funder_id = self.cursor.lastrowid
+                for attempt in range(MAX_DEADLOCK_RETRIES):
+                    try:
+                        # Get funder address ID, insert only if doesn't exist (avoids AUTO_INCREMENT consumption)
+                        # Mark as init_tx_fetched=1 to prevent recursive funder lookups
+                        # Set request_log_id for billing linkage (only on new addresses)
+                        self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (funder,))
+                        funder_row = self.cursor.fetchone()
+                        if funder_row:
+                            funder_id = funder_row['id']
+                        else:
+                            self.cursor.execute("""
+                                INSERT INTO tx_address (address, address_type, init_tx_fetched, request_log_id)
+                                VALUES (%s, 'wallet', 1, %s)
+                            """, (funder, request_log_id))
+                            funder_id = self.cursor.lastrowid
 
-                self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
-                target_row = self.cursor.fetchone()
-                target_id = target_row['id'] if target_row else None
+                        self.cursor.execute("SELECT id FROM tx_address WHERE address = %s", (target_address,))
+                        target_row = self.cursor.fetchone()
+                        target_id = target_row['id'] if target_row else None
 
-                # Build dynamic UPDATE with available metadata fields
-                update_fields = ["funded_by_address_id = %s"]
-                update_values = [funder_id]
+                        # Build dynamic UPDATE with available metadata fields
+                        update_fields = ["funded_by_address_id = %s"]
+                        update_values = [funder_id]
 
-                if amount is not None:
-                    update_fields.append("funding_amount = %s")
-                    update_values.append(amount)
+                        if amount is not None:
+                            update_fields.append("funding_amount = %s")
+                            update_values.append(amount)
 
-                if block_time is not None:
-                    update_fields.append("first_seen_block_time = %s")
-                    update_values.append(block_time)
+                        if block_time is not None:
+                            update_fields.append("first_seen_block_time = %s")
+                            update_values.append(block_time)
 
-                if label is not None:
-                    update_fields.append("label = COALESCE(label, %s)")
-                    update_values.append(label)
+                        if label is not None:
+                            update_fields.append("label = COALESCE(label, %s)")
+                            update_values.append(label)
 
-                if tags is not None:
-                    update_fields.append("account_tags = %s")
-                    update_values.append(json.dumps(tags) if tags else None)
+                        if tags is not None:
+                            update_fields.append("account_tags = %s")
+                            update_values.append(json.dumps(tags) if tags else None)
 
-                    # Derive address_type from account_tags
-                    tags_lower = [t.lower() for t in tags] if tags else []
-                    mapped_type = None
+                            # Derive address_type from account_tags
+                            tags_lower = [t.lower() for t in tags] if tags else []
+                            mapped_type = None
 
-                    if 'pool' in tags_lower:
-                        mapped_type = 'pool'
-                    elif 'market' in tags_lower:
-                        mapped_type = 'market'
-                    elif any('vault' in tag for tag in tags_lower):
-                        mapped_type = 'vault'
-                    elif 'lptoken' in tags_lower:
-                        mapped_type = 'lp_token'
-                    elif 'dex_wallet' in tags_lower:
-                        mapped_type = 'dex_wallet'
-                    elif 'fee_vault' in tags_lower:
-                        mapped_type = 'fee_vault'
-                    elif 'arbitrage_bot' in tags_lower:
-                        mapped_type = 'bot'
-                    elif 'token_creator' in tags_lower:
-                        mapped_type = 'wallet'
-                        # Set label for token creators (type stays wallet for tax detection)
-                        update_fields.append("label = COALESCE(label, %s)")
-                        update_values.append('Token Creator')
-                    elif 'memecoin' in tags_lower:
-                        mapped_type = 'mint'
-                    elif account_type == 'token_account':
-                        mapped_type = 'ata'
-                    elif account_type == 'mint':
-                        mapped_type = 'mint'
-                    elif account_type == 'address':
-                        mapped_type = 'wallet'
+                            if 'pool' in tags_lower:
+                                mapped_type = 'pool'
+                            elif 'market' in tags_lower:
+                                mapped_type = 'market'
+                            elif any('vault' in tag for tag in tags_lower):
+                                mapped_type = 'vault'
+                            elif 'lptoken' in tags_lower:
+                                mapped_type = 'lp_token'
+                            elif 'dex_wallet' in tags_lower:
+                                mapped_type = 'dex_wallet'
+                            elif 'fee_vault' in tags_lower:
+                                mapped_type = 'fee_vault'
+                            elif 'arbitrage_bot' in tags_lower:
+                                mapped_type = 'bot'
+                            elif 'token_creator' in tags_lower:
+                                mapped_type = 'wallet'
+                                # Set label for token creators (type stays wallet for tax detection)
+                                update_fields.append("label = COALESCE(label, %s)")
+                                update_values.append('Token Creator')
+                            elif 'memecoin' in tags_lower:
+                                mapped_type = 'mint'
+                            elif account_type == 'token_account':
+                                mapped_type = 'ata'
+                            elif account_type == 'mint':
+                                mapped_type = 'mint'
+                            elif account_type == 'address':
+                                mapped_type = 'wallet'
 
-                    if mapped_type:
-                        update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
-                        update_values.append(mapped_type)
+                            if mapped_type:
+                                update_fields.append("address_type = CASE WHEN address_type IN ('unknown', 'wallet', 'ata', 'program', 'mint') THEN %s ELSE address_type END")
+                                update_values.append(mapped_type)
 
-                elif account_type is not None:
-                    mapped_type = account_type
-                    if account_type == 'token_account':
-                        mapped_type = 'ata'
-                    elif account_type == 'address':
-                        mapped_type = 'wallet'
-                    update_fields.append("address_type = CASE WHEN address_type = 'unknown' THEN %s ELSE address_type END")
-                    update_values.append(mapped_type)
+                        elif account_type is not None:
+                            mapped_type = account_type
+                            if account_type == 'token_account':
+                                mapped_type = 'ata'
+                            elif account_type == 'address':
+                                mapped_type = 'wallet'
+                            update_fields.append("address_type = CASE WHEN address_type = 'unknown' THEN %s ELSE address_type END")
+                            update_values.append(mapped_type)
 
-                if active_age is not None:
-                    update_fields.append("active_age_days = %s")
-                    update_values.append(active_age)
+                        if active_age is not None:
+                            update_fields.append("active_age_days = %s")
+                            update_values.append(active_age)
 
-                update_values.append(target_address)
+                        update_values.append(target_address)
 
-                self.cursor.execute(f"""
-                    UPDATE tx_address
-                    SET {', '.join(update_fields)}
-                    WHERE address = %s AND funded_by_address_id IS NULL
-                """, update_values)
+                        self.cursor.execute(f"""
+                            UPDATE tx_address
+                            SET {', '.join(update_fields)}
+                            WHERE address = %s AND funded_by_address_id IS NULL
+                        """, update_values)
 
-                self.db_conn.commit()
+                        self.db_conn.commit()
+                        break  # Success
+                    except mysql.connector.Error as e:
+                        if e.errno in (1213, 1205) and attempt < MAX_DEADLOCK_RETRIES - 1:
+                            self.db_conn.rollback()
+                            delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
+                            print(f"    [!] Deadlock in save_funding_info (attempt {attempt + 1}/{MAX_DEADLOCK_RETRIES}), retrying in {delay:.2f}s...")
+                            time.sleep(delay)
+                        else:
+                            raise
 
             def get_missing_addresses(self, limit: int) -> list:
                 """
@@ -1881,12 +1948,11 @@ def main():
                     return
 
                 update_values.append(target_address)
-                self.cursor.execute(f"""
+                execute_with_deadlock_retry(self.cursor, self.db_conn, f"""
                     UPDATE tx_address
                     SET {', '.join(update_fields)}
                     WHERE address = %s
                 """, update_values)
-                self.db_conn.commit()
 
         worker = FileWorker(db_conn, solscan, args.tx_limit, args.dry_run, args.api_delay, args.batch_delay)
 
