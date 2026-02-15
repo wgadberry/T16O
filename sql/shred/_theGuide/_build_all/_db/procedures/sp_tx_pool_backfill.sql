@@ -65,8 +65,7 @@ BEGIN
     FROM tx_pool p
     JOIN tx_address a ON a.id = p.pool_address_id
     WHERE (p.token1_id IS NULL OR p.token2_id IS NULL OR p.pool_label IS NULL)
-      AND a.label IS NOT NULL
-      AND p.attempt_cnt < 10;
+      AND a.label IS NOT NULL;
 
     UPDATE tx_pool p
     JOIN tmp_backfill_pools b ON b.pool_id = p.id
@@ -76,8 +75,7 @@ BEGIN
     SET p.program_id  = COALESCE(p.program_id, pr.id),
         p.token1_id   = COALESCE(p.token1_id, t1.id),
         p.token2_id   = COALESCE(p.token2_id, t2.id),
-        p.pool_label  = COALESCE(p.pool_label, b.label),
-        p.attempt_cnt = p.attempt_cnt + 1;
+        p.pool_label  = COALESCE(p.pool_label, b.label);
 
     SET p_labels_updated = ROW_COUNT();
     DROP TEMPORARY TABLE IF EXISTS tmp_backfill_pools;
