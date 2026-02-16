@@ -867,24 +867,18 @@ def main():
         print("Error: mysql-connector-python not installed")
         return 1
 
-    if args.daemon:
-        return run_daemon(
-            batch_size=args.batch_size,
-            interval=args.interval,
-            dry_run=args.dry_run
-        )
-    elif args.once:
+    if args.once:
         return run_once(
             batch_size=args.batch_size,
             dry_run=args.dry_run
         )
     else:
-        print("Error: Must specify --daemon or --once")
-        print("Usage:")
-        print("  python guide-shredder.py --daemon           # Continuous mode")
-        print("  python guide-shredder.py --once             # Process once")
-        print("  python guide-shredder.py --daemon --dry-run # Preview mode")
-        return 1
+        # Default to daemon mode (--daemon flag optional)
+        return run_daemon(
+            batch_size=args.batch_size,
+            interval=args.interval,
+            dry_run=args.dry_run
+        )
 
 
 if __name__ == '__main__':

@@ -19,7 +19,7 @@ class GatewayService(GuideServiceBase):
     _svc_description_ = 'T16O Exchange Guide Gateway Service - Request orchestrator for theGuide pipeline'
 
     worker_name = 'gateway'
-    worker_args = ['--queue-consumer']
+    worker_args = ['--with-queue-consumer', '--with-response-consumer']
 
 
 if __name__ == '__main__':

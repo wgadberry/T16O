@@ -116,8 +116,9 @@ def get_service_config(service_name: str) -> Dict[str, Any]:
 SERVICE_REGISTRY = {
     'gateway': {
         'worker_module': 'guide-gateway',
-        'worker_entry': 'run_queue_consumer',
+        'worker_entry': 'main',
         'has_queue': True,
+        'auto_args': False,  # gateway uses its own CLI flags
     },
     'producer': {
         'worker_module': 'guide-producer',
