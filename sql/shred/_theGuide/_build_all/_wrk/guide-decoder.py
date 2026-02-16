@@ -29,7 +29,7 @@ import requests
 import pika
 import mysql.connector
 from mysql.connector import Error as MySQLError
-from datetime import datetime
+from datetime import datetime, timezone
 
 # =============================================================================
 # Static config (from guide-config.json)
@@ -414,7 +414,7 @@ class WorkerThread(threading.Thread):
             'correlation_id': correlation_id,
             'worker':         'decoder',
             'status':         status,
-            'timestamp':      datetime.now(datetime.timezone.utc).isoformat(),
+            'timestamp':      datetime.now(timezone.utc).isoformat(),
             'result':         result,
         })
         ch.basic_publish(

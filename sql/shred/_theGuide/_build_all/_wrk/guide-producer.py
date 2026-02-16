@@ -936,6 +936,27 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     filters = batch.get('filters', {})
     max_signatures = batch.get('size', 100)
 
+    # --- Pass-through mode: signatures provided directly, skip RPC ---
+    direct_signatures = batch.get('signatures', [])
+    if direct_signatures:
+        if isinstance(direct_signatures, str):
+            direct_signatures = [direct_signatures]
+        print(f"[{request_id[:8]}] Pass-through mode: {len(direct_signatures)} signature(s) provided directly")
+
+        if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                      direct_signatures, 1, 1, priority,
+                                      request_log_id, api_key_id, features):
+            print(f"  [CASCADE] Batch 1 -> decoder+detailer ({len(direct_signatures)} sigs)")
+
+        return {
+            'processed': len(direct_signatures),
+            'batches': 1,
+            'skipped': 0,
+            'errors': 0,
+            'mode': 'pass-through',
+            'cascade_to': []
+        }
+
     # Support both legacy string format and new object format for before/until
     # New format: {"signature": "...", "block_id": 123, "block_time": "2025-01-15T10:00:00Z"}
     request_before = filters.get('before')
@@ -1042,25 +1063,33 @@ def run_queue_consumer(prefetch: int = 1):
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
 
-                    # Validate message format - support both singular and plural address formats
+                    # Validate message format
                     batch = message.get('batch', {})
-                    filters = batch.get('filters', {})
 
-                    # Handle multiple formats: addresses (array), address (string), mint_address (string)
-                    addresses = filters.get('addresses', [])
-                    if not addresses:
-                        single_addr = filters.get('mint_address') or filters.get('address')
-                        if single_addr:
-                            addresses = [single_addr]
+                    # Pass-through mode: batch.signatures provided directly (skip RPC)
+                    direct_signatures = batch.get('signatures', [])
+                    if direct_signatures:
+                        # Valid pass-through request, skip address validation
+                        pass
+                    else:
+                        # Normal mode: require address in batch.filters
+                        filters = batch.get('filters', {})
 
-                    if not addresses:
-                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address in batch.filters)")
-                        print(f"  Keys received: {list(message.keys())}, filters: {list(filters.keys())}")
-                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
-                        return
+                        # Handle multiple formats: addresses (array), address (string), mint_address (string)
+                        addresses = filters.get('addresses', [])
+                        if not addresses:
+                            single_addr = filters.get('mint_address') or filters.get('address')
+                            if single_addr:
+                                addresses = [single_addr]
 
-                    # Store addresses in message for processing
-                    message['_addresses'] = addresses
+                        if not addresses:
+                            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address in batch.filters)")
+                            print(f"  Keys received: {list(message.keys())}, batch keys: {list(batch.keys())}")
+                            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
+                            return
+
+                        # Store addresses in message for processing
+                        message['_addresses'] = addresses
 
                     correlation_id = message.get('correlation_id', request_id)
                     request_log_id = message.get('request_log_id')  # For billing linkage
