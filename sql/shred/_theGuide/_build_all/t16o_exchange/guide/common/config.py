@@ -2,6 +2,7 @@
 Shared configuration for T16O Exchange Guide Services
 
 Loads configuration from guide-config.json and provides service-specific settings.
+All workers should import config from here instead of loading guide-config.json directly.
 """
 
 import json
@@ -18,15 +19,18 @@ DEFAULT_CONFIG_PATH = os.path.join(
 _config_cache: Optional[Dict[str, Any]] = None
 
 
+def _require(cfg: Dict[str, Any], key: str) -> Any:
+    """Get a required config key, raise if missing."""
+    if key not in cfg:
+        raise KeyError(f"Missing required config key '{key}' in guide-config.json")
+    return cfg[key]
+
+
 def load_config(config_path: str = None) -> Dict[str, Any]:
     """
-    Load configuration from guide-config.json
-
-    Args:
-        config_path: Optional path to config file. Defaults to _wrk/guide-config.json
-
-    Returns:
-        Configuration dictionary
+    Load configuration from guide-config.json.
+    Raises FileNotFoundError if config file is missing.
+    Raises json.JSONDecodeError if config file is malformed.
     """
     global _config_cache
 
@@ -35,13 +39,8 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
 
     path = config_path or DEFAULT_CONFIG_PATH
 
-    try:
-        with open(path, 'r') as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        config = {}
-    except json.JSONDecodeError:
-        config = {}
+    with open(path, 'r') as f:
+        config = json.load(f)
 
     if config_path is None:
         _config_cache = config
@@ -49,66 +48,97 @@ def load_config(config_path: str = None) -> Dict[str, Any]:
     return config
 
 
-def get_db_config() -> Dict[str, Any]:
-    """Get MySQL database configuration"""
+def get_db_config(autocommit: bool = True) -> Dict[str, Any]:
+    """Get MySQL database configuration."""
     cfg = load_config()
     return {
-        'host': cfg.get('DB_HOST', '127.0.0.1'),
-        'port': cfg.get('DB_PORT', 3396),
-        'user': cfg.get('DB_USER', 'root'),
-        'password': cfg.get('DB_PASSWORD', 'rootpassword'),
-        'database': cfg.get('DB_NAME', 't16o_db'),
-        'ssl_disabled': True,
-        'use_pure': True,
-        'ssl_verify_cert': False,
-        'ssl_verify_identity': False
+        'host':               _require(cfg, 'DB_HOST'),
+        'port':               _require(cfg, 'DB_PORT'),
+        'user':               _require(cfg, 'DB_USER'),
+        'password':           _require(cfg, 'DB_PASSWORD'),
+        'database':           _require(cfg, 'DB_NAME'),
+        'ssl_disabled':       True,
+        'use_pure':           True,
+        'ssl_verify_cert':    False,
+        'ssl_verify_identity': False,
+        'autocommit':         autocommit,
     }
 
 
 def get_rabbitmq_config() -> Dict[str, Any]:
-    """Get RabbitMQ configuration"""
+    """Get RabbitMQ configuration including heartbeat/timeout settings."""
     cfg = load_config()
     return {
-        'host': cfg.get('RABBITMQ_HOST', 'localhost'),
-        'port': cfg.get('RABBITMQ_PORT', 5692),
-        'user': cfg.get('RABBITMQ_USER', 'admin'),
-        'password': cfg.get('RABBITMQ_PASSWORD', 'admin123'),
-        'vhost': cfg.get('RABBITMQ_VHOST', 't16o_mq'),
+        'host':             _require(cfg, 'RABBITMQ_HOST'),
+        'port':             _require(cfg, 'RABBITMQ_PORT'),
+        'user':             _require(cfg, 'RABBITMQ_USER'),
+        'password':         _require(cfg, 'RABBITMQ_PASSWORD'),
+        'vhost':            _require(cfg, 'RABBITMQ_VHOST'),
+        'heartbeat':        cfg.get('RABBITMQ_HEARTBEAT', 600),
+        'blocked_timeout':  cfg.get('RABBITMQ_BLOCKED_TIMEOUT', 300),
+    }
+
+
+def get_queue_names(worker: str) -> Dict[str, str]:
+    """Get RabbitMQ queue names for a worker (request/response/dlq)."""
+    base = f'mq.guide.{worker}'
+    return {
+        'request':  f'{base}.request',
+        'response': f'{base}.response',
+        'dlq':      f'{base}.dlq',
     }
 
 
 def get_rpc_config() -> Dict[str, Any]:
-    """Get Solana RPC configuration"""
+    """Get Solana RPC configuration."""
     cfg = load_config()
     return {
-        'url': cfg.get('RPC_URL', 'https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb'),
+        'url': _require(cfg, 'RPC_URL'),
+    }
+
+
+def get_solscan_config() -> Dict[str, Any]:
+    """Get Solscan API configuration."""
+    cfg = load_config()
+    return {
+        'api_base': _require(cfg, 'SOLSCAN_API'),
+        'token':    _require(cfg, 'SOLSCAN_TOKEN'),
+    }
+
+
+def get_staging_config() -> Dict[str, str]:
+    """Get staging database/table names."""
+    return {
+        'schema': 't16o_db_staging',
+        'table':  'txs',
+    }
+
+
+def get_retry_config() -> Dict[str, Any]:
+    """Get retry/fallback configuration."""
+    cfg = load_config()
+    return {
+        'db_fallback_retry_sec': cfg.get('DB_FALLBACK_RETRY_SEC', 5),
+        'max_attempts':          cfg.get('RETRY_MAX_ATTEMPTS', 3),
+        'base_delay':            cfg.get('RETRY_BASE_DELAY', 1.0),
+        'max_delay':             cfg.get('RETRY_MAX_DELAY', 30.0),
     }
 
 
 def get_service_config(service_name: str) -> Dict[str, Any]:
-    """
-    Get service-specific configuration
-
-    Args:
-        service_name: Name of service (gateway, producer, decoder, etc.)
-
-    Returns:
-        Service configuration including queue names
-    """
+    """Get service-specific configuration (for Windows service wrappers)."""
     mq = get_rabbitmq_config()
-
-    # Queue naming convention: mq.guide.<service>.request/response/dlq
-    base_queue = f"mq.guide.{service_name}"
+    queues = get_queue_names(service_name)
 
     return {
-        'service_name': f'T16OExchange.Guide.{service_name.capitalize()}',
-        'display_name': f'T16O Exchange - Guide {service_name.capitalize()}',
-        'description': f'T16O Exchange Guide {service_name.capitalize()} Service',
-        'request_queue': f'{base_queue}.request',
-        'response_queue': f'{base_queue}.response',
-        'dlq_queue': f'{base_queue}.dlq',
-        'rabbitmq': mq,
-        'database': get_db_config(),
+        'service_name':  f'T16OExchange.Guide.{service_name.capitalize()}',
+        'display_name':  f'T16O Exchange - Guide {service_name.capitalize()}',
+        'description':   f'T16O Exchange Guide {service_name.capitalize()} Service',
+        'request_queue': queues['request'],
+        'response_queue': queues['response'],
+        'dlq_queue':     queues['dlq'],
+        'rabbitmq':      mq,
+        'database':      get_db_config(),
     }
 
 

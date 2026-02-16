@@ -48,42 +48,33 @@ from typing import Optional, Dict, List, Any
 
 
 # =============================================================================
-# Static config (from guide-config.json)
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-def _load_json_config():
-    path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_solscan_config,
+    get_queue_names, get_retry_config,
+)
 
-_cfg = _load_json_config()
+_solscan            = get_solscan_config()
+_rmq                = get_rabbitmq_config()
+_queues             = get_queue_names('enricher')
+_retry              = get_retry_config()
 
-SOLSCAN_API_BASE  = _cfg.get('SOLSCAN_API', 'https://pro-api.solscan.io/v2.0')
-SOLSCAN_API_TOKEN = _cfg.get('SOLSCAN_TOKEN', '')
-RABBITMQ_HOST     = _cfg.get('RABBITMQ_HOST', 'localhost')
-RABBITMQ_PORT     = _cfg.get('RABBITMQ_PORT', 5692)
-RABBITMQ_USER     = _cfg.get('RABBITMQ_USER', 'admin')
-RABBITMQ_PASS     = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
-RABBITMQ_VHOST    = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
-RABBITMQ_HEARTBEAT = _cfg.get('RABBITMQ_HEARTBEAT', 600)
-RABBITMQ_BLOCKED_TIMEOUT = _cfg.get('RABBITMQ_BLOCKED_TIMEOUT', 300)
-DB_FALLBACK_RETRY_SEC = _cfg.get('DB_FALLBACK_RETRY_SEC', 5)
-REQUEST_QUEUE  = 'mq.guide.enricher.request'
-RESPONSE_QUEUE = 'mq.guide.enricher.response'
-
-DB_CONFIG = {
-    'host':     _cfg.get('DB_HOST', '127.0.0.1'),
-    'port':     _cfg.get('DB_PORT', 3396),
-    'user':     _cfg.get('DB_USER', 'root'),
-    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
-    'database': _cfg.get('DB_NAME', 't16o_db'),
-    'ssl_disabled': True, 'use_pure': True,
-    'ssl_verify_cert': False, 'ssl_verify_identity': False,
-    'autocommit': True,
-}
+SOLSCAN_API_BASE    = _solscan['api_base']
+SOLSCAN_API_TOKEN   = _solscan['token']
+RABBITMQ_HOST       = _rmq['host']
+RABBITMQ_PORT       = _rmq['port']
+RABBITMQ_USER       = _rmq['user']
+RABBITMQ_PASS       = _rmq['password']
+RABBITMQ_VHOST      = _rmq['vhost']
+RABBITMQ_HEARTBEAT  = _rmq['heartbeat']
+RABBITMQ_BLOCKED_TIMEOUT = _rmq['blocked_timeout']
+DB_FALLBACK_RETRY_SEC = _retry['db_fallback_retry_sec']
+REQUEST_QUEUE       = _queues['request']
+RESPONSE_QUEUE      = _queues['response']
+DB_CONFIG           = get_db_config()
 
 MULTI_META_BATCH_SIZE = 50
 
@@ -944,38 +935,50 @@ class WorkerThread(threading.Thread):
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
     def _handle_db_poll(self, ch, method, cursor, db_conn, session):
-        """Handle supervisor-scheduled enrichment pass — all three types."""
-        total_updated = 0
-        all_stats = {}
+        """Handle supervisor-scheduled enrichment pass — loops until all types drained."""
+        grand_total = 0
+        pass_num = 0
 
-        s = enrich_tokens(self.tag, session, cursor, db_conn,
-                          self.batch_limit, self.max_attempts,
-                          self.api_delay_sec, self.api_timeout_sec)
-        total_updated += s.get('updated', 0)
-        all_stats['tokens'] = s
+        while not self.stop_event.is_set():
+            pass_num += 1
+            pass_updated = 0
+            all_stats = {}
 
-        s = enrich_pools(self.tag, session, cursor, db_conn,
-                         self.batch_limit, self.max_attempts,
-                         self.api_delay_sec, self.api_timeout_sec)
-        total_updated += s.get('updated', 0)
-        all_stats['pools'] = s
+            s = enrich_tokens(self.tag, session, cursor, db_conn,
+                              self.batch_limit, self.max_attempts,
+                              self.api_delay_sec, self.api_timeout_sec)
+            pass_updated += s.get('updated', 0) + s.get('backfill_updated', 0)
+            all_stats['tokens'] = s
 
-        s = enrich_programs(self.tag, session, cursor, db_conn,
-                            self.batch_limit, self.max_attempts,
-                            self.api_delay_sec, self.api_timeout_sec)
-        total_updated += s.get('updated', 0)
-        all_stats['programs'] = s
+            s = enrich_pools(self.tag, session, cursor, db_conn,
+                             self.batch_limit, self.max_attempts,
+                             self.api_delay_sec, self.api_timeout_sec)
+            pass_updated += s.get('updated', 0) + s.get('backfill_created', 0) + s.get('backfill_updated', 0)
+            all_stats['pools'] = s
 
-        if total_updated > 0:
+            s = enrich_programs(self.tag, session, cursor, db_conn,
+                                self.batch_limit, self.max_attempts,
+                                self.api_delay_sec, self.api_timeout_sec)
+            pass_updated += s.get('updated', 0)
+            all_stats['programs'] = s
+
+            if pass_updated == 0:
+                break
+
+            grand_total += pass_updated
+
             try:
-                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-enrich', total_updated)
+                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-enrich', pass_updated)
                 update_worker_request(cursor, db_conn, dl_id, 'completed', {
-                    'total_updated': total_updated, 'stats': all_stats
+                    'pass': pass_num, 'updated': pass_updated, 'stats': all_stats
                 })
             except Exception as e:
                 log(self.tag, f"Failed to log request: {e}")
 
-            log(self.tag, f"DB poll complete: {total_updated} items enriched")
+            log(self.tag, f"DB poll pass {pass_num}: {pass_updated} items enriched")
+
+        if grand_total > 0:
+            log(self.tag, f"DB poll complete: {grand_total} total across {pass_num} passes")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -1064,6 +1067,10 @@ def run_supervisor(dry_run=False):
 
     def publish_db_poll():
         import uuid
+        # Skip if queue already has pending messages (workers loop until drained)
+        result = svr_rmq_ch.queue_declare(queue=REQUEST_QUEUE, passive=True)
+        if result.method.message_count > 0:
+            return
         msg = json.dumps({
             'request_id': f"dbpoll-{uuid.uuid4().hex[:12]}",
             'action': 'db-poll-enrich',

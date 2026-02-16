@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import requests
 import time
 from typing import Optional, List, Generator, Dict, Any, Tuple
@@ -32,43 +33,30 @@ except ImportError:
     HAS_MYSQL = False
 
 # =============================================================================
-# Configuration (from guide-config.json)
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-def load_config():
-    config_path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
-    try:
-        with open(config_path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_rpc_config, get_queue_names,
+)
 
-_cfg = load_config()
+_rmq                    = get_rabbitmq_config()
+_queues                 = get_queue_names('producer')
+_decoder_queues         = get_queue_names('decoder')
+_detailer_queues        = get_queue_names('detailer')
 
-CHAINSTACK_RPC_URL = _cfg.get('RPC_URL', "https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb")
-
-RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
-RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
-RABBITMQ_USER = _cfg.get('RABBITMQ_USER', 'admin')
-RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
-RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
-RABBITMQ_REQUEST_QUEUE = 'mq.guide.producer.request'
-RABBITMQ_RESPONSE_QUEUE = 'mq.guide.producer.response'
-DECODER_REQUEST_QUEUE = 'mq.guide.decoder.request'
-DETAILER_REQUEST_QUEUE = 'mq.guide.detailer.request'
-
-DB_CONFIG = {
-    'host': _cfg.get('DB_HOST', '127.0.0.1'),
-    'port': _cfg.get('DB_PORT', 3396),
-    'user': _cfg.get('DB_USER', 'root'),
-    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
-    'database': _cfg.get('DB_NAME', 't16o_db'),
-    'ssl_disabled': True,
-    'use_pure': True,
-    'ssl_verify_cert': False,
-    'ssl_verify_identity': False,
-    'autocommit': True,  # Prevent table locks when idle
-}
+CHAINSTACK_RPC_URL      = get_rpc_config()['url']
+RABBITMQ_HOST           = _rmq['host']
+RABBITMQ_PORT           = _rmq['port']
+RABBITMQ_USER           = _rmq['user']
+RABBITMQ_PASS           = _rmq['password']
+RABBITMQ_VHOST          = _rmq['vhost']
+RABBITMQ_REQUEST_QUEUE  = _queues['request']
+RABBITMQ_RESPONSE_QUEUE = _queues['response']
+DECODER_REQUEST_QUEUE   = _decoder_queues['request']
+DETAILER_REQUEST_QUEUE  = _detailer_queues['request']
+DB_CONFIG               = get_db_config()
 
 
 # =============================================================================

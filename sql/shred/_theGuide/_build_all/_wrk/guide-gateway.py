@@ -44,6 +44,8 @@ API Endpoints:
 
 import argparse
 import json
+import os
+import sys
 import uuid
 import hashlib
 import threading
@@ -74,26 +76,24 @@ except ImportError:
     HAS_MYSQL = False
 
 # =============================================================================
-# Configuration
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-# Database
-DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 3396,
-    'user': 'root',
-    'password': 'rootpassword',
-    'database': 't16o_db',
-    'autocommit': True,  # Prevent table locks when idle
-}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_queue_names,
+)
 
-# RabbitMQ
+_rmq = get_rabbitmq_config()
+_queues = get_queue_names('gateway')
+
+DB_CONFIG = get_db_config()
 RABBITMQ_CONFIG = {
-    'host': 'localhost',
-    'port': 5692,
-    'user': 'admin',
-    'password': 'admin123',
-    'vhost': 't16o_mq'
+    'host':     _rmq['host'],
+    'port':     _rmq['port'],
+    'user':     _rmq['user'],
+    'password': _rmq['password'],
+    'vhost':    _rmq['vhost'],
 }
 
 # Gateway
@@ -101,8 +101,8 @@ GATEWAY_PORT = 5100
 GATEWAY_HOST = '0.0.0.0'
 
 # Queue names
-GATEWAY_REQUEST_QUEUE = 'mq.guide.gateway.request'
-GATEWAY_RESPONSE_QUEUE = 'mq.guide.gateway.response'
+GATEWAY_REQUEST_QUEUE = _queues['request']
+GATEWAY_RESPONSE_QUEUE = _queues['response']
 
 # Correlation tracking for pipeline completion detection
 # Structure: {correlation_id: {
@@ -249,58 +249,25 @@ def mark_producer_done(correlation_id: str, total_batches: int) -> Optional[Dict
         print(f"[TRACK] {correlation_id[:8]}: expecting {total_batches} batches, received so far: {received_counts}")
         return None
 
-# Worker registry with queue mappings
-WORKER_REGISTRY = {
-    'producer': {
-        'request_queue': 'mq.guide.producer.request',
-        'response_queue': 'mq.guide.producer.response',
-        'dlq': 'mq.guide.producer.dlq',
-        'description': 'Fetches transaction signatures from RPC',
-        'cascade_to': []  # Producer handles cascade to decoder/detailer directly
-    },
-    'decoder': {
-        'request_queue': 'mq.guide.decoder.request',
-        'response_queue': 'mq.guide.decoder.response',
-        'dlq': 'mq.guide.decoder.dlq',
-        'description': 'Fetches decoded transaction actions from Solscan',
-        'cascade_to': []  # Shredder polls staging table
-    },
-    'detailer': {
-        'request_queue': 'mq.guide.detailer.request',
-        'response_queue': 'mq.guide.detailer.response',
-        'dlq': 'mq.guide.detailer.dlq',
-        'description': 'Enriches transactions with balance change details',
-        'cascade_to': []
-    },
-    'funder': {
-        'request_queue': 'mq.guide.funder.request',
-        'response_queue': 'mq.guide.funder.response',
-        'dlq': 'mq.guide.funder.dlq',
-        'description': 'Discovers funding relationships for addresses',
-        'cascade_to': []
-    },
-    'aggregator': {
-        'request_queue': 'mq.guide.aggregator.request',
-        'response_queue': 'mq.guide.aggregator.response',
-        'dlq': 'mq.guide.aggregator.dlq',
-        'description': 'Syncs funding edges and guide data',
-        'cascade_to': ['enricher']
-    },
-    'enricher': {
-        'request_queue': 'mq.guide.enricher.request',
-        'response_queue': 'mq.guide.enricher.response',
-        'dlq': 'mq.guide.enricher.dlq',
-        'description': 'Enriches token and pool metadata',
-        'cascade_to': []
-    },
-    'shredder': {
-        'request_queue': 'mq.guide.shredder.request',  # Not used - shredder polls staging
-        'response_queue': 'mq.guide.shredder.response',
-        'dlq': 'mq.guide.shredder.dlq',
-        'description': 'Processes staged data into tx tables',
-        'cascade_to': []
+# Worker registry with queue mappings (derived from common.config)
+def _build_worker_registry():
+    workers = {
+        'producer':   {'description': 'Fetches transaction signatures from RPC',     'cascade_to': []},
+        'decoder':    {'description': 'Fetches decoded transaction actions from Solscan', 'cascade_to': []},
+        'detailer':   {'description': 'Enriches transactions with balance change details', 'cascade_to': []},
+        'funder':     {'description': 'Discovers funding relationships for addresses', 'cascade_to': []},
+        'aggregator': {'description': 'Syncs funding edges and guide data',          'cascade_to': ['enricher']},
+        'enricher':   {'description': 'Enriches token and pool metadata',            'cascade_to': []},
+        'shredder':   {'description': 'Processes staged data into tx tables',        'cascade_to': []},
     }
-}
+    for name, info in workers.items():
+        q = get_queue_names(name)
+        info['request_queue']  = q['request']
+        info['response_queue'] = q['response']
+        info['dlq']            = q['dlq']
+    return workers
+
+WORKER_REGISTRY = _build_worker_registry()
 
 # =============================================================================
 # Database Functions

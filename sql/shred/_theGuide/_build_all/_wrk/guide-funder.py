@@ -46,42 +46,33 @@ from typing import Optional, Dict, List, Set
 
 
 # =============================================================================
-# Static config (from guide-config.json)
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-def _load_json_config():
-    path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_solscan_config,
+    get_queue_names, get_retry_config,
+)
 
-_cfg = _load_json_config()
+_solscan            = get_solscan_config()
+_rmq                = get_rabbitmq_config()
+_queues             = get_queue_names('funder')
+_retry              = get_retry_config()
 
-SOLSCAN_API_BASE  = _cfg.get('SOLSCAN_API', 'https://pro-api.solscan.io/v2.0')
-SOLSCAN_API_TOKEN = _cfg.get('SOLSCAN_TOKEN', '')
-RABBITMQ_HOST     = _cfg.get('RABBITMQ_HOST', 'localhost')
-RABBITMQ_PORT     = _cfg.get('RABBITMQ_PORT', 5692)
-RABBITMQ_USER     = _cfg.get('RABBITMQ_USER', 'admin')
-RABBITMQ_PASS     = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
-RABBITMQ_VHOST    = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
-RABBITMQ_HEARTBEAT = _cfg.get('RABBITMQ_HEARTBEAT', 600)
-RABBITMQ_BLOCKED_TIMEOUT = _cfg.get('RABBITMQ_BLOCKED_TIMEOUT', 300)
-DB_FALLBACK_RETRY_SEC = _cfg.get('DB_FALLBACK_RETRY_SEC', 5)
-REQUEST_QUEUE  = 'mq.guide.funder.request'
-RESPONSE_QUEUE = 'mq.guide.funder.response'
-
-DB_CONFIG = {
-    'host':     _cfg.get('DB_HOST', '127.0.0.1'),
-    'port':     _cfg.get('DB_PORT', 3396),
-    'user':     _cfg.get('DB_USER', 'root'),
-    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
-    'database': _cfg.get('DB_NAME', 't16o_db'),
-    'ssl_disabled': True, 'use_pure': True,
-    'ssl_verify_cert': False, 'ssl_verify_identity': False,
-    'autocommit': True,
-}
+SOLSCAN_API_BASE    = _solscan['api_base']
+SOLSCAN_API_TOKEN   = _solscan['token']
+RABBITMQ_HOST       = _rmq['host']
+RABBITMQ_PORT       = _rmq['port']
+RABBITMQ_USER       = _rmq['user']
+RABBITMQ_PASS       = _rmq['password']
+RABBITMQ_VHOST      = _rmq['vhost']
+RABBITMQ_HEARTBEAT  = _rmq['heartbeat']
+RABBITMQ_BLOCKED_TIMEOUT = _rmq['blocked_timeout']
+DB_FALLBACK_RETRY_SEC = _retry['db_fallback_retry_sec']
+REQUEST_QUEUE       = _queues['request']
+RESPONSE_QUEUE      = _queues['response']
+DB_CONFIG           = get_db_config()
 
 # SOL token addresses for funding detection
 SOL_TOKEN   = 'So11111111111111111111111111111111111111111'
@@ -979,6 +970,10 @@ def run_supervisor(dry_run=False):
     def publish_db_poll():
         """Publish a sync-db-missing message to the request queue."""
         import uuid
+        # Skip if queue already has pending messages (workers loop until drained)
+        result = svr_rmq_ch.queue_declare(queue=REQUEST_QUEUE, passive=True)
+        if result.method.message_count > 0:
+            return
         msg = json.dumps({
             'request_id': f"dbpoll-{uuid.uuid4().hex[:12]}",
             'action': 'sync-db-missing',

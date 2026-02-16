@@ -18,6 +18,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -35,43 +36,27 @@ except ImportError:
     HAS_PIKA = False
 
 # =============================================================================
-# Configuration (from guide-config.json)
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-def load_config():
-    config_path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
-    try:
-        with open(config_path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_staging_config, get_queue_names,
+)
 
-_cfg = load_config()
+_rmq                = get_rabbitmq_config()
+_queues             = get_queue_names('shredder')
+_staging            = get_staging_config()
 
-DB_CONFIG = {
-    'host': _cfg.get('DB_HOST', '127.0.0.1'),
-    'port': _cfg.get('DB_PORT', 3396),
-    'user': _cfg.get('DB_USER', 'root'),
-    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
-    'database': _cfg.get('DB_NAME', 't16o_db'),
-    'ssl_disabled': True,
-    'use_pure': True,
-    'ssl_verify_cert': False,
-    'ssl_verify_identity': False,
-    'autocommit': True,  # Prevent table locks when idle
-}
-
-# Staging table config
-STAGING_SCHEMA = 't16o_db_staging'
-STAGING_TABLE = 'txs'
-
-# RabbitMQ config for gateway responses
-RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
-RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
-RABBITMQ_USER = _cfg.get('RABBITMQ_USER', 'admin')
-RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
-RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
-RABBITMQ_RESPONSE_QUEUE = 'mq.guide.shredder.response'
+DB_CONFIG           = get_db_config()
+STAGING_SCHEMA      = _staging['schema']
+STAGING_TABLE       = _staging['table']
+RABBITMQ_HOST       = _rmq['host']
+RABBITMQ_PORT       = _rmq['port']
+RABBITMQ_USER       = _rmq['user']
+RABBITMQ_PASS       = _rmq['password']
+RABBITMQ_VHOST      = _rmq['vhost']
+RABBITMQ_RESPONSE_QUEUE = _queues['response']
 
 # Default tx_state values (will be fetched from config table)
 TX_STATE_SHREDDED = 4
