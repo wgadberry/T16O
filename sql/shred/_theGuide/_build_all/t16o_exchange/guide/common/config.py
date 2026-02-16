@@ -126,13 +126,15 @@ SERVICE_REGISTRY = {
     },
     'decoder': {
         'worker_module': 'guide-decoder',
-        'worker_entry': 'run_queue_consumer',
+        'worker_entry': 'run_supervisor',
         'has_queue': True,
+        'auto_args': False,  # supervisor pattern — no CLI args needed
     },
     'detailer': {
         'worker_module': 'guide-detailer',
-        'worker_entry': 'run_queue_consumer',
+        'worker_entry': 'run_supervisor',
         'has_queue': True,
+        'auto_args': False,  # supervisor pattern — no CLI args needed
     },
     'funder': {
         'worker_module': 'guide-funder',
