@@ -588,11 +588,11 @@ def get_request_status(request_id: str) -> Optional[Dict]:
         # Get all records for this request_id
         cursor.execute("""
             SELECT request_id, correlation_id, source, target_worker, action, priority,
-                   status, error_message, created_at, started_at, completed_at,
+                   status, error_message, created_utc, started_at, completed_at,
                    duration_ms, result, payload_summary
             FROM tx_request_log
             WHERE request_id = %s
-            ORDER BY created_at ASC
+            ORDER BY created_utc ASC
         """, (request_id,))
         rows = cursor.fetchall()
         cursor.close()
@@ -612,7 +612,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
             worker = row['target_worker']
 
             # Convert datetime objects
-            for key in ['created_at', 'started_at', 'completed_at']:
+            for key in ['created_utc', 'started_at', 'completed_at']:
                 if row.get(key):
                     row[key] = row[key].isoformat()
 
@@ -644,7 +644,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
             workers[worker]['records'].append({
                 'status': row['status'],
                 'batch_num': batch_num,
-                'created_at': row['created_at'],
+                'created_utc': row['created_utc'],
                 'completed_at': row['completed_at'],
                 'duration_ms': row['duration_ms'],
                 'error_message': row.get('error_message'),
@@ -680,7 +680,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
             'correlation_id': first_row['correlation_id'],
             'priority': first_row['priority'],
             'overall_status': overall_status,
-            'created_at': first_row['created_at'] if isinstance(first_row['created_at'], str) else first_row['created_at'].isoformat() if first_row['created_at'] else None,
+            'created_utc': first_row['created_utc'] if isinstance(first_row['created_utc'], str) else first_row['created_utc'].isoformat() if first_row['created_utc'] else None,
             'workers': workers
         }
     except Exception as e:
@@ -715,7 +715,7 @@ def get_correlation_status(correlation_id: str) -> Optional[Dict]:
                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
                    SUM(CASE WHEN status IN ('queued', 'processing') THEN 1 ELSE 0 END) as pending,
-                   MIN(created_at) as started_at,
+                   MIN(created_utc) as started_at,
                    MAX(completed_at) as last_completed_at
             FROM tx_request_log
             WHERE correlation_id = %s

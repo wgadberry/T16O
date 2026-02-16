@@ -859,26 +859,26 @@ class WorkerThread(threading.Thread):
             total_found += result['funders_found']
             total_not_found += result['funders_not_found']
 
-            # Log each batch to tx_request_log immediately
-            if result['processed'] > 0:
-                try:
-                    dl_id = log_daemon_request(cursor, db_conn,
-                                               'sync-db-missing', result['processed'])
-                    update_worker_request(cursor, db_conn, dl_id, 'completed', {
-                        'processed': result['processed'],
-                        'funders_found': result['funders_found'],
-                        'funders_not_found': result['funders_not_found'],
-                        'batch_num': batch_num
-                    })
-                except Exception as e:
-                    log(self.tag, f"Failed to log request: {e}")
+            log(self.tag, f"  batch {batch_num}: {result['processed']} processed, "
+                f"{result['funders_found']} found, {result['funders_not_found']} not found")
 
             if self.batch_delay_sec > 0:
                 time.sleep(self.batch_delay_sec)
 
         if total_processed > 0:
-            log(self.tag, f"DB poll complete: {total_processed} processed, "
+            log(self.tag, f"DB poll complete: {batch_num} batches, {total_processed} processed, "
                 f"{total_found} found, {total_not_found} not found")
+            try:
+                dl_id = log_daemon_request(cursor, db_conn,
+                                           'sync-db-missing', total_processed)
+                update_worker_request(cursor, db_conn, dl_id, 'completed', {
+                    'batches': batch_num,
+                    'processed': total_processed,
+                    'funders_found': total_found,
+                    'funders_not_found': total_not_found
+                })
+            except Exception as e:
+                log(self.tag, f"Failed to log request: {e}")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 

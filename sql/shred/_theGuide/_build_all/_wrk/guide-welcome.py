@@ -1073,8 +1073,8 @@ def main():
                 print(f"    Status: {status.get('status', 'unknown')}")
                 print(f"    Worker: {status.get('target_worker', 'unknown')}")
                 print(f"    Action: {status.get('action', 'unknown')}")
-                if status.get('created_at'):
-                    print(f"    Created: {status['created_at']}")
+                if status.get('created_utc'):
+                    print(f"    Created: {status['created_utc']}")
                 if status.get('completed_at'):
                     print(f"    Completed: {status['completed_at']}")
                 if status.get('duration_ms'):

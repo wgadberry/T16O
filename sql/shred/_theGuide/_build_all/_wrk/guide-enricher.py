@@ -393,16 +393,33 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                     token_json_str = json.dumps(response)
 
                     if has_meaningful:
-                        cursor.execute("""
-                            UPDATE tx_token
-                            SET token_name = COALESCE(%s, token_name),
-                                token_symbol = COALESCE(%s, token_symbol),
-                                token_icon = COALESCE(%s, token_icon),
-                                decimals = COALESCE(%s, decimals),
-                                token_json = COALESCE(%s, token_json),
-                                attempt_cnt = 0
-                            WHERE id = %s
-                        """, (name, symbol, icon, decimals, token_json_str, token_id))
+                        # All queried fields present → attempt_cnt=0 (done)
+                        # Partial data (e.g. name but no symbol) → increment to avoid infinite re-query
+                        all_fields = bool(name) and bool(symbol) and decimals is not None
+                        new_attempt_cnt = 0 if all_fields else 'COALESCE(attempt_cnt, 0) + 1'
+
+                        if all_fields:
+                            cursor.execute("""
+                                UPDATE tx_token
+                                SET token_name = COALESCE(%s, token_name),
+                                    token_symbol = COALESCE(%s, token_symbol),
+                                    token_icon = COALESCE(%s, token_icon),
+                                    decimals = COALESCE(%s, decimals),
+                                    token_json = COALESCE(%s, token_json),
+                                    attempt_cnt = 0
+                                WHERE id = %s
+                            """, (name, symbol, icon, decimals, token_json_str, token_id))
+                        else:
+                            cursor.execute("""
+                                UPDATE tx_token
+                                SET token_name = COALESCE(%s, token_name),
+                                    token_symbol = COALESCE(%s, token_symbol),
+                                    token_icon = COALESCE(%s, token_icon),
+                                    decimals = COALESCE(%s, decimals),
+                                    token_json = COALESCE(%s, token_json),
+                                    attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+                                WHERE id = %s
+                            """, (name, symbol, icon, decimals, token_json_str, token_id))
                         conn.commit()
                         log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec)")
                         stats['updated'] += 1
@@ -966,19 +983,17 @@ class WorkerThread(threading.Thread):
                 break
 
             grand_total += pass_updated
-
-            try:
-                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-enrich', pass_updated)
-                update_worker_request(cursor, db_conn, dl_id, 'completed', {
-                    'pass': pass_num, 'updated': pass_updated, 'stats': all_stats
-                })
-            except Exception as e:
-                log(self.tag, f"Failed to log request: {e}")
-
             log(self.tag, f"DB poll pass {pass_num}: {pass_updated} items enriched")
 
         if grand_total > 0:
             log(self.tag, f"DB poll complete: {grand_total} total across {pass_num} passes")
+            try:
+                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-enrich', grand_total)
+                update_worker_request(cursor, db_conn, dl_id, 'completed', {
+                    'passes': pass_num, 'updated': grand_total, 'stats': all_stats
+                })
+            except Exception as e:
+                log(self.tag, f"Failed to log request: {e}")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 

@@ -22,20 +22,21 @@ BEGIN
     TRUNCATE TABLE tx_pool;
     TRUNCATE TABLE tx_program;
     TRUNCATE TABLE tx_address;
-    
-    TRUNCATE TABLE t16o_db_staging.txs;
-
-    
+	TRUNCATE TABLE t16o_db_staging.txs;    
     
     INSERT INTO tx_address (id, address, address_type, label) VALUES
         (742702, 'BURN_SINK_11111111111111111111111111111111', 'unknown', 'SYNTHETIC:BURN'),
         (742703, 'MINT_SOURCE_1111111111111111111111111111111', 'unknown', 'SYNTHETIC:MINT'),
         (742704, 'CLOSE_SINK_1111111111111111111111111111111', 'unknown', 'SYNTHETIC:CLOSE'),
-        (742705, 'CREATE_SINK_111111111111111111111111111111', 'unknown', 'SYNTHETIC:CREATE');
+        (742705, 'CREATE_SINK_111111111111111111111111111111', 'unknown', 'SYNTHETIC:CREATE'),
+        (1, 'So11111111111111111111111111111111111111111', 'mint', null);
+        
+	INSERT INTO `t16o_db`.`tx_token` (`mint_address_id`, `token_name`, `token_symbol`) VALUES 
+		('1', 'Solana', 'SOL');
 
     SET FOREIGN_KEY_CHECKS = 1;
 
-    UPDATE config SET config_value = '0', updated_at = NOW() WHERE config_type = 'sync';
+    UPDATE config SET config_value = '0', updated_utc = NOW() WHERE config_type = 'sync';
 
     SELECT 'All transaction tables cleared, synthetic addresses restored' AS result;
 END;;

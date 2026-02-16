@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS tx_feature_config (
     feature_mask INT UNSIGNED NOT NULL,
     description VARCHAR(255),
     is_billable TINYINT(1) NOT NULL DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_utc TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_feature_mask (feature_mask)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

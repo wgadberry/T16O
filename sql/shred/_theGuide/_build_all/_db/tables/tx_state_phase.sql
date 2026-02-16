@@ -15,7 +15,7 @@ CREATE TABLE tx_state_phase (
     phase_name      VARCHAR(64) NOT NULL,
     description     VARCHAR(255),
     worker_name     VARCHAR(64),
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_utc     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- Insert phase definitions

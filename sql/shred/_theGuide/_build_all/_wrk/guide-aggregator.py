@@ -278,7 +278,7 @@ def set_last_processed_id(cursor, conn, config_key, last_id):
         VALUES (%s, %s, %s, 'int', %s)
         ON DUPLICATE KEY UPDATE
             config_value = VALUES(config_value),
-            updated_at = CURRENT_TIMESTAMP
+            updated_utc = CURRENT_TIMESTAMP
     """, (CONFIG_TYPE_SYNC, config_key, str(last_id), f'Last processed tx_guide.id for {config_key}'))
     conn.commit()
 
@@ -654,20 +654,19 @@ class WorkerThread(threading.Thread):
             if edges == 0 and token_rows == 0:
                 break
 
-            # Log each productive pass
-            try:
-                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-sync', edges + token_rows)
-                update_worker_request(cursor, db_conn, dl_id, 'completed', {
-                    'guide_edges': edges,
-                    'token_rows': token_rows,
-                    'pool_backfill': stats['pool_backfill'],
-                    'pass': pass_num,
-                })
-            except Exception as e:
-                log(self.tag, f"Failed to log request: {e}")
+            log(self.tag, f"  pass {pass_num}: {edges} edges, {token_rows} token rows")
 
         if total_edges > 0 or total_token_rows > 0:
             log(self.tag, f"DB poll complete: {total_edges} edges, {total_token_rows} token rows ({pass_num} passes)")
+            try:
+                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-sync', total_edges + total_token_rows)
+                update_worker_request(cursor, db_conn, dl_id, 'completed', {
+                    'passes': pass_num,
+                    'guide_edges': total_edges,
+                    'token_rows': total_token_rows,
+                })
+            except Exception as e:
+                log(self.tag, f"Failed to log request: {e}")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
