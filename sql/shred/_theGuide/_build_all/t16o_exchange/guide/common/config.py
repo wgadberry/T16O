@@ -138,18 +138,21 @@ SERVICE_REGISTRY = {
     },
     'funder': {
         'worker_module': 'guide-funder',
-        'worker_entry': 'run_queue_consumer',
+        'worker_entry': 'run_supervisor',
         'has_queue': True,
+        'auto_args': False,  # supervisor pattern — no CLI args needed
     },
     'aggregator': {
         'worker_module': 'guide-aggregator',
-        'worker_entry': 'run_queue_consumer',
+        'worker_entry': 'run_supervisor',
         'has_queue': True,
+        'auto_args': False,  # supervisor pattern — no CLI args needed
     },
     'enricher': {
         'worker_module': 'guide-enricher',
-        'worker_entry': 'run_queue_consumer',
+        'worker_entry': 'run_supervisor',
         'has_queue': True,
+        'auto_args': False,  # supervisor pattern — no CLI args needed
     },
     'shredder': {
         'worker_module': 'guide-shredder',

@@ -1,289 +1,230 @@
 #!/usr/bin/env python3
 """
-Guide Aggregator - Consolidated daemon for guide table synchronization
+Guide Aggregator - Queue Consumer (multi-threaded, config-driven)
 
-Merges functionality from:
-- guide-loader.py: Processes tx_activity into tx_guide via sp_tx_guide_batch
-- guide-sync-funding.py: Syncs tx_token_participant
+Supervisor thread polls config for desired thread/prefetch counts.
+Worker threads each own their own DB + RabbitMQ connections.
 
-Pipeline position:
-    guide-shredder.py → tx_activity, tx_swap, tx_transfer
-                             ↓
-                    guide-aggregator.py (this script)
-                             ↓
-              tx_guide, tx_token_participant
+Operations:
+- guide:  Process tx_activity into tx_guide via sp_tx_guide_loader
+- tokens: Sync tx_token_participant from tx_guide (buys, sells, transfers)
 
-Usage:
-    python guide-aggregator.py                          # All operations, single run
-    python guide-aggregator.py --daemon --interval 30   # Continuous mode
-    python guide-aggregator.py --sync guide             # Only sp_tx_guide_batch
+Config keys (config_type='queue'):
+    aggregator_wrk_cnt_threads           - desired worker thread count (0 = idle)
+    aggregator_wrk_cnt_prefetch          - RabbitMQ prefetch per worker channel
+    aggregator_wrk_supervisor_poll_sec   - supervisor config poll interval
+    aggregator_wrk_poll_idle_sec         - worker sleep when no message available
+    aggregator_wrk_reconnect_sec         - delay before reconnecting after errors
+    aggregator_wrk_shutdown_timeout_sec  - max wait for worker thread on shutdown
+    aggregator_wrk_batch_size            - token participant batch size (id range per chunk)
+    aggregator_wrk_deadlock_max_retries  - max deadlock retry attempts
+    aggregator_wrk_deadlock_base_delay   - initial deadlock backoff delay
+    aggregator_wrk_db_poll_sec           - supervisor DB poll interval (0 = disabled)
+
+Manual modes (run directly, not as service):
+    python guide-aggregator.py --sync guide             # Only sp_tx_guide_loader
     python guide-aggregator.py --sync tokens            # Only tx_token_participant
+    python guide-aggregator.py --sync all               # Both operations
     python guide-aggregator.py --status                 # Show sync status
 """
 
 import argparse
+import json
+import os
 import sys
 import time
 import random
-import os
-import json
-import functools
+import threading
 import uuid
-from pathlib import Path
+import pika
+import mysql.connector
+from mysql.connector import Error as MySQLError
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Callable, List, Tuple
-
-try:
-    import mysql.connector
-    from mysql.connector import Error
-    HAS_MYSQL = True
-except ImportError:
-    HAS_MYSQL = False
-
-try:
-    import pika
-    HAS_PIKA = True
-except ImportError:
-    HAS_PIKA = False
+from typing import Optional, Dict, List, Any
 
 
 # =============================================================================
-# Config Loading
+# Static config (from guide-config.json)
 # =============================================================================
 
-def load_config() -> dict:
-    """Load configuration from JSON file with environment variable fallback."""
-    config = {}
-    config_paths = [
-        Path('./guide-config.json'),
-        Path(__file__).parent / 'guide-config.json',
-    ]
+def _load_json_config():
+    path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-    for config_path in config_paths:
-        if config_path.exists():
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                break
-            except Exception:
-                pass
+_cfg = _load_json_config()
 
-    # Environment variable fallback/override
-    env_mappings = {
-        'DB_HOST': 'MYSQL_HOST',
-        'DB_PORT': 'MYSQL_PORT',
-        'DB_USER': 'MYSQL_USER',
-        'DB_PASSWORD': 'MYSQL_PASSWORD',
-        'DB_NAME': 'MYSQL_DATABASE',
-    }
+RABBITMQ_HOST     = _cfg.get('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT     = _cfg.get('RABBITMQ_PORT', 5692)
+RABBITMQ_USER     = _cfg.get('RABBITMQ_USER', 'admin')
+RABBITMQ_PASS     = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
+RABBITMQ_VHOST    = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
+RABBITMQ_HEARTBEAT = _cfg.get('RABBITMQ_HEARTBEAT', 600)
+RABBITMQ_BLOCKED_TIMEOUT = _cfg.get('RABBITMQ_BLOCKED_TIMEOUT', 300)
+DB_FALLBACK_RETRY_SEC = _cfg.get('DB_FALLBACK_RETRY_SEC', 5)
+REQUEST_QUEUE     = 'mq.guide.aggregator.request'
+RESPONSE_QUEUE    = 'mq.guide.aggregator.response'
+ENRICHER_REQUEST_QUEUE = 'mq.guide.enricher.request'
 
-    for config_key, env_var in env_mappings.items():
-        if os.environ.get(env_var):
-            config[config_key] = os.environ[env_var]
-            if config_key == 'DB_PORT':
-                config[config_key] = int(config[config_key])
-
-    return config
-
-
-_CONFIG = load_config()
-
-# Database configuration
 DB_CONFIG = {
-    'host': _CONFIG.get('DB_HOST', '127.0.0.1'),
-    'port': _CONFIG.get('DB_PORT', 3396),
-    'user': _CONFIG.get('DB_USER', 'root'),
-    'password': _CONFIG.get('DB_PASSWORD', 'rootpassword'),
-    'database': _CONFIG.get('DB_NAME', 't16o_db'),
-    'autocommit': True,  # Prevent table locks when idle
+    'host':     _cfg.get('DB_HOST', '127.0.0.1'),
+    'port':     _cfg.get('DB_PORT', 3396),
+    'user':     _cfg.get('DB_USER', 'root'),
+    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
+    'database': _cfg.get('DB_NAME', 't16o_db'),
+    'ssl_disabled': True, 'use_pure': True,
+    'ssl_verify_cert': False, 'ssl_verify_identity': False,
+    'autocommit': True,
 }
 
-# RabbitMQ (gateway - t16o_mq vhost)
-RABBITMQ_HOST = 'localhost'
-RABBITMQ_PORT = 5692
-RABBITMQ_USER = 'admin'
-RABBITMQ_PASS = 'admin123'
-RABBITMQ_VHOST = 't16o_mq'
-RABBITMQ_REQUEST_QUEUE = 'mq.guide.aggregator.request'
-RABBITMQ_RESPONSE_QUEUE = 'mq.guide.aggregator.response'
-ENRICHER_REQUEST_QUEUE = 'mq.guide.enricher.request'  # For incremental cascade
-
-# Deadlock retry settings
-MAX_DEADLOCK_RETRIES = 5
-DEADLOCK_BASE_DELAY = 0.1
-
-# Config table keys for last processed ID tracking
-CONFIG_TYPE = 'sync'
+# Config table keys
+CONFIG_TYPE_SYNC = 'sync'
 TOKEN_PARTICIPANT_KEY = 'token_participant_last_guide_id'
 
 
 # =============================================================================
-# Database Utilities
+# Helpers
 # =============================================================================
 
-def get_db_connection():
-    """Create database connection."""
+def log(tag, msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}][{tag}] {msg}", flush=True)
+
+
+def get_config_int(cursor, config_type, config_key, default):
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        return conn
-    except Error as e:
-        print(f"Error connecting to database: {e}")
-        sys.exit(1)
-
-
-def execute_with_deadlock_retry(cursor, conn, query: str, params: tuple = None,
-                                 max_retries: int = MAX_DEADLOCK_RETRIES) -> int:
-    """Execute a query with deadlock retry logic. Returns rowcount."""
-    for attempt in range(max_retries):
-        try:
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            conn.commit()
-            return cursor.rowcount
-        except mysql.connector.Error as e:
-            if e.errno in (1213, 1205) and attempt < max_retries - 1:
-                conn.rollback()
-                delay = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.1)
-                print(f"    [!] Deadlock (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s...")
-                time.sleep(delay)
-            else:
-                raise
-    return 0
-
-
-# =============================================================================
-# Daemon Request Logging (for billing)
-# =============================================================================
-
-def log_daemon_request(cursor, conn, worker: str, action: str, operations: list = None) -> int:
-    """
-    Create a request_log entry for daemon activity.
-    Returns the request_log_id for billing linkage.
-    """
-    request_id = f"daemon-{worker}-{uuid.uuid4().hex[:12]}"
-    payload_summary = json.dumps({
-        'operations': operations or [],
-        'mode': 'daemon'
-    })
-
-    cursor.execute("""
-        INSERT INTO tx_request_log
-        (request_id, correlation_id, api_key_id, source, target_worker, action, priority, status, payload_summary)
-        VALUES (%s, %s, NULL, 'daemon', %s, %s, 5, 'processing', %s)
-    """, (request_id, request_id, worker, action, payload_summary))
-    conn.commit()
-    return cursor.lastrowid
-
-
-def update_daemon_request(cursor, conn, request_log_id: int, status: str, result: dict = None):
-    """Update daemon request_log entry with completion status and results."""
-    result_summary = json.dumps(result) if result else None
-    cursor.execute("""
-        UPDATE tx_request_log
-        SET status = %s, result_summary = %s, completed_at = NOW()
-        WHERE id = %s
-    """, (status, result_summary, request_log_id))
-    conn.commit()
-
-
-# =============================================================================
-# Config Table Helpers
-# =============================================================================
-
-def get_last_processed_id(cursor, config_key: str) -> int:
-    """Get last processed tx_guide.id from config table."""
-    cursor.execute("""
-        SELECT config_value FROM config
-        WHERE config_type = %s AND config_key = %s
-    """, (CONFIG_TYPE, config_key))
-    row = cursor.fetchone()
-    return int(row[0]) if row else 0
-
-
-def set_last_processed_id(cursor, conn, config_key: str, last_id: int):
-    """Update last processed tx_guide.id in config table."""
-    cursor.execute("""
-        INSERT INTO config (config_type, config_key, config_value, value_type, description)
-        VALUES (%s, %s, %s, 'int', %s)
-        ON DUPLICATE KEY UPDATE
-            config_value = VALUES(config_value),
-            updated_at = CURRENT_TIMESTAMP
-    """, (CONFIG_TYPE, config_key, str(last_id), f'Last processed tx_guide.id for {config_key}'))
-    conn.commit()
-
-
-def get_max_guide_id(cursor) -> int:
-    """Get current max tx_guide.id."""
-    cursor.execute("SELECT MAX(id) FROM tx_guide")
-    row = cursor.fetchone()
-    return row[0] if row[0] else 0
-
-
-# =============================================================================
-# Guide Loading (from guide-loader.py)
-# =============================================================================
-
-def get_config_int(cursor, config_key: str, default: int) -> int:
-    """Get an integer config value from config table (runtime-editable)."""
-    try:
-        cursor.execute("CALL sp_config_get(%s, %s)", ('batch', config_key))
-        result = cursor.fetchone()
+        cursor.execute("CALL sp_config_get(%s, %s)", (config_type, config_key))
+        row = cursor.fetchone()
         try:
             while cursor.nextset():
                 pass
-        except:
+        except Exception:
             pass
-        if result:
-            value = result[0] if isinstance(result, tuple) else result.get('config_value')
-            if value:
-                return int(value)
+        if row:
+            val = row.get('config_value')
+            if val is not None:
+                return int(val)
     except Exception:
         pass
     return default
 
 
-def get_guide_batch_size(cursor, default: int = 1000) -> int:
-    """Get guide batch size from config table (runtime-editable)."""
-    return get_config_int(cursor, 'guide_batch_size', default)
+def get_config_float(cursor, config_type, config_key, default):
+    try:
+        cursor.execute("CALL sp_config_get(%s, %s)", (config_type, config_key))
+        row = cursor.fetchone()
+        try:
+            while cursor.nextset():
+                pass
+        except Exception:
+            pass
+        if row:
+            val = row.get('config_value')
+            if val is not None:
+                return float(val)
+    except Exception:
+        pass
+    return default
 
 
-def get_guide_batch_interval(cursor, default: int = 30) -> int:
-    """Get guide batch interval (seconds) from config table (runtime-editable)."""
-    return get_config_int(cursor, 'guide_batch_interval', default)
+def db_connect():
+    return mysql.connector.connect(**DB_CONFIG)
 
 
-def get_pending_activity_count(cursor) -> int:
-    """Get count of tx records not yet guide-loaded (bit 32)."""
-    cursor.execute("SELECT COUNT(*) FROM tx WHERE tx_state & 32 = 0")
-    return cursor.fetchone()[0]
+def rmq_connect():
+    creds = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    params = pika.ConnectionParameters(
+        host=RABBITMQ_HOST, port=RABBITMQ_PORT, virtual_host=RABBITMQ_VHOST,
+        credentials=creds,
+        heartbeat=RABBITMQ_HEARTBEAT,
+        blocked_connection_timeout=RABBITMQ_BLOCKED_TIMEOUT,
+    )
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+    for q in (REQUEST_QUEUE, RESPONSE_QUEUE, ENRICHER_REQUEST_QUEUE):
+        ch.queue_declare(queue=q, durable=True, arguments={'x-max-priority': 10})
+    return conn, ch
 
 
-def run_guide_loader(cursor, conn, batch_size: int = 1000) -> tuple:
-    """
-    Execute single batch of sp_tx_guide_loader with deadlock retry.
-    Proc selects next batch_size tx records where tx_state bit 32 is unset.
-    Returns (guide_count, last_tx_id).
-    """
-    for attempt in range(MAX_DEADLOCK_RETRIES):
+# =============================================================================
+# Request logging
+# =============================================================================
+
+def log_worker_request(cursor, conn, request_id, correlation_id,
+                       priority, api_key_id):
+    if api_key_id is not None:
+        cursor.execute(
+            "SELECT id FROM tx_request_log "
+            "WHERE request_id=%s AND target_worker='aggregator' AND api_key_id=%s",
+            (request_id, api_key_id))
+    else:
+        cursor.execute(
+            "SELECT id FROM tx_request_log "
+            "WHERE request_id=%s AND target_worker='aggregator' AND api_key_id IS NULL",
+            (request_id,))
+    row = cursor.fetchone()
+    if row:
+        return row['id']
+
+    cursor.execute(
+        "INSERT INTO tx_request_log "
+        "(request_id, correlation_id, api_key_id, source, target_worker, "
+        " action, priority, status, payload_summary) "
+        "VALUES (%s,%s,%s,'queue','aggregator','sync',%s,'processing',%s)",
+        (request_id, correlation_id, api_key_id, priority,
+         json.dumps({'source': 'queue'})))
+    conn.commit()
+    return cursor.lastrowid
+
+
+def update_worker_request(cursor, conn, log_id, status, result=None):
+    cursor.execute(
+        "UPDATE tx_request_log SET status=%s, result_summary=%s, completed_at=NOW() WHERE id=%s",
+        (status, json.dumps(result) if result else None, log_id))
+    conn.commit()
+
+
+def log_daemon_request(cursor, conn, action, total_processed):
+    request_id = f"daemon-aggregator-{uuid.uuid4().hex[:12]}"
+    cursor.execute(
+        "INSERT INTO tx_request_log "
+        "(request_id, correlation_id, api_key_id, source, target_worker, "
+        " action, priority, status, payload_summary) "
+        "VALUES (%s,%s,NULL,'daemon','aggregator',%s,5,'processing',%s)",
+        (request_id, request_id, action,
+         json.dumps({'total_processed': total_processed})))
+    conn.commit()
+    log_id = cursor.lastrowid
+    log('DAEMON', f"request_log id={log_id}")
+    return log_id
+
+
+# =============================================================================
+# Guide Loading (sp_tx_guide_loader)
+# =============================================================================
+
+def run_guide_loader_batch(tag, cursor, conn, batch_size, max_retries, base_delay):
+    """Execute single batch of sp_tx_guide_loader with deadlock retry.
+    Returns (guide_count, last_tx_id)."""
+    for attempt in range(max_retries):
         try:
             cursor.execute("SET @rows = 0, @last = 0")
-            cursor.execute("CALL sp_tx_guide_loader(%s, @rows, @last)",
-                           (batch_size,))
+            cursor.execute("CALL sp_tx_guide_loader(%s, @rows, @last)", (batch_size,))
             try:
                 while cursor.nextset():
                     pass
             except:
                 pass
-            cursor.execute("SELECT @rows, @last")
+            cursor.execute("SELECT @rows AS r, @last AS l")
             result = cursor.fetchone()
             conn.commit()
-            return (result[0] or 0, result[1] or 0)
+            return (result['r'] or 0, result['l'] or 0)
         except mysql.connector.Error as err:
-            if err.errno == 1213 and attempt < MAX_DEADLOCK_RETRIES - 1:
-                backoff = DEADLOCK_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
-                print(f"    [!] Deadlock (attempt {attempt + 1}), retrying in {backoff:.1f}s...")
+            if err.errno in (1213, 1205) and attempt < max_retries - 1:
+                backoff = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                log(tag, f"Deadlock (attempt {attempt + 1}), retrying in {backoff:.1f}s...")
                 conn.rollback()
                 time.sleep(backoff)
             else:
@@ -291,44 +232,75 @@ def run_guide_loader(cursor, conn, batch_size: int = 1000) -> tuple:
     return (0, 0)
 
 
-def sync_guide_edges(cursor, conn, batch_size: int = 10000,
-                     max_batches: int = 0, verbose: bool = True) -> Dict[str, int]:
-    """
-    Process pending activities via sp_tx_guide_loader.
-    Returns stats dict.
-    """
-    stats = {'batches': 0, 'guide': 0, 'deadlocks': 0}
+def sync_guide_edges(tag, cursor, conn, max_retries, base_delay):
+    """Process all pending activities via sp_tx_guide_loader. Returns stats."""
+    stats = {'batches': 0, 'edges': 0}
     batch_num = 0
 
     while True:
-        # Re-read batch size from config each iteration (runtime-editable)
-        batch_size = get_guide_batch_size(cursor, batch_size)
-        guide, last_tx_id = run_guide_loader(cursor, conn, batch_size)
+        batch_size = get_config_int(cursor, 'batch', 'guide_batch_size', 1000)
+        edges, last_tx_id = run_guide_loader_batch(tag, cursor, conn, batch_size, max_retries, base_delay)
 
         if last_tx_id == 0:
-            break  # No tx records to process
+            break
 
         batch_num += 1
         stats['batches'] += 1
-        stats['guide'] += guide
-
-        if verbose:
-            print(f"    Batch {batch_num}: guide={guide} tx_id={last_tx_id} (batch_size={batch_size})")
-
-        if max_batches > 0 and batch_num >= max_batches:
-            if verbose:
-                print(f"    Reached max batches ({max_batches})")
-            break
+        stats['edges'] += edges
+        log(tag, f"[guide] Batch {batch_num}: edges={edges} tx_id={last_tx_id} (batch_size={batch_size})")
 
     return stats
 
 
 # =============================================================================
-# Token Participant Sync (from guide-sync-funding.py)
+# Token Participant Sync
 # =============================================================================
 
-def sync_token_participants(cursor, conn, last_id: int, max_id: int,
-                            batch_size: int = 10000) -> int:
+def execute_with_deadlock_retry(tag, cursor, conn, query, params, max_retries, base_delay):
+    """Execute a query with deadlock retry logic. Returns rowcount."""
+    for attempt in range(max_retries):
+        try:
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.rowcount
+        except mysql.connector.Error as e:
+            if e.errno in (1213, 1205) and attempt < max_retries - 1:
+                conn.rollback()
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+                log(tag, f"Deadlock (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s...")
+                time.sleep(delay)
+            else:
+                raise
+    return 0
+
+
+def get_last_processed_id(cursor, config_key):
+    cursor.execute(
+        "SELECT config_value FROM config WHERE config_type = %s AND config_key = %s",
+        (CONFIG_TYPE_SYNC, config_key))
+    row = cursor.fetchone()
+    return int(row['config_value']) if row else 0
+
+
+def set_last_processed_id(cursor, conn, config_key, last_id):
+    cursor.execute("""
+        INSERT INTO config (config_type, config_key, config_value, value_type, description)
+        VALUES (%s, %s, %s, 'int', %s)
+        ON DUPLICATE KEY UPDATE
+            config_value = VALUES(config_value),
+            updated_at = CURRENT_TIMESTAMP
+    """, (CONFIG_TYPE_SYNC, config_key, str(last_id), f'Last processed tx_guide.id for {config_key}'))
+    conn.commit()
+
+
+def get_max_guide_id(cursor):
+    cursor.execute("SELECT MAX(id) AS mx FROM tx_guide")
+    row = cursor.fetchone()
+    return row['mx'] if row and row['mx'] else 0
+
+
+def sync_token_participants(tag, cursor, conn, last_id, max_id, batch_size,
+                            max_retries, base_delay):
     """Sync new records to tx_token_participant. Returns rows affected."""
     if last_id >= max_id:
         return 0
@@ -336,7 +308,6 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
     total_rows = 0
     current_id = last_id
 
-    # Buys (swap_in - wallet receives tokens)
     query_buys = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen,
@@ -363,7 +334,6 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
             net_position = net_position + VALUES(buy_volume)
     """
 
-    # Sells (swap_out - wallet sends tokens)
     query_sells = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen,
@@ -390,7 +360,6 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
             net_position = net_position - VALUES(sell_volume)
     """
 
-    # Transfers in
     query_xfer_in = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen, transfer_in_count
@@ -411,7 +380,6 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
             transfer_in_count = transfer_in_count + VALUES(transfer_in_count)
     """
 
-    # Transfers out
     query_xfer_out = """
         INSERT INTO tx_token_participant (
             token_id, address_id, first_seen, last_seen, transfer_out_count
@@ -436,10 +404,10 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
         batch_end = min(current_id + batch_size, max_id)
         params = (current_id, batch_end)
 
-        total_rows += execute_with_deadlock_retry(cursor, conn, query_buys, params)
-        total_rows += execute_with_deadlock_retry(cursor, conn, query_sells, params)
-        total_rows += execute_with_deadlock_retry(cursor, conn, query_xfer_in, params)
-        total_rows += execute_with_deadlock_retry(cursor, conn, query_xfer_out, params)
+        total_rows += execute_with_deadlock_retry(tag, cursor, conn, query_buys, params, max_retries, base_delay)
+        total_rows += execute_with_deadlock_retry(tag, cursor, conn, query_sells, params, max_retries, base_delay)
+        total_rows += execute_with_deadlock_retry(tag, cursor, conn, query_xfer_in, params, max_retries, base_delay)
+        total_rows += execute_with_deadlock_retry(tag, cursor, conn, query_xfer_out, params, max_retries, base_delay)
 
         current_id = batch_end
 
@@ -447,68 +415,94 @@ def sync_token_participants(cursor, conn, last_id: int, max_id: int,
 
 
 # =============================================================================
-# Main Aggregation Logic
+# Pool label backfill
 # =============================================================================
 
-def run_sync(cursor, conn, operations: List[str], batch_size: int = 10000,
-             guide_batch_size: int = 1000, max_batches: int = 0,
-             verbose: bool = True) -> Dict[str, Any]:
-    """
-    Run sync for specified operations.
-    operations: list containing 'guide', 'tokens'
-    Returns stats dict.
-    """
+def backfill_pool_labels(tag, cursor, conn):
+    """Backfill tx_guide.pool_label from tx_pool where enricher has since populated it."""
+    try:
+        cursor.execute("CALL sp_tx_guide_backfill_pool(@updated)")
+        try:
+            while cursor.nextset():
+                pass
+        except:
+            pass
+        cursor.execute("SELECT @updated AS u")
+        row = cursor.fetchone()
+        updated = row['u'] or 0
+        if updated > 0:
+            log(tag, f"[pool-backfill] {updated} guide edges updated with pool labels")
+        return updated
+    except Exception as e:
+        log(tag, f"[pool-backfill] error: {e}")
+        return 0
+
+
+# =============================================================================
+# Combined sync (used by both worker and manual modes)
+# =============================================================================
+
+def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay):
+    """Run sync for specified operations. Returns stats dict."""
     stats = {
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'guide': {'pending': 0, 'batches': 0, 'edges': 0},
+        'guide': {'batches': 0, 'edges': 0, 'pending': 0},
         'tokens': {'last_id': 0, 'new_id': 0, 'rows': 0},
+        'pool_backfill': 0,
     }
 
-    # Guide edges (sp_tx_guide_loader)
     if 'guide' in operations:
-        pending = get_pending_activity_count(cursor)
+        cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0")
+        row = cursor.fetchone()
+        pending = row['cnt']
         stats['guide']['pending'] = pending
 
         if pending > 0:
-            # Get batch size from config table (runtime-editable), fallback to parameter
-            db_batch_size = get_guide_batch_size(cursor, guide_batch_size)
-            if verbose:
-                print(f"  [guide] Processing {pending:,} pending tx (batch_size={db_batch_size})...")
-            result = sync_guide_edges(cursor, conn, db_batch_size, max_batches, verbose)
+            log(tag, f"[guide] {pending:,} pending tx")
+            result = sync_guide_edges(tag, cursor, conn, max_retries, base_delay)
             stats['guide']['batches'] = result['batches']
-            stats['guide']['edges'] = result['guide']
+            stats['guide']['edges'] = result['edges']
         else:
-            if verbose:
-                print(f"  [guide] No pending activities")
+            log(tag, "[guide] No pending activities")
 
     max_id = get_max_guide_id(cursor)
 
-    # Token participants
     if 'tokens' in operations:
         last_id = get_last_processed_id(cursor, TOKEN_PARTICIPANT_KEY)
         stats['tokens']['last_id'] = last_id
 
         if last_id < max_id:
-            if verbose:
-                print(f"  [tokens] Syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} records)")
-            rows = sync_token_participants(cursor, conn, last_id, max_id, batch_size)
+            log(tag, f"[tokens] Syncing {last_id:,} -> {max_id:,} ({max_id - last_id:,} records)")
+            rows = sync_token_participants(tag, cursor, conn, last_id, max_id,
+                                           batch_size, max_retries, base_delay)
             set_last_processed_id(cursor, conn, TOKEN_PARTICIPANT_KEY, max_id)
             stats['tokens']['new_id'] = max_id
             stats['tokens']['rows'] = rows
-            if verbose:
-                print(f"  [tokens] {rows:,} rows affected")
+            log(tag, f"[tokens] {rows:,} rows affected")
         else:
-            if verbose:
-                print(f"  [tokens] Up to date (id={last_id:,})")
+            log(tag, f"[tokens] Up to date (id={last_id:,})")
+
+    # Backfill pool labels that enricher has populated since guide_loader ran
+    stats['pool_backfill'] = backfill_pool_labels(tag, cursor, conn)
 
     return stats
 
 
-def get_sync_status(cursor) -> Dict[str, Any]:
-    """Get current sync status for all operations."""
+# =============================================================================
+# Status
+# =============================================================================
+
+def get_sync_status(cursor):
     max_id = get_max_guide_id(cursor)
-    pending = get_pending_activity_count(cursor)
+    cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0")
+    pending = cursor.fetchone()['cnt']
     tokens_last = get_last_processed_id(cursor, TOKEN_PARTICIPANT_KEY)
+
+    cursor.execute("""
+        SELECT COUNT(*) AS cnt FROM tx_guide
+        WHERE pool_address_id IS NOT NULL
+          AND (pool_label IS NULL OR pool_label = '')
+    """)
+    pool_missing = cursor.fetchone()['cnt']
 
     return {
         'max_guide_id': max_id,
@@ -517,253 +511,417 @@ def get_sync_status(cursor) -> Dict[str, Any]:
             'last_synced': tokens_last,
             'behind': max_id - tokens_last,
         },
+        'pool_labels_missing': pool_missing,
     }
-
-
-def print_status(status: Dict):
-    """Print sync status in human-readable format."""
-    print(f"\n{'='*60}")
-    print(f"Guide Aggregator Status")
-    print(f"{'='*60}")
-    print(f"  tx_guide max id:          {status['max_guide_id']:,}")
-    print(f"  Pending activities:       {status['pending_activities']:,}")
-    print(f"  Token participant synced: {status['tokens']['last_synced']:,} (behind: {status['tokens']['behind']:,})")
-    print(f"{'='*60}\n")
 
 
 # =============================================================================
-# RabbitMQ Gateway Integration
+# Worker thread
 # =============================================================================
 
-def setup_gateway_rabbitmq():
-    """Setup connection to gateway RabbitMQ (t16o_mq vhost)"""
-    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(
-            host=RABBITMQ_HOST,
-            port=RABBITMQ_PORT,
-            virtual_host=RABBITMQ_VHOST,
-            credentials=credentials,
-            heartbeat=600
-        )
-    )
-    channel = connection.channel()
+class WorkerThread(threading.Thread):
+    def __init__(self, worker_id, prefetch, stop_event,
+                 poll_idle_sec, reconnect_sec, batch_size,
+                 deadlock_max_retries, deadlock_base_delay):
+        super().__init__(daemon=True)
+        self.tag = f"W-{worker_id}"
+        self.worker_id = worker_id
+        self.prefetch = prefetch
+        self.stop_event = stop_event
+        self.poll_idle_sec = poll_idle_sec
+        self.reconnect_sec = reconnect_sec
+        self.batch_size = batch_size
+        self.deadlock_max_retries = deadlock_max_retries
+        self.deadlock_base_delay = deadlock_base_delay
 
-    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE]:
-        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+    def run(self):
+        log(self.tag, f"Starting (prefetch={self.prefetch})")
+        db_conn = None
+        cursor = None
 
-    return connection, channel
+        while not self.stop_event.is_set():
+            try:
+                if db_conn is None:
+                    db_conn = db_connect()
+                    cursor = db_conn.cursor(dictionary=True)
+                    log(self.tag, "DB connected")
 
+                rmq_conn, ch = rmq_connect()
+                ch.basic_qos(prefetch_count=self.prefetch)
+                log(self.tag, "RabbitMQ connected, consuming...")
 
-def publish_response(channel, request_id: str, status: str, result: dict,
-                     error: str = None, request_log_id: int = None):
-    """Publish response to gateway response queue"""
-    response = {
-        'request_id': request_id,
-        'worker': 'aggregator',
-        'status': status,
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'result': result
-    }
-    if error:
-        response['error'] = error
-    if request_log_id:
-        response['request_log_id'] = request_log_id
+                while not self.stop_event.is_set():
+                    method, properties, body = ch.basic_get(queue=REQUEST_QUEUE, auto_ack=False)
+                    if method is None:
+                        time.sleep(self.poll_idle_sec)
+                        rmq_conn.process_data_events(time_limit=0)
+                        continue
 
-    channel.basic_publish(
-        exchange='',
-        routing_key=RABBITMQ_RESPONSE_QUEUE,
-        body=json.dumps(response).encode('utf-8'),
-        properties=pika.BasicProperties(delivery_mode=2, priority=5)
-    )
+                    self._handle_message(ch, method, body, cursor, db_conn)
 
-
-def publish_cascade_to_enricher(channel, request_id: str, correlation_id: str,
-                                 result: dict, priority: int = 5,
-                                 request_log_id: int = None) -> bool:
-    """Publish cascade directly to enricher request queue (incremental cascade)"""
-    cascade_msg = {
-        'request_id': f"{request_id}-enricher",
-        'correlation_id': correlation_id,  # Track original REST request
-        'parent_request_id': request_id,
-        'action': 'cascade',
-        'source_worker': 'aggregator',
-        'priority': priority,
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'batch': {
-            'operations': 'tokens,pools',
-            'source_processed': result.get('processed', 0)
-        }
-    }
-    if request_log_id:
-        cascade_msg['request_log_id'] = request_log_id
-
-    try:
-        channel.basic_publish(
-            exchange='',
-            routing_key=ENRICHER_REQUEST_QUEUE,
-            body=json.dumps(cascade_msg).encode('utf-8'),
-            properties=pika.BasicProperties(
-                delivery_mode=2,
-                content_type='application/json',
-                priority=priority
-            )
-        )
-        print(f"  [CASCADE] → enricher (tokens,pools)")
-        return True
-    except Exception as e:
-        print(f"[ERROR] Failed to cascade to enricher: {e}")
-        return False
-
-
-def run_queue_consumer(prefetch: int = 1):
-    """Run as a queue consumer, listening for gateway requests"""
-    print(f"""
-+-----------------------------------------------------------+
-|         Guide Aggregator - Queue Consumer Mode            |
-|                                                           |
-|  vhost:     {RABBITMQ_VHOST}                                     |
-|  queue:     {RABBITMQ_REQUEST_QUEUE}           |
-|  prefetch:  {prefetch}                                            |
-+-----------------------------------------------------------+
-""")
-
-    if not HAS_PIKA:
-        print("Error: pika not installed")
-        return 1
-
-    # Setup DB connection with reconnect capability
-    db_state = {'conn': None, 'cursor': None}
-
-    def ensure_db_connection():
-        """Ensure DB connection is alive, reconnect if needed"""
-        try:
-            needs_reconnect = db_state['conn'] is None
-            if not needs_reconnect:
                 try:
-                    db_state['conn'].ping(reconnect=False, attempts=1, delay=0)
-                except:
-                    needs_reconnect = True
+                    rmq_conn.close()
+                except Exception:
+                    pass
 
-            if needs_reconnect:
-                if db_state['conn']:
-                    try:
-                        db_state['conn'].close()
-                    except:
-                        pass
-                db_state['conn'] = get_db_connection()
-                db_state['cursor'] = db_state['conn'].cursor()
-                print("[OK] Database (re)connected")
-            return db_state['cursor'], db_state['conn']
-        except Exception as e:
-            print(f"[WARN] Database connection failed: {e}")
-            db_state['conn'] = None
-            db_state['cursor'] = None
-            return None, None
+            except MySQLError as e:
+                log(self.tag, f"MySQL error: {e}, reconnecting in {self.reconnect_sec}s...")
+                db_conn = None
+                cursor = None
+                time.sleep(self.reconnect_sec)
+            except pika.exceptions.AMQPConnectionError as e:
+                log(self.tag, f"RabbitMQ lost: {e}, reconnecting in {self.reconnect_sec}s...")
+                time.sleep(self.reconnect_sec)
+            except Exception as e:
+                log(self.tag, f"Unexpected error: {e}, retrying in {self.reconnect_sec}s...")
+                time.sleep(self.reconnect_sec)
 
-    # Initial connection
-    ensure_db_connection()
+        if db_conn:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+        log(self.tag, "Stopped")
 
-    while True:
+    def _handle_message(self, ch, method, body, cursor, db_conn):
+        worker_log_id = None
         try:
-            gateway_conn, gateway_channel = setup_gateway_rabbitmq()
-            gateway_channel.basic_qos(prefetch_count=prefetch)
+            msg = json.loads(body.decode('utf-8'))
+            request_id     = msg.get('request_id', str(uuid.uuid4()))
+            correlation_id = msg.get('correlation_id', request_id)
+            api_key_id     = msg.get('api_key_id')
+            action         = msg.get('action', 'sync')
+            priority       = msg.get('priority', 5)
+            batch          = msg.get('batch', {})
 
-            print(f"[OK] Connected to {RABBITMQ_REQUEST_QUEUE}")
-            print("[INFO] Waiting for requests...")
+            # ── DB poll: supervisor-scheduled sync pass ──
+            if action == 'db-poll-sync':
+                self._handle_db_poll(ch, method, cursor, db_conn)
+                return
 
-            def callback(ch, method, properties, body):
-                try:
-                    message = json.loads(body.decode('utf-8'))
-                    request_id = message.get('request_id', 'unknown')
-                    correlation_id = message.get('correlation_id', request_id)  # Track original request
-                    request_log_id = message.get('request_log_id')  # For billing linkage
-                    batch = message.get('batch', {})
-                    priority = message.get('priority', 5)
+            # ── Normal queue message: gateway request ──
+            operations = batch.get('operations', ['guide', 'tokens'])
+            if isinstance(operations, str):
+                operations = [op.strip() for op in operations.split(',')]
 
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received request {request_id[:8]} (correlation: {correlation_id[:8]}, log_id: {request_log_id or 'N/A'})")
+            log(self.tag, f"Request {request_id[:8]} (action={action}, ops={operations})")
 
-                    # Ensure DB connection is alive
-                    cursor, conn = ensure_db_connection()
-                    if not cursor:
-                        raise Exception("Database connection unavailable")
+            worker_log_id = log_worker_request(
+                cursor, db_conn, request_id, correlation_id, priority, api_key_id)
 
-                    # Get operations from batch or default to guide,tokens
-                    operations = batch.get('operations', ['guide', 'tokens'])
-                    if isinstance(operations, str):
-                        operations = [op.strip() for op in operations.split(',')]
+            stats = run_sync(self.tag, cursor, db_conn, operations,
+                             self.batch_size, self.deadlock_max_retries,
+                             self.deadlock_base_delay)
 
-                    print(f"  Running operations: {', '.join(operations)}")
+            total = stats['guide']['edges'] + stats['tokens']['rows']
+            result = {
+                'processed': total,
+                'guide_edges': stats['guide']['edges'],
+                'token_rows': stats['tokens']['rows'],
+                'pool_backfill': stats['pool_backfill'],
+            }
 
-                    try:
-                        # Run sync operations
-                        stats = run_sync(cursor, conn, operations,
-                                        batch_size=batch.get('batch_size', 10000),
-                                        guide_batch_size=batch.get('guide_batch_size', 1000),
-                                        max_batches=batch.get('max_batches', 0),
-                                        verbose=True)
+            update_worker_request(cursor, db_conn, worker_log_id, 'completed', result)
 
-                        total = (stats['guide']['edges'] +
-                                stats['tokens']['rows'])
+            # Cascade to enricher if we processed data
+            if total > 0:
+                self._publish_cascade_to_enricher(ch, request_id, correlation_id, result, priority)
 
-                        result = {
-                            'processed': total,
-                            'guide_edges': stats['guide']['edges'],
-                            'token_rows': stats['tokens']['rows']
-                        }
-                        status = 'completed'
-                        print(f"  Completed: {total} total rows processed")
+            self._publish_response(ch, request_id, correlation_id, 'completed', result)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
 
-                    except Exception as e:
-                        print(f"  [ERROR] {e}")
-                        result = {'processed': 0, 'error': str(e)}
-                        status = 'failed'
-
-                    # Publish response
-                    publish_response(gateway_channel, request_id, status, result,
-                                    request_log_id=request_log_id)
-
-                    # Cascade to enricher if we processed data
-                    if status == 'completed' and result.get('processed', 0) > 0:
-                        publish_cascade_to_enricher(gateway_channel, request_id, correlation_id, result,
-                                                   priority, request_log_id)
-
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-
-                except Error as e:
-                    # MySQL errors are transient - requeue for retry
-                    print(f"[DB ERROR] {e} - will retry")
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-                except Exception as e:
-                    # Other errors - send to DLQ
-                    print(f"[ERROR] Failed to process message: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-
-            gateway_channel.basic_consume(
-                queue=RABBITMQ_REQUEST_QUEUE,
-                on_message_callback=callback,
-                auto_ack=False
-            )
-
-            gateway_channel.start_consuming()
-
-        except pika.exceptions.AMQPConnectionError as e:
-            print(f"[WARN] RabbitMQ connection lost: {e}")
-            print("[INFO] Reconnecting in 5 seconds...")
-            time.sleep(5)
-        except KeyboardInterrupt:
-            print("\n[INFO] Shutting down...")
-            break
+        except MySQLError:
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            raise
         except Exception as e:
-            print(f"[ERROR] Unexpected error: {e}")
+            log(self.tag, f"ERROR processing message: {e}")
             import traceback
             traceback.print_exc()
-            time.sleep(5)
+            if worker_log_id:
+                try:
+                    update_worker_request(cursor, db_conn, worker_log_id, 'failed', {'error': str(e)})
+                except Exception:
+                    pass
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
-    cursor.close()
-    conn.close()
+    def _handle_db_poll(self, ch, method, cursor, db_conn):
+        """Handle supervisor-scheduled DB poll — loops until no more work."""
+        total_edges = 0
+        total_token_rows = 0
+        pass_num = 0
+
+        while not self.stop_event.is_set():
+            stats = run_sync(self.tag, cursor, db_conn, ['guide', 'tokens'],
+                             self.batch_size, self.deadlock_max_retries,
+                             self.deadlock_base_delay)
+
+            edges = stats['guide']['edges']
+            token_rows = stats['tokens']['rows']
+            total_edges += edges
+            total_token_rows += token_rows
+            pass_num += 1
+
+            if edges == 0 and token_rows == 0:
+                break
+
+            # Log each productive pass
+            try:
+                dl_id = log_daemon_request(cursor, db_conn, 'db-poll-sync', edges + token_rows)
+                update_worker_request(cursor, db_conn, dl_id, 'completed', {
+                    'guide_edges': edges,
+                    'token_rows': token_rows,
+                    'pool_backfill': stats['pool_backfill'],
+                    'pass': pass_num,
+                })
+            except Exception as e:
+                log(self.tag, f"Failed to log request: {e}")
+
+        if total_edges > 0 or total_token_rows > 0:
+            log(self.tag, f"DB poll complete: {total_edges} edges, {total_token_rows} token rows ({pass_num} passes)")
+
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    def _publish_response(self, ch, request_id, correlation_id, status, result):
+        body = json.dumps({
+            'request_id':     request_id,
+            'correlation_id': correlation_id,
+            'worker':         'aggregator',
+            'status':         status,
+            'timestamp':      datetime.now(timezone.utc).isoformat(),
+            'result':         result,
+        })
+        ch.basic_publish(
+            exchange='', routing_key=RESPONSE_QUEUE,
+            body=body.encode('utf-8'),
+            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json'))
+
+    def _publish_cascade_to_enricher(self, ch, request_id, correlation_id, result, priority):
+        cascade_msg = json.dumps({
+            'request_id': f"{request_id}-enricher",
+            'correlation_id': correlation_id,
+            'parent_request_id': request_id,
+            'action': 'cascade',
+            'source_worker': 'aggregator',
+            'priority': priority,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'batch': {
+                'operations': 'tokens,pools',
+                'source_processed': result.get('processed', 0),
+            }
+        })
+        try:
+            ch.basic_publish(
+                exchange='', routing_key=ENRICHER_REQUEST_QUEUE,
+                body=cascade_msg.encode('utf-8'),
+                properties=pika.BasicProperties(
+                    delivery_mode=2, content_type='application/json', priority=priority))
+            log(self.tag, "[CASCADE] -> enricher (tokens,pools)")
+        except Exception as e:
+            log(self.tag, f"Failed to cascade to enricher: {e}")
+
+
+# =============================================================================
+# Supervisor
+# =============================================================================
+
+def read_config(cursor):
+    return {
+        'threads':          get_config_int(cursor, 'queue', 'aggregator_wrk_cnt_threads', 0),
+        'prefetch':         get_config_int(cursor, 'queue', 'aggregator_wrk_cnt_prefetch', 5),
+        'supervisor_poll':  get_config_float(cursor, 'queue', 'aggregator_wrk_supervisor_poll_sec', 5.0),
+        'poll_idle':        get_config_float(cursor, 'queue', 'aggregator_wrk_poll_idle_sec', 0.25),
+        'reconnect':        get_config_float(cursor, 'queue', 'aggregator_wrk_reconnect_sec', 5.0),
+        'shutdown_timeout': get_config_float(cursor, 'queue', 'aggregator_wrk_shutdown_timeout_sec', 10.0),
+        'batch_size':       get_config_int(cursor, 'queue', 'aggregator_wrk_batch_size', 10000),
+        'deadlock_max':     get_config_int(cursor, 'queue', 'aggregator_wrk_deadlock_max_retries', 5),
+        'deadlock_delay':   get_config_float(cursor, 'queue', 'aggregator_wrk_deadlock_base_delay', 0.1),
+        'db_poll':          get_config_float(cursor, 'queue', 'aggregator_wrk_db_poll_sec', 0),
+    }
+
+
+def run_supervisor():
+    print(f"""
++-----------------------------------------------------------+
+|  Guide Aggregator - Supervisor                            |
+|  vhost: {RABBITMQ_VHOST:<10}  queue: {REQUEST_QUEUE:<24} |
++-----------------------------------------------------------+
+""", flush=True)
+
+    workers = {}
+    next_id = 1
+    svr_conn = None
+    svr_cursor = None
+    svr_rmq_conn = None
+    svr_rmq_ch = None
+    last_db_poll = 0.0
+
+    def ensure_svr_db():
+        nonlocal svr_conn, svr_cursor
+        try:
+            if svr_conn is not None:
+                svr_conn.ping(reconnect=False, attempts=1, delay=0)
+                return True
+        except Exception:
+            svr_conn = None
+        try:
+            svr_conn = db_connect()
+            svr_cursor = svr_conn.cursor(dictionary=True)
+            log('SVR', 'DB connected')
+            return True
+        except Exception as e:
+            log('SVR', f'DB connect failed: {e}')
+            return False
+
+    def ensure_svr_rmq():
+        nonlocal svr_rmq_conn, svr_rmq_ch
+        try:
+            if svr_rmq_conn is not None and svr_rmq_conn.is_open:
+                return True
+        except Exception:
+            svr_rmq_conn = None
+        try:
+            svr_rmq_conn, svr_rmq_ch = rmq_connect()
+            log('SVR', 'RabbitMQ connected (publisher)')
+            return True
+        except Exception as e:
+            log('SVR', f'RabbitMQ connect failed: {e}')
+            return False
+
+    def publish_db_poll():
+        msg = json.dumps({
+            'request_id': f"dbpoll-{uuid.uuid4().hex[:12]}",
+            'action': 'db-poll-sync',
+        })
+        svr_rmq_ch.basic_publish(
+            exchange='', routing_key=REQUEST_QUEUE,
+            body=msg.encode('utf-8'),
+            properties=pika.BasicProperties(delivery_mode=2, content_type='application/json'))
+        log('SVR', 'Published db-poll-sync to queue')
+
+    try:
+        while True:
+            if not ensure_svr_db():
+                time.sleep(DB_FALLBACK_RETRY_SEC)
+                continue
+
+            cfg = read_config(svr_cursor)
+
+            # Prune dead workers
+            dead = [wid for wid, (w, _) in workers.items() if not w.is_alive()]
+            for wid in dead:
+                log('SVR', f'Worker W-{wid} died, removing')
+                del workers[wid]
+
+            active = len(workers)
+            if active != cfg['threads']:
+                log('SVR', f"Config: threads={cfg['threads']} prefetch={cfg['prefetch']} | active={active}")
+
+            # Scale up
+            while len(workers) < cfg['threads']:
+                stop_evt = threading.Event()
+                w = WorkerThread(
+                    next_id, cfg['prefetch'], stop_evt,
+                    cfg['poll_idle'], cfg['reconnect'], cfg['batch_size'],
+                    cfg['deadlock_max'], cfg['deadlock_delay'])
+                w.start()
+                workers[next_id] = (w, stop_evt)
+                next_id += 1
+
+            # Scale down (stop newest first)
+            while len(workers) > cfg['threads']:
+                wid = max(workers.keys())
+                wthread, stop_evt = workers.pop(wid)
+                log('SVR', f'Stopping W-{wid}...')
+                stop_evt.set()
+
+            # DB poll scheduler
+            now = time.time()
+            if cfg['db_poll'] > 0 and active > 0 and (now - last_db_poll) >= cfg['db_poll']:
+                if ensure_svr_rmq():
+                    try:
+                        publish_db_poll()
+                        last_db_poll = now
+                    except Exception as e:
+                        log('SVR', f'Failed to publish db poll: {e}')
+                        svr_rmq_conn = None
+
+            time.sleep(cfg['supervisor_poll'])
+
+    except KeyboardInterrupt:
+        log('SVR', 'Shutting down...')
+
+    shutdown_timeout = cfg['shutdown_timeout'] if 'cfg' in dir() else 10.0
+
+    for wid, (w, stop_evt) in workers.items():
+        stop_evt.set()
+    for wid, (w, _) in workers.items():
+        w.join(timeout=shutdown_timeout)
+        if w.is_alive():
+            log('SVR', f'W-{wid} did not stop in time')
+
+    if svr_rmq_conn:
+        try:
+            svr_rmq_conn.close()
+        except Exception:
+            pass
+    if svr_conn:
+        try:
+            svr_conn.close()
+        except Exception:
+            pass
+
+    log('SVR', 'Shutdown complete')
+
+
+# =============================================================================
+# Manual modes
+# =============================================================================
+
+def run_manual(args):
+    """Run sync manually (single run)."""
+    conn = db_connect()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        if args.status:
+            status = get_sync_status(cursor)
+            print(f"\n{'='*60}")
+            print(f"  Guide Aggregator Status")
+            print(f"{'='*60}")
+            print(f"  tx_guide max id:          {status['max_guide_id']:,}")
+            print(f"  Pending activities:       {status['pending_activities']:,}")
+            print(f"  Token participant synced: {status['tokens']['last_synced']:,} (behind: {status['tokens']['behind']:,})")
+            print(f"  Pool labels missing:      {status['pool_labels_missing']:,}")
+            print(f"{'='*60}")
+            return 0
+
+        if args.sync.lower() == 'all':
+            operations = ['guide', 'tokens']
+        else:
+            operations = [op.strip().lower() for op in args.sync.split(',')]
+            valid_ops = {'guide', 'tokens'}
+            invalid = set(operations) - valid_ops
+            if invalid:
+                print(f"Error: Invalid operations: {invalid}. Valid: guide, tokens, all")
+                return 1
+
+        log('MANUAL', f"Operations: {', '.join(operations)}, batch_size={args.batch_size}")
+
+        stats = run_sync('MANUAL', cursor, conn, operations, args.batch_size, 5, 0.1)
+
+        total = stats['guide']['edges'] + stats['tokens']['rows']
+        print(f"\n{'='*60}")
+        print(f"  Sync Complete")
+        print(f"{'='*60}")
+        print(f"  Pool backfill:     {stats['pool_backfill']:,}")
+        print(f"  Guide edges:       {stats['guide']['edges']:,}")
+        print(f"  Token participant: {stats['tokens']['rows']:,}")
+        print(f"  Total:             {total:,}")
+        print(f"{'='*60}")
+
+    finally:
+        conn.close()
+
     return 0
 
 
@@ -773,187 +931,20 @@ def run_queue_consumer(prefetch: int = 1):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Guide Aggregator - Consolidated daemon for guide table synchronization',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Operations (--sync):
-  guide   - Process tx_activity into tx_guide via sp_tx_guide_batch
-  tokens  - Sync tx_token_participant from tx_guide
-  all     - All operations (default)
-
-Examples:
-  python guide-aggregator.py                          # All operations, single run
-  python guide-aggregator.py --daemon --interval 30   # Continuous mode
-  python guide-aggregator.py --sync guide             # Only sp_tx_guide_batch
-  python guide-aggregator.py --sync tokens            # Only tx_token_participant
-  python guide-aggregator.py --status                 # Show sync status
-        """
-    )
-
+        description='Guide Aggregator - Guide edges & token participant sync')
     parser.add_argument('--sync', '-s', type=str, default='all',
-                        help='Operations to run: guide,tokens,all (default: all)')
-    parser.add_argument('--daemon', '-d', action='store_true',
-                        help='Run continuously in daemon mode')
-    parser.add_argument('--interval', '-i', type=int, default=30,
-                        help='Sync interval in seconds for daemon mode (default: 30)')
+                        help='Operations: guide,tokens,all (default: all)')
     parser.add_argument('--batch-size', '-b', type=int, default=10000,
-                        help='Batch size for tokens sync (default: 10000)')
-    parser.add_argument('--guide-batch-size', type=int, default=1000,
-                        help='Batch size for guide edge processing (default: 1000)')
-    parser.add_argument('--max-batches', type=int, default=0,
-                        help='Max batches for guide processing (0 = unlimited)')
+                        help='Token participant batch size (default: 10000)')
     parser.add_argument('--status', action='store_true',
-                        help='Show current sync status and exit')
-    parser.add_argument('--quiet', '-q', action='store_true',
-                        help='Minimal output')
-    parser.add_argument('--json', action='store_true',
-                        help='Output in JSON format')
-    parser.add_argument('--queue-consumer', action='store_true',
-                        help='Run as queue consumer, listening for gateway requests')
-    parser.add_argument('--prefetch', type=int, default=1,
-                        help='Prefetch count for queue consumer mode (default: 1)')
-
+                        help='Show sync status')
     args = parser.parse_args()
 
-    if args.queue_consumer:
-        return run_queue_consumer(prefetch=args.prefetch)
-
-    if not HAS_MYSQL:
-        print("Error: mysql-connector-python not installed")
-        return 1
-
-    # Parse operations
-    if args.sync.lower() == 'all':
-        operations = ['guide', 'tokens']
+    if args.status or args.sync != 'all' or args.batch_size != 10000:
+        return run_manual(args)
     else:
-        operations = [op.strip().lower() for op in args.sync.split(',')]
-        valid_ops = {'guide', 'tokens'}
-        invalid = set(operations) - valid_ops
-        if invalid:
-            print(f"Error: Invalid operations: {invalid}. Valid: guide, tokens, all")
-            return 1
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    try:
-        if args.status:
-            status = get_sync_status(cursor)
-            if args.json:
-                print(json.dumps(status, indent=2))
-            else:
-                print_status(status)
-            return 0
-
-        if not args.quiet and not args.json:
-            print(f"\n{'='*60}")
-            print(f"Guide Aggregator")
-            print(f"{'='*60}")
-            print(f"  Database:   {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
-            print(f"  Operations: {', '.join(operations)}")
-            print(f"  Mode:       {'DAEMON' if args.daemon else 'SINGLE RUN'}")
-            if args.daemon:
-                print(f"  Interval:   {args.interval}s")
-            print(f"{'='*60}\n")
-
-        if args.daemon:
-            print("Press Ctrl+C to stop\n")
-
-            while True:
-                request_log_id = None
-                try:
-                    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-                    if not args.quiet:
-                        print(f"[{timestamp}] Running sync...")
-
-                    stats = run_sync(cursor, conn, operations,
-                                    args.batch_size, args.guide_batch_size,
-                                    args.max_batches, verbose=not args.quiet)
-
-                    total = (stats['guide']['edges'] +
-                            stats['tokens']['rows'])
-
-                    # Only log if there were actual changes (avoid cluttering request_log)
-                    if total > 0:
-                        request_log_id = log_daemon_request(cursor, conn, 'aggregator', 'sync', operations)
-                        update_daemon_request(cursor, conn, request_log_id, 'completed', {
-                            'guide_edges': stats['guide']['edges'],
-                            'token_rows': stats['tokens']['rows'],
-                            'total': total
-                        })
-
-                    if args.json:
-                        print(json.dumps(stats))
-                    elif not args.quiet:
-                        if total > 0:
-                            print(f"[{timestamp}] Complete: {total:,} rows affected\n")
-                        else:
-                            print(f"[{timestamp}] No changes\n")
-
-                    # Re-read interval from config (runtime-editable)
-                    interval = get_guide_batch_interval(cursor, args.interval)
-
-                    # Close connection before sleeping
-                    try:
-                        cursor.close()
-                        conn.close()
-                    except:
-                        pass
-
-                    time.sleep(interval)
-
-                    # Reconnect after sleep
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-
-                except KeyboardInterrupt:
-                    print("\nStopping daemon...")
-                    break
-                except Exception as e:
-                    print(f"Error: {e}")
-                    # Update request_log with error if we have one
-                    if request_log_id:
-                        try:
-                            update_daemon_request(cursor, conn, request_log_id, 'failed', {'error': str(e)})
-                        except:
-                            pass
-                    try:
-                        cursor.close()
-                        conn.close()
-                    except:
-                        pass
-                    time.sleep(args.interval)
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-
-        else:
-            # Single run
-            stats = run_sync(cursor, conn, operations,
-                            args.batch_size, args.guide_batch_size,
-                            args.max_batches, verbose=not args.quiet)
-
-            if args.json:
-                print(json.dumps(stats, indent=2))
-            elif not args.quiet:
-                total = (stats['guide']['edges'] +
-                        stats['tokens']['rows'])
-                print(f"\n{'='*60}")
-                print(f"Sync Complete")
-                print(f"{'='*60}")
-                print(f"  Guide edges:        {stats['guide']['edges']:,}")
-                print(f"  Token participant:  {stats['tokens']['rows']:,}")
-                print(f"  Total:              {total:,}")
-                print(f"{'='*60}\n")
-
-    finally:
-        try:
-            cursor.close()
-            conn.close()
-        except:
-            pass
-
-    return 0
+        return run_supervisor()
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(main() or 0)

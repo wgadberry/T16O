@@ -20,8 +20,8 @@ BEGIN
 
     UPDATE tx_token t
     JOIN tx_address a ON a.id = t.mint_address_id
-    SET t.token_symbol = fn_parse_token_pair(a.label),
-        t.token_name   = a.label
+    SET t.token_symbol = TRIM(fn_parse_token_pair(a.label)),
+        t.token_name   = TRIM(a.label)
     WHERE (t.token_symbol IS NULL OR t.token_symbol = '')
       AND a.label IS NOT NULL
       AND fn_parse_token_pair(a.label) IS NOT NULL;

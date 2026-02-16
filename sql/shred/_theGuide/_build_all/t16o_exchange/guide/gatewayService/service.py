@@ -14,8 +14,8 @@ from ..common.service_base import GuideServiceBase, run_service_command_line
 class GatewayService(GuideServiceBase):
     """Windows service wrapper for Guide Gateway"""
 
-    _svc_name_ = 'T16OExchange.Guide.Gateway'
-    _svc_display_name_ = 'T16O Exchange - Guide Gateway'
+    _svc_name_ = 'T16OExchange.Guide.Gateway.Queue'
+    _svc_display_name_ = 'T16O Exchange - Guide Gateway Queue'
     _svc_description_ = 'T16O Exchange Guide Gateway Service - Request orchestrator for theGuide pipeline'
 
     worker_name = 'gateway'
