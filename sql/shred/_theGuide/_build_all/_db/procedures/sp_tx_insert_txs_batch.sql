@@ -54,7 +54,7 @@ BEGIN
         agg_decimals_out,
         agg_fee_amount,
         agg_fee_token_id,
-        tx_json,
+        -- tx_json,
         tx_state,
         request_log_id
     )
@@ -78,7 +78,7 @@ BEGIN
         CASE WHEN t.activity_type = 'ACTIVITY_TOKEN_SWAP' THEN t.decimal_2 ELSE NULL END,
         CASE WHEN t.activity_type = 'ACTIVITY_TOKEN_SWAP' THEN t.fee_amount ELSE NULL END,
         CASE WHEN t.activity_type = 'ACTIVITY_TOKEN_SWAP' THEN fee_tok.id ELSE NULL END,
-        t.tx_json,
+        -- t.tx_json,
         8,
         p_request_log_id
     FROM JSON_TABLE(
@@ -100,8 +100,8 @@ BEGIN
             decimal_1 TINYINT UNSIGNED PATH '$.one_line_summary.data.token_decimal_1',
             decimal_2 TINYINT UNSIGNED PATH '$.one_line_summary.data.token_decimal_2',
             fee_amount BIGINT UNSIGNED PATH '$.one_line_summary.data.fee_ammount',
-            fee_token VARCHAR(44) PATH '$.one_line_summary.data.fee_token',
-            tx_json JSON PATH '$'
+            fee_token VARCHAR(44) PATH '$.one_line_summary.data.fee_token' -- ,
+            -- tx_json JSON PATH '$'
         )
     ) AS t
     -- JOINs for lookups (addresses already populated by sp_tx_prepopulate_lookups)

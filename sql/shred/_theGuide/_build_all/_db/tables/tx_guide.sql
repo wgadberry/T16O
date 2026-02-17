@@ -34,6 +34,8 @@ CREATE TABLE `tx_guide` (
   `pool_address_id` int unsigned DEFAULT NULL COMMENT 'FK to tx_address - pool/AMM address',
   `pool_label` varchar(100) DEFAULT NULL COMMENT 'Pool label from tx_address.label',
   `swap_direction` enum('in','out') DEFAULT NULL COMMENT 'NULL=not a swap, in=received, out=sent',
+  `created_utc` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC)',
+  `updated_utc` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT 'Last update time (UTC)',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_guide_edge` (`tx_id`,`from_address_id`,`to_address_id`,`token_id`,`amount`,`edge_type_id`,`ins_index`),
   KEY `idx_from_time` (`from_address_id`,`block_time`),

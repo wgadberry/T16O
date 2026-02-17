@@ -1,0 +1,30 @@
+{
+  "rabbit_version": "3.12",
+  "users": [
+    {
+      "name": "admin",
+      "password": "admin123",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    {"name": "/"},
+    {"name": "t16o_mq"}
+  ],
+  "permissions": [
+    {
+      "user": "admin",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "admin",
+      "vhost": "t16o_mq",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ]
+}

@@ -22,6 +22,7 @@ BEGIN
 
     IF p_limit > 0 THEN
         SELECT
+            a.address AS mint_address,
             t.token_name,
             t.token_symbol,
             COUNT(g.id) AS tx_count,
@@ -30,12 +31,14 @@ BEGIN
             FROM_UNIXTIME(MAX(g.block_time)) AS last_seen
         FROM tx_guide g
         INNER JOIN tx_token t ON t.id = g.token_id
+        INNER JOIN tx_address a ON a.id = t.mint_address_id
         WHERE t.token_symbol IS NOT NULL AND t.token_symbol != ''
-        GROUP BY t.id, t.token_name, t.token_symbol
+        GROUP BY t.id, a.address, t.token_name, t.token_symbol
         ORDER BY tx_count DESC
         LIMIT p_limit;
     ELSE
         SELECT
+            a.address AS mint_address,
             t.token_name,
             t.token_symbol,
             COUNT(g.id) AS tx_count,
@@ -44,8 +47,9 @@ BEGIN
             FROM_UNIXTIME(MAX(g.block_time)) AS last_seen
         FROM tx_guide g
         INNER JOIN tx_token t ON t.id = g.token_id
+        INNER JOIN tx_address a ON a.id = t.mint_address_id
         WHERE t.token_symbol IS NOT NULL AND t.token_symbol != ''
-        GROUP BY t.id, t.token_name, t.token_symbol
+        GROUP BY t.id, a.address, t.token_name, t.token_symbol
         ORDER BY tx_count DESC;
     END IF;
 

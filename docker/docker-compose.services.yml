@@ -1,0 +1,152 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: t16o_v1_services_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5692:5672"
+      - "15692:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    volumes:
+      - t16o_v1_services_rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq-definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_gateway
+    restart: unless-stopped
+    ports:
+      - "5100:5100"
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-gateway.py", "--with-queue-consumer", "--with-response-consumer"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  producer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_producer
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-producer.py", "--queue-consumer"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  decoder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_decoder
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-decoder.py"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  detailer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_detailer
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-detailer.py"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  enricher:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_enricher
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-enricher.py"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  aggregator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_aggregator
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-aggregator.py"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  funder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_funder
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-funder.py"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  shredder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_shredder
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "guide-shredder.py", "--daemon"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  t16o_v1_services_rabbitmq_data:
+    name: t16o_v1_services_rabbitmq_data
+
+networks:
+  default:
+    name: t16o_v1_services_net
