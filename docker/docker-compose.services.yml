@@ -1,6 +1,44 @@
-version: '3.8'
-
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: t16o_v1_services_mysql
+    restart: unless-stopped
+    ports:
+      - "3397:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: t16o_db
+    command:
+      - --skip-log-bin
+      - --innodb_buffer_pool_size=2G
+      - --innodb_buffer_pool_instances=2
+      - --innodb_log_buffer_size=64M
+      - --innodb_redo_log_capacity=512M
+      - --innodb_flush_log_at_trx_commit=2
+      - --innodb_io_capacity=2000
+      - --innodb_io_capacity_max=4000
+      - --tmp_table_size=256M
+      - --max_heap_table_size=256M
+      - --sort_buffer_size=16M
+      - --join_buffer_size=16M
+      - --read_buffer_size=16M
+      - --read_rnd_buffer_size=16M
+      - --concurrent_insert=2
+      - --max_connections=200
+      - --thread_cache_size=16
+      - --table_open_cache=4000
+      - --table_definition_cache=2000
+      - --innodb_file_per_table=ON
+      - --innodb_stats_on_metadata=OFF
+    volumes:
+      - t16o_v1_services_mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: t16o_v1_services_rabbitmq
@@ -33,10 +71,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-gateway.py", "--with-queue-consumer", "--with-response-consumer"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   producer:
     build:
@@ -48,10 +86,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-producer.py", "--queue-consumer"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   decoder:
     build:
@@ -63,10 +101,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-decoder.py"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   detailer:
     build:
@@ -78,10 +116,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-detailer.py"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   enricher:
     build:
@@ -93,10 +131,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-enricher.py"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   aggregator:
     build:
@@ -108,10 +146,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-aggregator.py"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   funder:
     build:
@@ -123,10 +161,10 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-funder.py"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   shredder:
     build:
@@ -138,12 +176,14 @@ services:
       - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
     command: ["python3", "guide-shredder.py", "--daemon"]
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
 volumes:
+  t16o_v1_services_mysql_data:
+    name: t16o_v1_services_mysql_data
   t16o_v1_services_rabbitmq_data:
     name: t16o_v1_services_rabbitmq_data
 
