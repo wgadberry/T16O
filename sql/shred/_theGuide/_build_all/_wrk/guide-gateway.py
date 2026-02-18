@@ -1054,6 +1054,24 @@ def create_app():
     def options_handler(path=''):
         return '', 204
 
+    # ---- API Documentation ----
+
+    @app.route('/', methods=['GET'])
+    def index():
+        """Redirect root to API docs"""
+        from flask import redirect
+        return redirect('/docs')
+
+    @app.route('/docs', methods=['GET'])
+    def docs():
+        """Serve API documentation page"""
+        docs_path = os.path.join(os.path.dirname(__file__), 'api-docs.html')
+        try:
+            with open(docs_path, 'r', encoding='utf-8') as f:
+                return f.read(), 200, {'Content-Type': 'text/html'}
+        except FileNotFoundError:
+            return 'API docs not found', 404
+
     @app.route('/api/health', methods=['GET'])
     def health():
         """Health check endpoint"""
