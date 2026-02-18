@@ -1148,21 +1148,9 @@ def create_app():
                 'error': 'Invalid or inactive API key'
             }), 401
 
-        # Get correlation ID from header (required for request tracing)
-        correlation_id = request.headers.get('X-Correlation-Id')
-        if not correlation_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing X-Correlation-Id header'
-            }), 400
-
-        # Get request ID from header (required for request tracking)
-        request_id = request.headers.get('X-Request-Id')
-        if not request_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing X-Request-Id header'
-            }), 400
+        # Get request ID and correlation ID from headers (auto-generate if not provided)
+        request_id = request.headers.get('X-Request-Id') or str(uuid.uuid4())
+        correlation_id = request.headers.get('X-Correlation-Id') or request_id
 
         # Check rate limit
         rate_limit = key_info.get('rate_limit', 0)
