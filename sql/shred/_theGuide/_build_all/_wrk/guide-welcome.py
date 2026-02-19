@@ -236,10 +236,10 @@ TX_STATE_PHASES = {
 
 # Synthetic addresses that must exist for special edge types
 SYNTHETIC_ADDRESSES = {
-    "BURN111111111111111111111111111111111111111": {"id": 742702, "type": "sink", "purpose": "burn"},
-    "MINT111111111111111111111111111111111111111": {"id": 742703, "type": "source", "purpose": "mint"},
-    "CLOSE11111111111111111111111111111111111111": {"id": 742704, "type": "sink", "purpose": "close"},
-    "CREATE1111111111111111111111111111111111111": {"id": 742705, "type": "source", "purpose": "create"},
+    "BURN111111111111111111111111111111111111111": {"id": 3, "type": "sink", "purpose": "burn"},
+    "MINT111111111111111111111111111111111111111": {"id": 4, "type": "source", "purpose": "mint"},
+    "CLOSE11111111111111111111111111111111111111": {"id": 5, "type": "sink", "purpose": "close"},
+    "CREATE1111111111111111111111111111111111111": {"id": 6, "type": "source", "purpose": "create"},
 }
 
 # Default workers launched by interactive mode

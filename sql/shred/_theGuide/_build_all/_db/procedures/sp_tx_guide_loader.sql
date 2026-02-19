@@ -25,7 +25,7 @@ BEGIN
 
     DECLARE v_unknown_mint_id BIGINT DEFAULT 751438;
     DECLARE v_sol_token_id BIGINT DEFAULT 25993;
-    DECLARE v_create_sink_id INT UNSIGNED DEFAULT 742705;
+    DECLARE v_create_sink_id INT UNSIGNED DEFAULT 6;
 
     SET p_batch_size = COALESCE(p_batch_size, 100);
     SET p_rows_loaded = 0;

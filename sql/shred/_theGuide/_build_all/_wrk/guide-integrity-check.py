@@ -488,7 +488,7 @@ class IntegrityChecker:
 
         results = {}
 
-        # Burns: should have edge to BURN sink (742702)
+        # Burns: should have edge to BURN sink (id=3)
         burn_total = self.run_scalar("""
             SELECT COUNT(*) FROM tx_transfer
             WHERE transfer_type = 'ACTIVITY_SPL_BURN'

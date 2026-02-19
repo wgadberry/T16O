@@ -121,12 +121,12 @@ BEGIN
 
     SET p_transfer_edges = ROW_COUNT();
 
-    -- BURN edges (wallet → BURN sink 742702)
+    -- BURN edges (wallet → BURN sink id=3)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742702,
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 3,
            t.source_address_id, NULL,
            t.token_id, t.amount, t.decimals, 39,  -- burn
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -138,12 +138,12 @@ BEGIN
 
     SET p_transfer_edges = p_transfer_edges + ROW_COUNT();
 
-    -- MINT edges (MINT source 742703 → wallet)
+    -- MINT edges (MINT source id=4 → wallet)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, 742703, t.destination_owner_address_id,
+    SELECT t.tx_id, b.block_time, 4, t.destination_owner_address_id,
            NULL, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 38,  -- mint
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -155,12 +155,12 @@ BEGIN
 
     SET p_transfer_edges = p_transfer_edges + ROW_COUNT();
 
-    -- CREATE_ACCOUNT edges (wallet → CREATE sink 742705)
+    -- CREATE_ACCOUNT edges (wallet → CREATE sink id=6)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742705,
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 6,
            t.source_address_id, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 8,  -- create_account
            1, t.id, t.ins_index, b.fee, b.priority_fee

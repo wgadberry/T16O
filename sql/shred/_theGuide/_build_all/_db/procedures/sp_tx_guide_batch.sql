@@ -99,7 +99,7 @@ BEGIN
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742702,  -- BURN sink
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 3,  -- BURN sink
            t.source_address_id, NULL,
            t.token_id, t.amount, t.decimals, 39,  -- burn edge_type
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -118,7 +118,7 @@ BEGIN
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, 742703, t.destination_owner_address_id,  -- MINT source
+    SELECT t.tx_id, b.block_time, 4, t.destination_owner_address_id,  -- MINT source
            NULL, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 38,  -- mint edge_type
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -137,7 +137,7 @@ BEGIN
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742705,  -- CREATE sink
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 6,  -- CREATE sink
            t.source_address_id, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 8,  -- create_account edge_type
            1, t.id, t.ins_index, b.fee, b.priority_fee
