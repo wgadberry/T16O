@@ -264,36 +264,52 @@ BEGIN
     -- swap_in: account sends token_1 into swap
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index,
+                          dex, pool_address_id, pool_label, swap_direction)
     SELECT s.tx_id, b.block_time, s.account_address_id, tk1.mint_address_id,
            s.token_1_id, s.amount_1, tk1.decimals, 3,  -- swap_in
-           2, s.id, s.ins_index
+           2, s.id, s.ins_index,
+           p.name, pool.pool_address_id, pool.pool_label, 'in'
     FROM tmp_batch b
     JOIN tx_swap s ON s.activity_id = b.activity_id
     JOIN tx_token tk1 ON tk1.id = s.token_1_id
+    LEFT JOIN tx_program p ON p.id = s.program_id
+    LEFT JOIN tx_pool pool ON pool.id = s.amm_id
     WHERE b.edge_direction IN ('both', 'out')
       AND b.creates_edge = 1
       AND s.token_1_id IS NOT NULL
       AND s.account_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount),
+      dex = COALESCE(VALUES(dex), dex),
+      pool_address_id = COALESCE(VALUES(pool_address_id), pool_address_id),
+      pool_label = COALESCE(VALUES(pool_label), pool_label),
+      swap_direction = COALESCE(VALUES(swap_direction), swap_direction);
 
     SET p_guide_count = ROW_COUNT();
 
     -- swap_out: account receives token_2 from swap
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index,
+                          dex, pool_address_id, pool_label, swap_direction)
     SELECT s.tx_id, b.block_time, tk2.mint_address_id, s.account_address_id,
            s.token_2_id, s.amount_2, tk2.decimals, 4,  -- swap_out
-           2, s.id, s.ins_index
+           2, s.id, s.ins_index,
+           p.name, pool.pool_address_id, pool.pool_label, 'out'
     FROM tmp_batch b
     JOIN tx_swap s ON s.activity_id = b.activity_id
     JOIN tx_token tk2 ON tk2.id = s.token_2_id
+    LEFT JOIN tx_program p ON p.id = s.program_id
+    LEFT JOIN tx_pool pool ON pool.id = s.amm_id
     WHERE b.edge_direction IN ('both', 'in')
       AND b.creates_edge = 1
       AND s.token_2_id IS NOT NULL
       AND s.account_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount),
+      dex = COALESCE(VALUES(dex), dex),
+      pool_address_id = COALESCE(VALUES(pool_address_id), pool_address_id),
+      pool_label = COALESCE(VALUES(pool_label), pool_label),
+      swap_direction = COALESCE(VALUES(swap_direction), swap_direction);
 
     SET p_guide_count = p_guide_count + ROW_COUNT();
 
