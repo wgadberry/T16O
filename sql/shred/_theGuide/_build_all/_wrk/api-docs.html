@@ -285,10 +285,12 @@
       "get": {
         "operationId": "bmapGet",
         "summary": "Get Bmap Data",
-        "description": "Get transaction cluster map (bmap) data for a token. Returns nodes, edges, and transaction navigation for visualization.\n\nProvide at least one of: `mint`, `token_symbol`, `token_name`, or `signature`.\n\nPriority for token resolution: `mint` > `token_symbol` > `token_name` > derived from `signature`.",
+        "description": "Get transaction cluster map (bmap) data for a token. Returns nodes, edges, and transaction navigation for visualization.\n\nProvide at least one of: `mint`, `token_symbol`, `token_name`, or `signature`.\n\nPriority for token resolution: `mint` > `token_symbol` > `token_name` > derived from `signature`.\n\n**Auto-fetch:** If no data exists for the requested token, the gateway automatically triggers the producer to fetch the 5 most recent transactions from chain. Returns HTTP 202 with a processing status — poll again after a few seconds to get the data.",
         "tags": ["Bmap"],
-        "security": [],
         "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" },
           {
             "name": "mint",
             "in": "query",
@@ -335,8 +337,32 @@
               }
             }
           },
+          "202": {
+            "description": "Data not found — auto-fetch triggered. Poll again shortly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "object",
+                      "properties": {
+                        "status": { "type": "string", "example": "processing" },
+                        "message": { "type": "string" },
+                        "mint": { "type": "string" },
+                        "producer": { "type": "object" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Token or signature not found"
+            "description": "Token not found and mint address could not be resolved for auto-fetch"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
           },
           "500": {
             "description": "Database error"

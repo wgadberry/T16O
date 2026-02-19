@@ -1108,7 +1108,29 @@ def create_app():
 
     @app.route('/api/bmap/get', methods=['GET'])
     def bmap_get():
-        """Get bmap data for a token/signature via sp_tx_bmap_get"""
+        """Get bmap data for a token/signature via sp_tx_bmap_get.
+        Auto-fetches from chain if no data exists."""
+
+        # --- Auth ---
+        api_key = request.headers.get('X-API-Key')
+        if not api_key:
+            return jsonify({'error': 'Missing X-API-Key header'}), 401
+        key_info = validate_api_key(api_key)
+        if not key_info:
+            return jsonify({'error': 'Invalid or inactive API key'}), 401
+
+        request_id = request.headers.get('X-Request-Id') or str(uuid.uuid4())
+        correlation_id = request.headers.get('X-Correlation-Id') or request_id
+
+        # Rate limit
+        rate_limit = key_info.get('rate_limit', 0)
+        allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
+        if not allowed:
+            resp = jsonify({'error': 'Rate limit exceeded', 'retry_after_seconds': retry_after})
+            resp.headers['Retry-After'] = str(retry_after)
+            return resp, 429
+
+        # --- Query params ---
         token_name   = request.args.get('token_name')
         token_symbol = request.args.get('token_symbol')
         mint_address = request.args.get('mint')
@@ -1116,6 +1138,7 @@ def create_app():
         block_time   = request.args.get('block_time', type=int)
         tx_limit     = request.args.get('limit', default=10, type=int)
 
+        # --- Call stored procedure ---
         conn = None
         try:
             conn = get_db_connection()
@@ -1140,10 +1163,91 @@ def create_app():
         if not data:
             return jsonify({'error': 'No result from procedure'}), 500
 
-        if 'error' in data.get('result', {}):
-            return jsonify(data), 404
+        # --- Success: data exists ---
+        if 'error' not in data.get('result', {}):
+            return jsonify(data), 200
 
-        return jsonify(data), 200
+        # --- Auto-fetch: no data, trigger producer ---
+        error_result = data.get('result', {})
+        error_msg = error_result.get('error', '')
+
+        # Resolve mint address: SP error response > request param > DB lookup
+        mint = error_result.get('mint') or mint_address
+        if not mint and token_symbol:
+            try:
+                resolve_conn = get_db_connection()
+                resolve_cursor = resolve_conn.cursor()
+                resolve_cursor.execute("""
+                    SELECT a.address FROM tx_token t
+                    JOIN tx_address a ON a.id = t.mint_address_id
+                    WHERE t.token_symbol = %s LIMIT 1
+                """, (token_symbol,))
+                row = resolve_cursor.fetchone()
+                if row:
+                    mint = row[0]
+                resolve_cursor.close()
+                resolve_conn.close()
+            except Exception:
+                pass
+
+        if not mint:
+            return jsonify(data), 404  # Can't auto-fetch without a mint
+
+        # Build producer payload
+        batch_filters = {'addresses': [mint]}
+        if 'Signature not found' in error_msg:
+            sig = error_result.get('signature') or signature
+            if sig:
+                batch_filters['signature'] = sig
+
+        priority = request.headers.get('X-Priority', type=int) or REST_API_DEFAULT_PRIORITY
+        features = key_info.get('feature_mask') or 0
+        payload = {
+            'priority': priority,
+            'request_id': request_id,
+            'correlation_id': correlation_id,
+            'features': features,
+            'batch': {'filters': batch_filters, 'size': 5}
+        }
+
+        # Log gateway billing record
+        request_log_id = log_request(
+            request_id=request_id,
+            api_key_id=key_info.get('id'),
+            source='rest',
+            target_worker='gateway',
+            action='bmap-auto-fetch',
+            priority=priority,
+            payload=payload,
+            correlation_id=correlation_id,
+            status='queued',
+            features=features
+        )
+
+        if not request_log_id or request_log_id < 0:
+            return jsonify(data), 404  # Fall back to original error if logging fails
+
+        # Trigger producer
+        result = process_request(
+            worker='producer',
+            action='process',
+            payload=payload,
+            api_key=api_key,
+            source='rest',
+            correlation_id=correlation_id,
+            request_id=request_id,
+            request_log_id=request_log_id,
+            features=features
+        )
+
+        return jsonify({
+            'result': {
+                'status': 'processing',
+                'message': 'Data not found — fetching from chain. Try again shortly.',
+                'mint': mint,
+                'producer': result
+            }
+        }), 202
 
     @app.route('/api/workers', methods=['GET'])
     def list_workers():
