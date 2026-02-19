@@ -1072,6 +1072,21 @@ def create_app():
         except FileNotFoundError:
             return 'API docs not found', 404
 
+    @app.route('/api/openapi.json', methods=['GET'])
+    @app.route('/api', methods=['GET'])
+    def openapi_spec():
+        """Serve the raw OpenAPI JSON spec (for .NET service references, Swagger, etc.)"""
+        docs_path = os.path.join(os.path.dirname(__file__), 'api-docs.html')
+        try:
+            with open(docs_path, 'r', encoding='utf-8') as f:
+                html = f.read()
+            # Extract JSON between <script id="api-reference" ...> and </script>
+            start = html.index('{', html.index('id="api-reference"'))
+            end = html.rindex('}', 0, html.index('</script>')) + 1
+            return html[start:end], 200, {'Content-Type': 'application/json'}
+        except Exception as e:
+            return jsonify({'error': f'Failed to extract OpenAPI spec: {e}'}), 500
+
     @app.route('/api/health', methods=['GET'])
     def health():
         """Health check endpoint"""
