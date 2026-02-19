@@ -97,6 +97,33 @@ def fetch_signatures_rpc(
     return response.json()
 
 
+def fetch_tx_first_signer(session: requests.Session, signature: str, rpc_url: str) -> Optional[str]:
+    """Fetch a transaction from RPC and return the first signer (fee payer) address.
+    Used to find an address for getSignaturesForAddress context lookup."""
+    payload = {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "getTransaction",
+        "params": [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+    }
+    try:
+        response = session.post(rpc_url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        result = data.get('result')
+        if not result:
+            return None
+        # accountKeys[0] is always the fee payer / first signer
+        account_keys = result.get('transaction', {}).get('message', {}).get('accountKeys', [])
+        if account_keys:
+            # accountKeys can be strings or objects with 'pubkey'
+            key = account_keys[0]
+            return key.get('pubkey') if isinstance(key, dict) else key
+    except Exception as e:
+        print(f"  [!] getTransaction failed for {signature[:20]}...: {e}")
+    return None
+
+
 def fetch_all_signatures(
     session: requests.Session,
     address: str,
@@ -981,6 +1008,13 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                     addr_list = [single]
             if addr_list:
                 context_address = addr_list[0]
+
+        # Last resort: fetch the transaction from RPC to get the fee payer address
+        if not context_address:
+            print(f"[{request_id[:8]}] No address in DB/filters, fetching tx from RPC...")
+            context_address = fetch_tx_first_signer(rpc_session, filter_signature, CHAINSTACK_RPC_URL)
+            if context_address:
+                print(f"  Found fee payer: {context_address[:20]}...")
 
         if context_address:
             # We have a mint/address — fetch surrounding context from RPC
