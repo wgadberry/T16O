@@ -102,6 +102,16 @@
           "filters": {
             "type": "object",
             "properties": {
+              "signature": {
+                "type": "string",
+                "description": "Transaction signature to fetch context around. Returns the target plus surrounding signatures (default 5 on each side). Cannot be combined with addresses.",
+                "example": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
+              },
+              "context_size": {
+                "type": "integer",
+                "default": 5,
+                "description": "Number of signatures to fetch on each side of the target (only used with signature filter)"
+              },
               "addresses": {
                 "type": "array",
                 "items": { "type": "string" },
@@ -290,6 +300,17 @@
                 ]
               },
               "examples": {
+                "fetchBySignature": {
+                  "summary": "Fetch context around a signature (5 before + target + 5 after)",
+                  "value": {
+                    "priority": 10,
+                    "batch": {
+                      "filters": {
+                        "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
+                      }
+                    }
+                  }
+                },
                 "fetchByAddress": {
                   "summary": "Fetch signatures for a token mint",
                   "value": {
