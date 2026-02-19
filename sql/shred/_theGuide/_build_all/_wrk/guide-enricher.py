@@ -78,6 +78,15 @@ DB_CONFIG           = get_db_config()
 
 MULTI_META_BATCH_SIZE = 50
 
+# Known token symbols → legitimate mint addresses. Any token claiming these
+# symbols from a different mint is flagged as a scam.
+KNOWN_TOKEN_MINTS = {
+    'SOL':  {'So11111111111111111111111111111111111111111', 'So11111111111111111111111111111111111111112'},
+    'WSOL': {'So11111111111111111111111111111111111111111', 'So11111111111111111111111111111111111111112'},
+    'USDC': {'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'},
+    'USDT': {'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'},
+}
+
 
 # =============================================================================
 # Helpers
@@ -388,6 +397,14 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                     symbol = (response.get('symbol') or '').strip() or None
                     icon = response.get('icon')
                     decimals = response.get('decimals')
+
+                    # Scam guard: flag tokens impersonating known symbols
+                    if symbol and symbol.upper() in KNOWN_TOKEN_MINTS:
+                        legit_mints = KNOWN_TOKEN_MINTS[symbol.upper()]
+                        if mint not in legit_mints:
+                            log(tag, f"    SCAM: {mint[:16]}... claims {symbol} — flagging")
+                            name = f"{name} (Scam)" if name else "(Scam)"
+                            symbol = f"{symbol} (Scam)"
 
                     has_meaningful = bool(name and name.strip()) or bool(symbol and symbol.strip())
                     token_json_str = json.dumps(response)
