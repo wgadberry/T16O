@@ -221,6 +221,58 @@
           "timestamp": { "type": "string", "format": "date-time" }
         }
       },
+      "ProducerTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "batch": { "$ref": "#/components/schemas/ProducerBatch" }
+        }
+      },
+      "DecoderTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "batch": { "$ref": "#/components/schemas/DecoderBatch" }
+        }
+      },
+      "FunderTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "batch": { "$ref": "#/components/schemas/FunderBatch" }
+        }
+      },
+      "BmapResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "$ref": "#/components/schemas/BmapResult" }
+        }
+      },
+      "BmapResult": {
+        "type": "object",
+        "properties": {
+          "token": { "type": "object" },
+          "txs": { "type": "object" },
+          "nodes": { "type": "array", "items": { "type": "object" } },
+          "edges": { "type": "array", "items": { "type": "object" } },
+          "related_tokens": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "BmapAutoFetchResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "$ref": "#/components/schemas/BmapAutoFetchResult" }
+        }
+      },
+      "BmapAutoFetchResult": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "processing" },
+          "message": { "type": "string" },
+          "mint": { "type": "string" },
+          "producer": { "$ref": "#/components/schemas/TriggerResponse" }
+        }
+      },
       "Error": {
         "type": "object",
         "properties": {
@@ -333,7 +385,7 @@
             "description": "Bmap data with nodes, edges, and transaction navigation",
             "content": {
               "application/json": {
-                "schema": { "type": "object" }
+                "schema": { "$ref": "#/components/schemas/BmapResponse" }
               }
             }
           },
@@ -341,20 +393,7 @@
             "description": "Data not found — auto-fetch triggered. Poll again shortly.",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "result": {
-                      "type": "object",
-                      "properties": {
-                        "status": { "type": "string", "example": "processing" },
-                        "message": { "type": "string" },
-                        "mint": { "type": "string" },
-                        "producer": { "type": "object" }
-                      }
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/BmapAutoFetchResponse" }
               }
             }
           },
@@ -385,17 +424,7 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/TriggerRequest" },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "batch": { "$ref": "#/components/schemas/ProducerBatch" }
-                    }
-                  }
-                ]
-              },
+              "schema": { "$ref": "#/components/schemas/ProducerTriggerRequest" },
               "examples": {
                 "default": {
                   "summary": "Fetch by signature and/or address",
@@ -474,9 +503,6 @@
                 "fetchMixedBoundaries": {
                   "summary": "Mix boundary types (signature + time)",
                   "value": {
-                    "request_id": "prod-004",
-                    "correlation_id": "session-001",
-                    "priority": 5,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
@@ -521,17 +547,7 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/TriggerRequest" },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "batch": { "$ref": "#/components/schemas/DecoderBatch" }
-                    }
-                  }
-                ]
-              }
+              "schema": { "$ref": "#/components/schemas/DecoderTriggerRequest" }
             }
           }
         },
@@ -593,17 +609,7 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/TriggerRequest" },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "batch": { "$ref": "#/components/schemas/FunderBatch" }
-                    }
-                  }
-                ]
-              },
+              "schema": { "$ref": "#/components/schemas/FunderTriggerRequest" },
               "examples": {
                 "findFunder": {
                   "summary": "Find funder for a wallet",
