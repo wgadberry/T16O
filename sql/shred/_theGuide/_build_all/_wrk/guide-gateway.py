@@ -1191,6 +1191,14 @@ def create_app():
                 pass
 
         if not mint:
+            # If token_symbol was provided but we can't resolve it, tell the user
+            if token_symbol:
+                return jsonify({
+                    'result': {
+                        'error': f'Token symbol not found: {token_symbol}. Submit mint address for token.',
+                        'token_symbol': token_symbol
+                    }
+                }), 404
             return jsonify(data), 404  # Can't auto-fetch without a mint
 
         # Build producer payload
