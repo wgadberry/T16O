@@ -74,6 +74,7 @@ RABBITMQ_BLOCKED_TIMEOUT = _rmq['blocked_timeout']
 DB_FALLBACK_RETRY_SEC = _retry['db_fallback_retry_sec']
 REQUEST_QUEUE       = _queues['request']
 RESPONSE_QUEUE      = _queues['response']
+DLQ_QUEUE           = _queues['dlq']
 DB_CONFIG           = get_db_config()
 
 MULTI_META_BATCH_SIZE = 50
@@ -146,8 +147,14 @@ def rmq_connect():
     )
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
-    for q in (REQUEST_QUEUE, RESPONSE_QUEUE):
-        ch.queue_declare(queue=q, durable=True, arguments={'x-max-priority': 10})
+    ch.queue_declare(queue=DLQ_QUEUE, durable=True,
+                     arguments={'x-max-priority': 10, 'x-message-ttl': 86400000})
+    ch.queue_declare(queue=REQUEST_QUEUE, durable=True,
+                     arguments={'x-max-priority': 10,
+                                'x-dead-letter-exchange': '',
+                                'x-dead-letter-routing-key': DLQ_QUEUE})
+    ch.queue_declare(queue=RESPONSE_QUEUE, durable=True,
+                     arguments={'x-max-priority': 10})
     return conn, ch
 
 
@@ -950,7 +957,7 @@ class WorkerThread(threading.Thread):
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             raise
         except Exception as e:
-            log(self.tag, f"ERROR processing message: {e}")
+            log(self.tag, f"ERROR processing message -> DLQ: {e}")
             import traceback
             traceback.print_exc()
             if worker_log_id:
@@ -958,7 +965,7 @@ class WorkerThread(threading.Thread):
                     update_worker_request(cursor, db_conn, worker_log_id, 'failed', {'error': str(e)})
                 except Exception:
                     pass
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     def _handle_db_poll(self, ch, method, cursor, db_conn, session):
         """Handle supervisor-scheduled enrichment pass — loops until all types drained."""

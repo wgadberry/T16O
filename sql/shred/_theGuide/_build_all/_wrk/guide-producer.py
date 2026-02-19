@@ -28,9 +28,11 @@ except ImportError:
 
 try:
     import mysql.connector
+    from mysql.connector import Error as MySQLError
     HAS_MYSQL = True
 except ImportError:
     HAS_MYSQL = False
+    MySQLError = Exception  # fallback so except clause doesn't NameError
 
 # =============================================================================
 # Static config (from common.config → guide-config.json)
@@ -52,8 +54,11 @@ RABBITMQ_PORT           = _rmq['port']
 RABBITMQ_USER           = _rmq['user']
 RABBITMQ_PASS           = _rmq['password']
 RABBITMQ_VHOST          = _rmq['vhost']
-RABBITMQ_REQUEST_QUEUE  = _queues['request']
-RABBITMQ_RESPONSE_QUEUE = _queues['response']
+RABBITMQ_HEARTBEAT      = _rmq['heartbeat']
+RABBITMQ_BLOCKED_TIMEOUT = _rmq['blocked_timeout']
+REQUEST_QUEUE           = _queues['request']
+RESPONSE_QUEUE          = _queues['response']
+DLQ_QUEUE               = _queues['dlq']
 DECODER_REQUEST_QUEUE   = _decoder_queues['request']
 DETAILER_REQUEST_QUEUE  = _detailer_queues['request']
 DB_CONFIG               = get_db_config()
@@ -590,14 +595,20 @@ def setup_gateway_rabbitmq():
         port=RABBITMQ_PORT,
         virtual_host=RABBITMQ_VHOST,
         credentials=credentials,
-        heartbeat=600,
-        blocked_connection_timeout=300
+        heartbeat=RABBITMQ_HEARTBEAT,
+        blocked_connection_timeout=RABBITMQ_BLOCKED_TIMEOUT
     )
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
 
-    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE]:
-        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+    channel.queue_declare(queue=DLQ_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10, 'x-message-ttl': 86400000})
+    channel.queue_declare(queue=REQUEST_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10,
+                                     'x-dead-letter-exchange': '',
+                                     'x-dead-letter-routing-key': DLQ_QUEUE})
+    channel.queue_declare(queue=RESPONSE_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10})
 
     return connection, channel
 
@@ -621,7 +632,7 @@ def publish_response(channel, request_id: str, correlation_id: str, status: str,
 
     channel.basic_publish(
         exchange='',
-        routing_key=RABBITMQ_RESPONSE_QUEUE,
+        routing_key=RESPONSE_QUEUE,
         body=json.dumps(response).encode('utf-8'),
         properties=pika.BasicProperties(delivery_mode=2, content_type='application/json', priority=priority)
     )
@@ -1166,7 +1177,7 @@ def run_queue_consumer(prefetch: int = 1):
     print(f"""
 +-----------------------------------------------------------+
 |         Guide Producer - Queue Consumer Mode              |
-|  vhost: {RABBITMQ_VHOST}  |  queue: {RABBITMQ_REQUEST_QUEUE}  |
+|  vhost: {RABBITMQ_VHOST}  |  queue: {REQUEST_QUEUE}  |
 +-----------------------------------------------------------+
 """)
 
@@ -1256,11 +1267,14 @@ def run_queue_consumer(prefetch: int = 1):
                 except json.JSONDecodeError as e:
                     print(f"[ERROR] Invalid JSON -> DLQ: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
-                except Exception as e:
-                    print(f"[ERROR] Failed to process message: {e}")
+                except MySQLError as e:
+                    print(f"[DB ERROR] {e} - requeuing for retry")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message -> DLQ: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
 
-            gateway_channel.basic_consume(queue=RABBITMQ_REQUEST_QUEUE, on_message_callback=callback)
+            gateway_channel.basic_consume(queue=REQUEST_QUEUE, on_message_callback=callback)
             gateway_channel.start_consuming()
 
         except pika.exceptions.AMQPConnectionError as e:

@@ -103,6 +103,7 @@ GATEWAY_HOST = '0.0.0.0'
 # Queue names
 GATEWAY_REQUEST_QUEUE = _queues['request']
 GATEWAY_RESPONSE_QUEUE = _queues['response']
+GATEWAY_DLQ = _queues['dlq']
 
 # Correlation tracking for pipeline completion detection
 # Structure: {correlation_id: {
@@ -788,27 +789,48 @@ def get_rabbitmq_connection():
 
 
 def ensure_queues_exist(channel):
-    """Ensure all gateway and worker queues exist"""
-    # Gateway queues
-    for queue in [GATEWAY_REQUEST_QUEUE, GATEWAY_RESPONSE_QUEUE]:
-        channel.queue_declare(
-            queue=queue,
-            durable=True,
-            arguments={'x-max-priority': 10}
-        )
+    """Ensure all gateway and worker queues exist with dead-letter routing"""
+    # Gateway DLQ (must exist before request queue references it)
+    channel.queue_declare(
+        queue=GATEWAY_DLQ, durable=True,
+        arguments={'x-max-priority': 10, 'x-message-ttl': 86400000}
+    )
+
+    # Gateway queues — request queue routes rejected messages to DLQ
+    channel.queue_declare(
+        queue=GATEWAY_REQUEST_QUEUE, durable=True,
+        arguments={
+            'x-max-priority': 10,
+            'x-dead-letter-exchange': '',
+            'x-dead-letter-routing-key': GATEWAY_DLQ,
+        }
+    )
+    channel.queue_declare(
+        queue=GATEWAY_RESPONSE_QUEUE, durable=True,
+        arguments={'x-max-priority': 10}
+    )
 
     # Worker queues
     for worker, config in WORKER_REGISTRY.items():
-        for queue_type in ['request_queue', 'response_queue', 'dlq']:
-            queue_name = config[queue_type]
-            args = {'x-max-priority': 10}
-            if queue_type == 'dlq':
-                args['x-message-ttl'] = 86400000  # 24 hours for DLQ
-            channel.queue_declare(
-                queue=queue_name,
-                durable=True,
-                arguments=args
-            )
+        # DLQ first (must exist before request queue references it)
+        channel.queue_declare(
+            queue=config['dlq'], durable=True,
+            arguments={'x-max-priority': 10, 'x-message-ttl': 86400000}
+        )
+        # Request queue with dead-letter routing to DLQ
+        channel.queue_declare(
+            queue=config['request_queue'], durable=True,
+            arguments={
+                'x-max-priority': 10,
+                'x-dead-letter-exchange': '',
+                'x-dead-letter-routing-key': config['dlq'],
+            }
+        )
+        # Response queue (no DLQ — responses are informational)
+        channel.queue_declare(
+            queue=config['response_queue'], durable=True,
+            arguments={'x-max-priority': 10}
+        )
 
 
 def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
@@ -1596,11 +1618,17 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         print(f"[REQUEST] {target_worker}/{action}: {result.get('request_id', 'unknown')}")
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
+                except MySQLError as e:
+                    print(f"[DB ERROR] {e} - requeuing for retry")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] Invalid JSON -> DLQ: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
                 except Exception as e:
-                    print(f"[ERROR] Failed to process message: {e}")
+                    print(f"[ERROR] Failed to process message -> DLQ: {e}")
                     import traceback
                     traceback.print_exc()
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
             channel.basic_consume(queue=GATEWAY_REQUEST_QUEUE, on_message_callback=callback)
             print(f"[OK] Queue consumer ready - consuming from {GATEWAY_REQUEST_QUEUE}")
