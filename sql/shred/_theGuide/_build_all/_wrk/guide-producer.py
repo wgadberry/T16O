@@ -945,13 +945,15 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
             'cascade_to': []
         }
 
-    # --- Signature context mode: fetch surrounding signatures ---
+    # --- Signature context: fetch surrounding signatures ---
+    sig_context_sigs = []
+    sig_context_skipped = 0
+    sig_context_mint = None
     filter_signature = filters.get('signature')
     if filter_signature:
         context_size = filters.get('context_size', 5)
 
-        # 1. Look up mint address from DB
-        mint_address = None
+        # Look up mint address from DB
         if db_cursor:
             try:
                 db_cursor.execute("""
@@ -965,77 +967,43 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 """, (filter_signature,))
                 row = db_cursor.fetchone()
                 if row:
-                    mint_address = row[0]
+                    sig_context_mint = row[0]
             except Exception as e:
                 print(f"[{request_id[:8]}] DB lookup for signature failed: {e}")
 
-        if not mint_address:
+        if not sig_context_mint:
             return {'processed': 0, 'errors': 1,
                     'error': f'Signature not found in DB or no mint address: {filter_signature[:20]}...'}
 
-        print(f"[{request_id[:8]}] Signature context mode: {filter_signature[:20]}... mint={mint_address[:20]}...")
+        print(f"[{request_id[:8]}] Signature context: {filter_signature[:20]}... mint={sig_context_mint[:20]}...")
 
-        # 2. Fetch older sigs (RPC returns newest-first, "before" = older than target)
-        older_result = fetch_signatures_rpc(rpc_session, mint_address, CHAINSTACK_RPC_URL,
+        # Fetch older sigs (RPC returns newest-first, "before" = older than target)
+        older_result = fetch_signatures_rpc(rpc_session, sig_context_mint, CHAINSTACK_RPC_URL,
                                             limit=context_size, before=filter_signature)
         older_sigs = [s['signature'] for s in older_result.get('result', []) if s.get('signature')]
 
-        # 3. Fetch newer sigs ("until" = stop at target, returns newest→target)
-        newer_result = fetch_signatures_rpc(rpc_session, mint_address, CHAINSTACK_RPC_URL,
-                                            limit=context_size + 1)
-        # Walk backwards from newest until we find our target, then take sigs between
-        newer_all = [s['signature'] for s in newer_result.get('result', []) if s.get('signature')]
-
-        # The simple approach: fetch a window and slice around our target
-        # Since "until" in RPC means "stop at this sig (exclusive)", we need a different strategy.
-        # Fetch recent sigs for this mint and find our target's position.
-        window_result = fetch_signatures_rpc(rpc_session, mint_address, CHAINSTACK_RPC_URL,
+        # Fetch newer sigs: get a window and find target's position
+        window_result = fetch_signatures_rpc(rpc_session, sig_context_mint, CHAINSTACK_RPC_URL,
                                              limit=context_size * 2 + 20)
         window_sigs = [s['signature'] for s in window_result.get('result', []) if s.get('signature')]
 
         newer_sigs = []
         if filter_signature in window_sigs:
             target_idx = window_sigs.index(filter_signature)
-            # Sigs before the target index are NEWER (reverse chronological)
             newer_sigs = window_sigs[max(0, target_idx - context_size):target_idx]
         else:
-            # Target is older than the window — no newer sigs available from this window
-            # Try fetching with until parameter
-            until_result = fetch_signatures_rpc(rpc_session, mint_address, CHAINSTACK_RPC_URL,
+            until_result = fetch_signatures_rpc(rpc_session, sig_context_mint, CHAINSTACK_RPC_URL,
                                                 limit=context_size + 1, until=filter_signature)
             newer_sigs = [s['signature'] for s in until_result.get('result', [])
                           if s.get('signature') and s['signature'] != filter_signature]
             newer_sigs = newer_sigs[:context_size]
 
-        # 4. Combine: newer (chronologically after) + target + older (chronologically before)
-        all_sigs = newer_sigs + [filter_signature] + older_sigs
+        sig_context_sigs = newer_sigs + [filter_signature] + older_sigs
+        print(f"  Found {len(newer_sigs)} newer + 1 target + {len(older_sigs)} older = {len(sig_context_sigs)} total")
 
-        print(f"  Found {len(newer_sigs)} newer + 1 target + {len(older_sigs)} older = {len(all_sigs)} total")
-
-        # 5. Filter duplicates
-        skipped = 0
+        # Filter duplicates
         if db_cursor:
-            all_sigs, skipped = filter_existing_signatures(db_cursor, all_sigs)
-
-        # 6. Cascade to decoder+detailer
-        batches = 0
-        if all_sigs:
-            if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
-                                          all_sigs, 1, 1, priority,
-                                          request_log_id, api_key_id, features):
-                print(f"  [CASCADE] Batch 1 -> decoder+detailer ({len(all_sigs)} sigs)")
-                batches = 1
-
-        return {
-            'processed': len(all_sigs) + skipped,
-            'batches': batches,
-            'skipped': skipped,
-            'errors': 0,
-            'mode': 'signature-context',
-            'context_signature': filter_signature,
-            'mint_address': mint_address,
-            'cascade_to': []
-        }
+            sig_context_sigs, sig_context_skipped = filter_existing_signatures(db_cursor, sig_context_sigs)
 
     # Support both legacy string format and new object format for before/until
     # New format: {"signature": "...", "block_id": 123, "block_time": "2025-01-15T10:00:00Z"}
@@ -1051,16 +1019,61 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
         if single_addr:
             addresses = [single_addr]
 
+    # If we have signature context sigs but no addresses, cascade them and return
+    if not addresses and sig_context_sigs:
+        batches = 0
+        if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                      sig_context_sigs, 1, 1, priority,
+                                      request_log_id, api_key_id, features):
+            print(f"  [CASCADE] Batch 1 -> decoder+detailer ({len(sig_context_sigs)} sigs)")
+            batches = 1
+        return {
+            'processed': len(sig_context_sigs) + sig_context_skipped,
+            'batches': batches,
+            'skipped': sig_context_skipped,
+            'errors': 0,
+            'mode': 'signature-context',
+            'context_signature': filter_signature,
+            'mint_address': sig_context_mint,
+            'cascade_to': []
+        }
+
+    # If we have signature context sigs AND addresses, cascade the sig context first
+    if sig_context_sigs:
+        if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                      sig_context_sigs, 1, 1, priority,
+                                      request_log_id, api_key_id, features):
+            print(f"  [CASCADE] Sig context batch -> decoder+detailer ({len(sig_context_sigs)} sigs)")
+
     if not addresses:
-        return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
+        if filter_signature and not sig_context_sigs:
+            # Signature was provided but all sigs already in DB
+            return {
+                'processed': sig_context_skipped,
+                'batches': 0,
+                'skipped': sig_context_skipped,
+                'errors': 0,
+                'mode': 'signature-context',
+                'context_signature': filter_signature,
+                'cascade_to': []
+            }
+        return {'processed': 0, 'errors': 1, 'error': 'No address or signature provided in batch.filters'}
 
     # Process multiple addresses if provided
     if len(addresses) > 1:
-        return process_multiple_addresses(
+        result = process_multiple_addresses(
             message, addresses, rpc_session, gateway_channel, db_cursor,
             request_id, correlation_id, priority, max_signatures, request_before, request_until,
             request_log_id, api_key_id, features
         )
+        # Merge signature context counts if both were used
+        if sig_context_sigs or sig_context_skipped:
+            result['processed'] = result.get('processed', 0) + len(sig_context_sigs)
+            result['batches'] = result.get('batches', 0) + (1 if sig_context_sigs else 0)
+            result['skipped'] = result.get('skipped', 0) + sig_context_skipped
+            result['context_signature'] = filter_signature
+            result['mint_address'] = sig_context_mint
+        return result
 
     # Single address processing - delegate to process_single_address
     address = addresses[0]
@@ -1086,6 +1099,14 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
     result = process_single_address(single_message, rpc_session, gateway_channel, db_cursor)
     result['cascade_to'] = []  # Add cascade_to for response compatibility
+
+    # Merge signature context counts if both were used
+    if sig_context_sigs or sig_context_skipped:
+        result['processed'] = result.get('processed', 0) + len(sig_context_sigs)
+        result['batches'] = result.get('batches', 0) + (1 if sig_context_sigs else 0)
+        result['skipped'] = result.get('skipped', 0) + sig_context_skipped
+        result['context_signature'] = filter_signature
+        result['mint_address'] = sig_context_mint
 
     skip_info = f", skipped {result.get('skipped', 0)} duplicates" if result.get('skipped', 0) > 0 else ""
     print(f"  Fetched {result.get('processed', 0)} signatures, cascaded {result.get('batches', 0)} batches{skip_info}")
