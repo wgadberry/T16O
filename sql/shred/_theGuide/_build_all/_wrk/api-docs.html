@@ -300,8 +300,24 @@
                 ]
               },
               "examples": {
+                "default": {
+                  "summary": "Fetch by signature and/or address",
+                  "value": {
+                    "priority": 10,
+                    "batch": {
+                      "filters": {
+                        "signature": "",
+                        "context_size": 5,
+                        "addresses": [],
+                        "before": {},
+                        "until": {}
+                      },
+                      "size": 10
+                    }
+                  }
+                },
                 "fetchBySignature": {
-                  "summary": "Fetch context around a signature (5 before + target + 5 after)",
+                  "summary": "Signature context only (5 before + target + 5 after)",
                   "value": {
                     "priority": 10,
                     "batch": {
@@ -311,27 +327,25 @@
                     }
                   }
                 },
-                "fetchSignatureAndAddress": {
-                  "summary": "Fetch signature context + address signatures together",
+                "fetchByAddress": {
+                  "summary": "Address signatures only",
                   "value": {
                     "priority": 10,
                     "batch": {
                       "filters": {
-                        "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2",
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
                       },
                       "size": 10
                     }
                   }
                 },
-                "fetchByAddress": {
-                  "summary": "Fetch signatures for a token mint",
+                "fetchBoth": {
+                  "summary": "Signature context + address signatures combined",
                   "value": {
-                    "request_id": "prod-001",
-                    "correlation_id": "session-001",
                     "priority": 10,
                     "batch": {
                       "filters": {
+                        "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2",
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
                       },
                       "size": 10
