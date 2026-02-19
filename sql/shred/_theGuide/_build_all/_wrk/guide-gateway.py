@@ -1413,7 +1413,7 @@ def create_app():
         if not request_log_id:
             return jsonify({
                 'success': False,
-                'error': 'Failed to create request log',
+                'error': 'Request Already Exists',
                 'request_id': request_id,
                 'correlation_id': correlation_id
             }), 500
