@@ -334,6 +334,47 @@ def ensure_token(cursor, conn, mint_address):
 
 
 # =============================================================================
+# Batch Claiming (FOR UPDATE SKIP LOCKED)
+# =============================================================================
+
+def claim_batch(cursor, conn, table, where_clause, where_params,
+                max_attempts, limit, join_clause, select_columns):
+    """
+    Atomically claim rows via FOR UPDATE SKIP LOCKED, pre-increment
+    attempt_cnt, COMMIT to release locks, then fetch full data.
+    Enables parallel enricher instances without duplicate API calls.
+    """
+    # Step 1: Lock + claim IDs
+    claim_sql = (
+        f"SELECT id FROM {table} "
+        f"WHERE {where_clause} AND COALESCE(attempt_cnt, 0) < %s "
+        f"ORDER BY id LIMIT %s "
+        f"FOR UPDATE SKIP LOCKED"
+    )
+    cursor.execute(claim_sql, where_params + (max_attempts, limit))
+    claimed_ids = [row['id'] for row in cursor.fetchall()]
+
+    if not claimed_ids:
+        conn.commit()
+        return []
+
+    # Step 2: Pre-increment (marks as claimed)
+    placeholders = ','.join(['%s'] * len(claimed_ids))
+    cursor.execute(
+        f"UPDATE {table} SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 "
+        f"WHERE id IN ({placeholders})", claimed_ids)
+
+    # Step 3: Release locks
+    conn.commit()
+
+    # Step 4: Fetch full data with JOINs (lockless)
+    cursor.execute(
+        f"SELECT {select_columns} FROM {table} t "
+        f"{join_clause} WHERE t.id IN ({placeholders})", claimed_ids)
+    return cursor.fetchall()
+
+
+# =============================================================================
 # Token Enrichment
 # =============================================================================
 
@@ -357,18 +398,15 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
     except Exception as e:
         log(tag, f"[tokens] Phase 0: backfill error: {e}")
 
-    # Phase 1: Solscan API
-    cursor.execute("""
-        SELECT t.id, a.address as mint
-        FROM tx_token t
-        JOIN tx_address a ON a.id = t.mint_address_id
-        WHERE (t.token_symbol IS NULL OR t.token_symbol = ''
-           OR t.token_name IS NULL OR t.token_name = ''
-           OR t.decimals IS NULL)
-          AND COALESCE(t.attempt_cnt, 0) < %s
-        LIMIT %s
-    """, (max_attempts, limit))
-    tokens = [{'id': row['id'], 'mint': row['mint']} for row in cursor.fetchall()]
+    # Phase 1: Solscan API (claim batch with FOR UPDATE SKIP LOCKED)
+    tokens = claim_batch(
+        cursor, conn, table='tx_token',
+        where_clause="(token_symbol IS NULL OR token_symbol = '' OR token_name IS NULL OR token_name = '' OR decimals IS NULL)",
+        where_params=(),
+        max_attempts=max_attempts, limit=limit,
+        join_clause='JOIN tx_address a ON a.id = t.mint_address_id',
+        select_columns='t.id, a.address as mint'
+    )
 
     if not tokens:
         log(tag, "[tokens] No tokens need enrichment")
@@ -410,10 +448,9 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                     token_json_str = json.dumps(response)
 
                     if has_meaningful:
-                        # All queried fields present → attempt_cnt=0 (done)
-                        # Partial data (e.g. name but no symbol) → increment to avoid infinite re-query
+                        # All fields present → reset attempt_cnt to 0 (done)
+                        # Partial data → leave attempt_cnt as-is (claim already incremented)
                         all_fields = bool(name) and bool(symbol) and decimals is not None
-                        new_attempt_cnt = 0 if all_fields else 'COALESCE(attempt_cnt, 0) + 1'
 
                         if all_fields:
                             cursor.execute("""
@@ -433,40 +470,23 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                                     token_symbol = COALESCE(%s, token_symbol),
                                     token_icon = COALESCE(%s, token_icon),
                                     decimals = COALESCE(%s, decimals),
-                                    token_json = COALESCE(%s, token_json),
-                                    attempt_cnt = COALESCE(attempt_cnt, 0) + 1
+                                    token_json = COALESCE(%s, token_json)
                                 WHERE id = %s
                             """, (name, symbol, icon, decimals, token_json_str, token_id))
                         conn.commit()
                         log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec)")
                         stats['updated'] += 1
                     else:
-                        cursor.execute("""
-                            UPDATE tx_token SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
-                            WHERE id = %s
-                        """, (token_id,))
-                        conn.commit()
                         stats['failed'] += 1
                 else:
-                    cursor.execute("""
-                        UPDATE tx_token SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
-                        WHERE id = %s
-                    """, (token_id,))
-                    conn.commit()
                     stats['failed'] += 1
 
                 stats['processed'] += 1
 
         except Exception as e:
             log(tag, f"  Error: {e}")
-            for t in chunk:
-                cursor.execute("""
-                    UPDATE tx_token SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1
-                    WHERE id = %s
-                """, (t['id'],))
-                conn.commit()
-                stats['failed'] += 1
-                stats['processed'] += 1
+            stats['failed'] += len(chunk)
+            stats['processed'] += len(chunk)
 
         if api_delay > 0 and chunk_start + MULTI_META_BATCH_SIZE < len(tokens):
             time.sleep(api_delay)
@@ -561,16 +581,15 @@ def enrich_pools(tag, session, cursor, conn, limit, max_attempts, api_delay, api
     except Exception as e:
         log(tag, f"[pools] Phase 0: backfill error: {e}")
 
-    # Phase 1: Batch label enrichment via /account/metadata/multi
-    cursor.execute("""
-        SELECT a.id as address_id, a.address, p.id as pool_id
-        FROM tx_pool p
-        JOIN tx_address a ON a.id = p.pool_address_id
-        WHERE p.pool_label IS NULL AND COALESCE(p.attempt_cnt, 0) < %s
-        LIMIT %s
-    """, (max_attempts, limit))
-    label_pools = [{'address_id': r['address_id'], 'address': r['address'], 'pool_id': r['pool_id']}
-                   for r in cursor.fetchall()]
+    # Phase 1: Batch label enrichment via /account/metadata/multi (claimed with FOR UPDATE SKIP LOCKED)
+    label_pools = claim_batch(
+        cursor, conn, table='tx_pool',
+        where_clause="pool_label IS NULL",
+        where_params=(),
+        max_attempts=max_attempts, limit=limit,
+        join_clause='JOIN tx_address a ON a.id = t.pool_address_id',
+        select_columns='t.id as pool_id, a.id as address_id, a.address'
+    )
 
     if label_pools:
         log(tag, f"[pools] Phase 1: {len(label_pools)} pools needing labels")
@@ -599,37 +618,27 @@ def enrich_pools(tag, session, cursor, conn, limit, max_attempts, api_delay, api
                         stats['labels'] += 1
                         stats['updated'] += 1
                     else:
-                        cursor.execute(
-                            "UPDATE tx_pool SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 "
-                            "WHERE id = %s", (pool_id,))
-                        conn.commit()
                         stats['failed'] += 1
 
                     stats['processed'] += 1
 
             except Exception as e:
                 log(tag, f"  Phase 1 error: {e}")
-                for p in chunk:
-                    cursor.execute(
-                        "UPDATE tx_pool SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 "
-                        "WHERE id = %s", (p['pool_id'],))
-                    conn.commit()
-                    stats['failed'] += 1
-                    stats['processed'] += 1
+                stats['failed'] += len(chunk)
+                stats['processed'] += len(chunk)
 
             if api_delay > 0 and chunk_start + MULTI_META_BATCH_SIZE < len(label_pools):
                 time.sleep(api_delay)
 
-    # Phase 2: Individual structural enrichment via /market/info
-    cursor.execute("""
-        SELECT a.id as address_id, a.address, p.id as pool_id
-        FROM tx_pool p
-        JOIN tx_address a ON a.id = p.pool_address_id
-        WHERE p.token_account1_id IS NULL AND COALESCE(p.attempt_cnt, 0) < %s
-        LIMIT %s
-    """, (max_attempts, limit))
-    struct_pools = [{'address_id': r['address_id'], 'address': r['address'], 'pool_id': r['pool_id']}
-                    for r in cursor.fetchall()]
+    # Phase 2: Individual structural enrichment via /market/info (claimed with FOR UPDATE SKIP LOCKED)
+    struct_pools = claim_batch(
+        cursor, conn, table='tx_pool',
+        where_clause="token_account1_id IS NULL",
+        where_params=(),
+        max_attempts=max_attempts, limit=limit,
+        join_clause='JOIN tx_address a ON a.id = t.pool_address_id',
+        select_columns='t.id as pool_id, a.id as address_id, a.address'
+    )
 
     if struct_pools:
         log(tag, f"[pools] Phase 2: {len(struct_pools)} pools needing structure")
@@ -637,11 +646,6 @@ def enrich_pools(tag, session, cursor, conn, limit, max_attempts, api_delay, api
         for i, pool in enumerate(struct_pools):
             address = pool['address']
             pool_id = pool['pool_id']
-
-            cursor.execute(
-                "UPDATE tx_pool SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 "
-                "WHERE id = %s", (pool_id,))
-            conn.commit()
 
             api_data = fetch_pool_info(session, address, api_timeout)
 
@@ -713,14 +717,14 @@ def infer_program_type(label):
 def enrich_programs(tag, session, cursor, conn, limit, max_attempts, api_delay, api_timeout):
     stats = {'processed': 0, 'updated': 0, 'known': 0, 'failed': 0}
 
-    cursor.execute("""
-        SELECT p.id, a.address
-        FROM tx_program p
-        JOIN tx_address a ON a.id = p.program_address_id
-        WHERE p.name IS NULL AND COALESCE(p.attempt_cnt, 0) < %s
-        LIMIT %s
-    """, (max_attempts, limit))
-    programs = [{'id': r['id'], 'address': r['address']} for r in cursor.fetchall()]
+    programs = claim_batch(
+        cursor, conn, table='tx_program',
+        where_clause="name IS NULL",
+        where_params=(),
+        max_attempts=max_attempts, limit=limit,
+        join_clause='JOIN tx_address a ON a.id = t.program_address_id',
+        select_columns='t.id, a.address'
+    )
 
     if not programs:
         log(tag, "[programs] No programs need enrichment")
@@ -759,23 +763,11 @@ def enrich_programs(tag, session, cursor, conn, limit, max_attempts, api_delay, 
                     log(tag, f"    {address[:20]}... {label} ({prog_type})")
                     stats['updated'] += 1
                 else:
-                    cursor.execute(
-                        "UPDATE tx_program SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 WHERE id = %s",
-                        (program_id,))
-                    conn.commit()
                     stats['failed'] += 1
             else:
-                cursor.execute(
-                    "UPDATE tx_program SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 WHERE id = %s",
-                    (program_id,))
-                conn.commit()
                 stats['failed'] += 1
         except Exception as e:
             log(tag, f"    {address[:20]}... error: {e}")
-            cursor.execute(
-                "UPDATE tx_program SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 WHERE id = %s",
-                (program_id,))
-            conn.commit()
             stats['failed'] += 1
 
         stats['processed'] += 1
