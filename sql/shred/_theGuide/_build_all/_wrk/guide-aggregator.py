@@ -69,6 +69,7 @@ REQUEST_QUEUE       = _queues['request']
 RESPONSE_QUEUE      = _queues['response']
 DLQ_QUEUE           = _queues['dlq']
 ENRICHER_REQUEST_QUEUE = _enricher_queues['request']
+ENRICHER_DLQ_QUEUE     = _enricher_queues['dlq']
 DB_CONFIG           = get_db_config()
 
 # Config table keys
@@ -143,7 +144,9 @@ def rmq_connect():
     ch.queue_declare(queue=RESPONSE_QUEUE, durable=True,
                      arguments={'x-max-priority': 10})
     ch.queue_declare(queue=ENRICHER_REQUEST_QUEUE, durable=True,
-                     arguments={'x-max-priority': 10})
+                     arguments={'x-max-priority': 10,
+                                'x-dead-letter-exchange': '',
+                                'x-dead-letter-routing-key': ENRICHER_DLQ_QUEUE})
     return conn, ch
 
 
