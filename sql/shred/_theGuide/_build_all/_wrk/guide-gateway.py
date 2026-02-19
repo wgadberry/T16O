@@ -295,7 +295,7 @@ RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1-minute sliding window
 
 # Default priority for REST API calls (higher than CLI default of 5)
-REST_API_DEFAULT_PRIORITY = 8
+REST_API_DEFAULT_PRIORITY = 5
 
 
 def check_rate_limit(api_key_id: int, rate_limit: int) -> Tuple[bool, Optional[int]]:
@@ -1195,16 +1195,16 @@ def create_app():
         rate_limit = key_info.get('rate_limit', 0)
         allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
         if not allowed:
-            # Log rate-limited request (use caller's request_id)
-            payload = request.get_json() or {}
+            # Log rate-limited request
+            rl_priority = request.headers.get('X-Priority', type=int) or REST_API_DEFAULT_PRIORITY
             log_request(
                 request_id=request_id,
                 api_key_id=key_info.get('id'),
                 source='rest',
                 target_worker=worker,
-                action=payload.get('action', 'process'),
-                priority=payload.get('priority', REST_API_DEFAULT_PRIORITY),
-                payload=payload,
+                action='process',
+                priority=rl_priority,
+                payload={},
                 status='rejected',
                 error=f'Rate limit exceeded ({rate_limit}/min)',
                 correlation_id=correlation_id
@@ -1227,9 +1227,11 @@ def create_app():
         payload = request.get_json() or {}
         action = payload.get('action', 'process')
 
-        # Set priority: use payload value if provided, otherwise REST API default (8)
-        priority = payload.get('priority', REST_API_DEFAULT_PRIORITY)
+        # Priority from header (default 5), injected into payload for RabbitMQ message body
+        priority = request.headers.get('X-Priority', type=int) or REST_API_DEFAULT_PRIORITY
         payload['priority'] = priority
+        payload['request_id'] = request_id
+        payload['correlation_id'] = correlation_id
 
         # Get features from API key entitlement (no request parameter needed)
         features = key_info.get('feature_mask') or 0

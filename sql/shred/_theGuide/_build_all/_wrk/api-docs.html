@@ -45,27 +45,30 @@
         "description": "API key for authentication"
       }
     },
+    "parameters": {
+      "X-Request-Id": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "description": "Unique request identifier (auto-generated UUID if not provided)",
+        "schema": { "type": "string", "example": "my-request-001" }
+      },
+      "X-Correlation-Id": {
+        "name": "X-Correlation-Id",
+        "in": "header",
+        "description": "Correlation ID for tracking related requests (defaults to X-Request-Id)",
+        "schema": { "type": "string", "example": "my-session-001" }
+      },
+      "X-Priority": {
+        "name": "X-Priority",
+        "in": "header",
+        "description": "Request priority 1-10 (1=lowest, 10=highest, default: 5)",
+        "schema": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 }
+      }
+    },
     "schemas": {
       "TriggerRequest": {
         "type": "object",
         "properties": {
-          "request_id": {
-            "type": "string",
-            "description": "Unique request identifier (auto-generated if not provided)",
-            "example": "my-request-001"
-          },
-          "correlation_id": {
-            "type": "string",
-            "description": "Session/correlation identifier for tracking related requests",
-            "example": "my-session-001"
-          },
-          "priority": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 10,
-            "default": 5,
-            "description": "Request priority (1=lowest, 10=highest)"
-          },
           "action": {
             "type": "string",
             "default": "process",
@@ -347,6 +350,11 @@
         "summary": "Trigger Producer",
         "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing\n\n## Boundary Options\nUse `before` and `until` to control the range of signatures fetched:\n- **signature**: Direct transaction signature\n- **block_id**: Slot number (resolved to nearest signature)\n- **block_time**: ISO 8601 datetime (resolved to nearest signature)\n\nYou can mix boundary types (e.g., before=signature, until=block_time).",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -366,7 +374,6 @@
                 "default": {
                   "summary": "Fetch by signature and/or address",
                   "value": {
-                    "priority": 10,
                     "batch": {
                       "filters": {
                         "signature": "",
@@ -382,7 +389,6 @@
                 "fetchBySignature": {
                   "summary": "Signature context only (5 before + target + 5 after)",
                   "value": {
-                    "priority": 10,
                     "batch": {
                       "filters": {
                         "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
@@ -393,7 +399,6 @@
                 "fetchByAddress": {
                   "summary": "Address signatures only",
                   "value": {
-                    "priority": 10,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
@@ -405,7 +410,6 @@
                 "fetchBoth": {
                   "summary": "Signature context + address signatures combined",
                   "value": {
-                    "priority": 10,
                     "batch": {
                       "filters": {
                         "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2",
@@ -418,9 +422,6 @@
                 "fetchByTimeRange": {
                   "summary": "Fetch signatures within a time range",
                   "value": {
-                    "request_id": "prod-002",
-                    "correlation_id": "session-001",
-                    "priority": 5,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
@@ -434,9 +435,6 @@
                 "fetchBySlotRange": {
                   "summary": "Fetch signatures within a slot range",
                   "value": {
-                    "request_id": "prod-003",
-                    "correlation_id": "session-001",
-                    "priority": 5,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
@@ -488,6 +486,11 @@
         "summary": "Trigger Decoder",
         "description": "Decode raw transaction data via Shyft API.\n\nTypically triggered automatically by producer cascade.",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -524,6 +527,11 @@
         "summary": "Trigger Detailer",
         "description": "Enrich decoded transactions with additional metadata.\n\nTypically triggered automatically by decoder cascade.",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -550,6 +558,11 @@
         "summary": "Trigger Funder",
         "description": "Discover funding wallets for addresses.\n\nFor each address, queries Solscan API to find the first SOL inflow and identifies the funding wallet.",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -569,9 +582,6 @@
                 "findFunder": {
                   "summary": "Find funder for a wallet",
                   "value": {
-                    "request_id": "funder-001",
-                    "correlation_id": "session-001",
-                    "priority": 10,
                     "batch": {
                       "addresses": ["5amFbzL4b2MHP8m1BSj5CFdoo7zJefw3qWtqw9jqj2h7"]
                     }
