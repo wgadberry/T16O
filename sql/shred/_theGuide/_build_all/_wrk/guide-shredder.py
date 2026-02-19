@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 """
 Guide Shredder - Staging table consumer for forward-only transaction processing
+(multi-threaded, config-driven)
+
+Supervisor thread polls config for desired thread count.
+Worker threads each own their own DB + RabbitMQ connections.
+
+Config keys (config_type='queue'):
+    shredder_wrk_cnt_threads          - desired worker thread count (0 = idle)
+    shredder_wrk_batch_size           - staging rows per batch per worker
+    shredder_wrk_supervisor_poll_sec  - supervisor config poll interval
+    shredder_wrk_poll_idle_sec        - worker sleep when no rows available
+    shredder_wrk_reconnect_sec        - delay before reconnecting after errors
+    shredder_wrk_shutdown_timeout_sec - max wait for worker thread on shutdown
+    shredder_wrk_purge_every_n        - purge every N supervisor polls
+    shredder_wrk_purge_min_age_sec    - min age before purging staging rows
 
 Consumes staged transactions from t16o_db_staging.txs and calls the appropriate
 stored procedure based on tx_state:
@@ -10,7 +24,7 @@ stored procedure based on tx_state:
 After processing, tx_state is set to 4 (shredded).
 
 Usage:
-    python guide-shredder.py --daemon                 # Continuous polling mode
+    python guide-shredder.py --daemon                 # Supervisor + worker threads
     python guide-shredder.py --once                   # Process once and exit
     python guide-shredder.py --daemon --dry-run      # Preview only
 """
@@ -20,6 +34,7 @@ import json
 import os
 import sys
 import time
+import threading
 from datetime import datetime
 
 try:
@@ -67,13 +82,6 @@ TX_STATE_PROCESSING = 1  # Claimed by shredder, in progress
 # Max retry attempts for detailed rows before giving up
 MAX_DETAILED_ATTEMPTS = 3
 
-# Purge completed staging rows every N batches (daemon mode)
-PURGE_EVERY_N_BATCHES = 10
-PURGE_MIN_AGE_SECONDS = 60  # Only purge rows older than this
-
-# Track completed correlations to avoid duplicate responses
-_completed_correlations = set()
-
 # Known Solana program addresses for participant classification
 KNOWN_PROGRAMS = {
     '11111111111111111111111111111111',              # System Program
@@ -105,37 +113,80 @@ KNOWN_PROGRAMS = {
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+def log(tag, msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}][{tag}] {msg}", flush=True)
+
+
+def get_config_int(cursor, config_type, config_key, default):
+    try:
+        cursor.execute("CALL sp_config_get(%s, %s)", (config_type, config_key))
+        row = cursor.fetchone()
+        try:
+            while cursor.nextset():
+                pass
+        except Exception:
+            pass
+        if row:
+            val = row[0] if isinstance(row, tuple) else row.get('config_value')
+            if val is not None:
+                return int(val)
+    except Exception:
+        pass
+    return default
+
+
+def get_config_float(cursor, config_type, config_key, default):
+    try:
+        cursor.execute("CALL sp_config_get(%s, %s)", (config_type, config_key))
+        row = cursor.fetchone()
+        try:
+            while cursor.nextset():
+                pass
+        except Exception:
+            pass
+        if row:
+            val = row[0] if isinstance(row, tuple) else row.get('config_value')
+            if val is not None:
+                return float(val)
+    except Exception:
+        pass
+    return default
+
+
+def db_connect():
+    return mysql.connector.connect(**DB_CONFIG)
+
+
+def rmq_connect():
+    if not HAS_PIKA:
+        return None, None
+    creds = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    params = pika.ConnectionParameters(
+        host=RABBITMQ_HOST, port=RABBITMQ_PORT, virtual_host=RABBITMQ_VHOST,
+        credentials=creds, heartbeat=600,
+    )
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+    ch.queue_declare(queue=RABBITMQ_RESPONSE_QUEUE, durable=True,
+                     arguments={'x-max-priority': 10})
+    return conn, ch
+
+
+# =============================================================================
 # Gateway Response Publishing
 # =============================================================================
 
-def get_rabbitmq_channel():
-    """Create RabbitMQ connection and channel for responses"""
-    if not HAS_PIKA:
-        return None, None
-    try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-        parameters = pika.ConnectionParameters(
-            host=RABBITMQ_HOST, port=RABBITMQ_PORT, virtual_host=RABBITMQ_VHOST,
-            credentials=credentials, heartbeat=600
-        )
-        connection = pika.BlockingConnection(parameters)
-        channel = connection.channel()
-        channel.queue_declare(queue=RABBITMQ_RESPONSE_QUEUE, durable=True, arguments={'x-max-priority': 10})
-        return connection, channel
-    except Exception as e:
-        print(f"[WARN] RabbitMQ connection failed: {e}")
-        return None, None
-
-
-def check_correlation_complete(cursor, correlation_id: str) -> dict:
+def check_correlation_complete(cursor, correlation_id, completed_correlations):
     """
     Check if all staging rows for a correlation_id are shredded.
     Returns stats dict if complete, None if not.
     """
-    if not correlation_id or correlation_id in _completed_correlations:
+    if not correlation_id or correlation_id in completed_correlations:
         return None
 
-    # Count pending (not shredded) rows for this correlation
     cursor.execute(f"""
         SELECT
             COUNT(*) as total,
@@ -150,8 +201,7 @@ def check_correlation_complete(cursor, correlation_id: str) -> dict:
         return None
 
     if row['pending'] == 0:
-        # All rows shredded - mark as completed to avoid duplicate responses
-        _completed_correlations.add(correlation_id)
+        completed_correlations.add(correlation_id)
         return {
             'total_staging_rows': row['total'],
             'shredded': row['shredded']
@@ -160,7 +210,7 @@ def check_correlation_complete(cursor, correlation_id: str) -> dict:
     return None
 
 
-def publish_shredder_response(channel, correlation_id: str, stats: dict):
+def publish_shredder_response(channel, correlation_id, stats):
     """Publish shredder completion response to gateway"""
     if not channel:
         return
@@ -172,7 +222,7 @@ def publish_shredder_response(channel, correlation_id: str, stats: dict):
         'timestamp': datetime.utcnow().isoformat() + 'Z',
         'result': {
             'staging_rows_processed': stats['total_staging_rows'],
-            'batch_num': 1  # Shredder processes all batches as one
+            'batch_num': 1
         }
     }
 
@@ -182,25 +232,26 @@ def publish_shredder_response(channel, correlation_id: str, stats: dict):
             body=json.dumps(response).encode('utf-8'),
             properties=pika.BasicProperties(delivery_mode=2, content_type='application/json')
         )
-        print(f"  [→] Shredder response sent for correlation {correlation_id[:8]}")
-    except Exception as e:
-        print(f"[WARN] Failed to publish shredder response: {e}")
+    except Exception:
+        pass  # Non-critical, logged at caller level
 
 
 # =============================================================================
-# Core Processing
+# Core Processing (used by both WorkerThread and run_once)
 # =============================================================================
 
 class ShredderProcessor:
     """Processes staged transactions using forward-only stored procedures"""
 
-    def __init__(self, db_conn, dry_run: bool = False):
+    def __init__(self, db_conn, dry_run=False, tag='PROC'):
         self.db_conn = db_conn
         self.cursor = db_conn.cursor(dictionary=True)
         self.dry_run = dry_run
+        self.tag = tag
         self._tx_states = {}
+        self._completed_correlations = set()
 
-    def get_tx_state(self, key: str) -> int:
+    def get_tx_state(self, key):
         """Get tx_state value from config table (cached)"""
         if key not in self._tx_states:
             self.cursor.execute(
@@ -212,15 +263,13 @@ class ShredderProcessor:
             self._tx_states[key] = row['val'] if row else defaults.get(key, 0)
         return self._tx_states[key]
 
-    def extract_and_insert_participants(self, staging_id: int) -> int:
+    def extract_and_insert_participants(self, staging_id):
         """
         Extract participants from staging row JSON and insert into tx_participant.
         Returns number of participants inserted.
         """
-        # Use a fresh cursor to avoid SP result set issues
         fresh_cursor = self.db_conn.cursor(dictionary=True)
         try:
-            # Fetch the staging row JSON
             fresh_cursor.execute(f"""
                 SELECT txs FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
             """, (staging_id,))
@@ -245,32 +294,28 @@ class ShredderProcessor:
                 if not tx_hash or not account_keys:
                     continue
 
-                # Look up tx_id by signature
                 fresh_cursor.execute("SELECT id FROM tx WHERE signature = %s", (tx_hash,))
                 tx_row = fresh_cursor.fetchone()
                 if not tx_row:
-                    continue  # Transaction not in tx table yet
+                    continue
 
                 tx_id = tx_row['id']
 
-                # Process each account in the transaction
                 for idx, acct in enumerate(account_keys):
                     pubkey = acct.get('pubkey')
                     if not pubkey:
                         continue
 
                     is_signer = 1 if acct.get('signer') else 0
-                    is_fee_payer = 1 if idx == 0 else 0  # First account is fee payer by convention
+                    is_fee_payer = 1 if idx == 0 else 0
                     is_writable = 1 if acct.get('writable') else 0
                     is_program = 1 if pubkey in KNOWN_PROGRAMS else 0
 
-                    # Get or create address_id
                     fresh_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (pubkey,))
                     addr_row = fresh_cursor.fetchone()
                     if addr_row:
                         address_id = addr_row['id']
                     else:
-                        # Insert new address
                         addr_type = 'program' if is_program else 'unknown'
                         fresh_cursor.execute(
                             "INSERT INTO tx_address (address, address_type) VALUES (%s, %s)",
@@ -278,7 +323,6 @@ class ShredderProcessor:
                         )
                         address_id = fresh_cursor.lastrowid
 
-                    # Insert participant (ignore duplicates)
                     try:
                         fresh_cursor.execute("""
                             INSERT INTO tx_participant
@@ -292,14 +336,14 @@ class ShredderProcessor:
                         """, (tx_id, address_id, is_signer, is_fee_payer, is_writable, is_program, idx))
                         total_inserted += 1
                     except MySQLError:
-                        pass  # Ignore duplicate key errors
+                        pass
 
             self.db_conn.commit()
             return total_inserted
         finally:
             fresh_cursor.close()
 
-    def fetch_pending_staging_rows(self, limit: int = 50) -> list:
+    def fetch_pending_staging_rows(self, limit=50):
         """
         Claim and fetch staging rows that need processing.
         Uses atomic UPDATE to claim rows, avoiding locks that block INSERTs.
@@ -315,7 +359,6 @@ class ShredderProcessor:
         decoded_state = self.get_tx_state('decoded')
         detailed_state = self.get_tx_state('detailed')
 
-        # In dry-run mode, just SELECT what would be processed without claiming
         if self.dry_run:
             self.cursor.execute(f"""
                 SELECT id, tx_state, priority, created_utc, correlation_id, sig_hash
@@ -329,7 +372,6 @@ class ShredderProcessor:
         claimed_count = 0
 
         # Step 1: Find complete pairs (SUM(tx_state) = 24) ordered by priority
-        # These are sig_hashes with BOTH decoded(8) and detailed(16) ready
         self.cursor.execute(f"""
             SELECT sig_hash, MAX(priority) as max_priority
             FROM {STAGING_SCHEMA}.{STAGING_TABLE}
@@ -347,7 +389,6 @@ class ShredderProcessor:
         if complete_pairs:
             placeholders = ','.join(['%s'] * len(complete_pairs))
 
-            # Claim decoded rows from complete pairs
             self.cursor.execute(f"""
                 UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
                 SET priority = priority * 10 + 1,
@@ -357,7 +398,6 @@ class ShredderProcessor:
             """, (decoded_state, *complete_pairs))
             decoded_from_pairs = self.cursor.rowcount
 
-            # Claim detailed rows from complete pairs
             self.cursor.execute(f"""
                 UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
                 SET priority = priority * 10 + 2,
@@ -404,7 +444,6 @@ class ShredderProcessor:
             return []
 
         # Step 5: Fetch claimed rows, ordered so decoded comes before detailed per sig_hash
-        # priority MOD 10: 1=decoded, 2=detailed
         self.cursor.execute(f"""
             SELECT id,
                    IF(priority MOD 10 = 1, %s, %s) as tx_state,
@@ -419,7 +458,7 @@ class ShredderProcessor:
 
         return self.cursor.fetchall()
 
-    def process_staging_row(self, staging_id: int, tx_state: int, priority: int) -> dict:
+    def process_staging_row(self, staging_id, tx_state, priority):
         """
         Process a single staging row based on its tx_state.
         Updates staging row to shredded (4) on success, restores original state on error.
@@ -445,7 +484,6 @@ class ShredderProcessor:
 
         try:
             if tx_state == decoded_state:
-                # Call sp_tx_parse_staging_decode for decoded data
                 self.cursor.execute(
                     "SET @tx=0, @xfer=0, @swap=0, @act=0, @skip=0"
                 )
@@ -464,7 +502,6 @@ class ShredderProcessor:
                 result['success'] = True
 
             elif tx_state == detailed_state:
-                # Call sp_tx_parse_staging_detail for detailed data
                 self.cursor.execute(
                     "SET @tx=0, @sol=0, @tok=0, @skip=0"
                 )
@@ -479,21 +516,9 @@ class ShredderProcessor:
                     result['sol_balance_count'] = row['@sol'] or 0
                     result['token_balance_count'] = row['@tok'] or 0
                     result['skipped_count'] = row['@skip'] or 0
-                # Only mark success if we actually processed some tx records
-                # If all skipped (tx not found yet), leave for retry (up to MAX_DETAILED_ATTEMPTS)
                 if result['tx_count'] > 0 or result['sol_balance_count'] > 0 or result['token_balance_count'] > 0:
                     result['success'] = True
-
-                    # DISABLED: tx_participant extraction - too much load
-                    # To re-enable, uncomment the following block:
-                    # try:
-                    #     self.db_conn.commit()
-                    #     participant_count = self.extract_and_insert_participants(staging_id)
-                    #     result['participant_count'] = participant_count
-                    # except Exception as e:
-                    #     result['participant_error'] = str(e)
                 else:
-                    # Get current attempt count
                     self.cursor.execute(f"""
                         SELECT attempt_cnt FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
                     """, (staging_id,))
@@ -505,7 +530,6 @@ class ShredderProcessor:
                         result['error'] = f'All txs skipped (attempt {current_attempts}/{MAX_DETAILED_ATTEMPTS})'
 
             else:
-                # Unknown/invalid tx_state - mark as shredded to skip in future
                 result['error'] = f'Unknown tx_state: {tx_state}'
                 self.cursor.execute(f"""
                     UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
@@ -513,17 +537,13 @@ class ShredderProcessor:
                     WHERE id = %s
                 """, (self.get_tx_state('shredded'), priority, staging_id))
 
-            # Finalize staging row
             if result['success']:
-                # Success: mark as shredded
                 self.cursor.execute(f"""
                     UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
                     SET tx_state = %s, priority = %s
                     WHERE id = %s
                 """, (shredded_state, priority, staging_id))
             else:
-                # Failed/skipped: increment attempt counter and restore for retry
-                # If max attempts reached, mark as shredded to skip permanently
                 self.cursor.execute(f"""
                     UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
                     SET tx_state = IF(attempt_cnt + 1 >= {MAX_DETAILED_ATTEMPTS}, %s, %s),
@@ -537,7 +557,6 @@ class ShredderProcessor:
         except MySQLError as e:
             result['error'] = str(e)
             self.db_conn.rollback()
-            # Restore original state so row can be retried
             try:
                 self.cursor.execute(f"""
                     UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
@@ -546,17 +565,14 @@ class ShredderProcessor:
                 """, (tx_state, priority, staging_id))
                 self.db_conn.commit()
             except:
-                pass  # Best effort restore
+                pass
 
         return result
 
-    def process_batch(self, limit: int = 10, mq_channel=None) -> dict:
+    def process_batch(self, limit=10, mq_channel=None):
         """
         Process a batch of staging rows.
         Returns summary of processing.
-
-        If mq_channel is provided, sends completion responses to gateway when
-        all staging rows for a correlation_id are shredded.
         """
         summary = {
             'processed': 0,
@@ -567,7 +583,6 @@ class ShredderProcessor:
             'correlations_completed': []
         }
 
-        # Fetch pending rows
         rows = self.fetch_pending_staging_rows(limit)
 
         if not rows:
@@ -576,7 +591,6 @@ class ShredderProcessor:
         decoded_state = self.get_tx_state('decoded')
         detailed_state = self.get_tx_state('detailed')
 
-        # Track unique correlations we process this batch
         processed_correlations = set()
 
         for row in rows:
@@ -593,7 +607,7 @@ class ShredderProcessor:
             )
 
             if self.dry_run:
-                print(f"  [DRY] Would process staging.id={staging_id} "
+                log(self.tag, f"[DRY] Would process staging.id={staging_id} "
                       f"(state={state_name}, priority={priority})")
                 summary['processed'] += 1
                 continue
@@ -605,24 +619,23 @@ class ShredderProcessor:
                 summary['processed'] += 1
                 if tx_state == decoded_state:
                     summary['decoded_count'] += 1
-                    print(f"  [+] staging.id={staging_id} (decoded): "
+                    log(self.tag, f"staging.id={staging_id} (decoded): "
                           f"tx={result['tx_count']} xfer={result['transfer_count']} "
                           f"swap={result['swap_count']} act={result['activity_count']} "
                           f"skip={result['skipped_count']}")
                 elif tx_state == detailed_state:
                     summary['detailed_count'] += 1
                     participant_info = f" part={result['participant_count']}" if result.get('participant_count') else ""
-                    print(f"  [+] staging.id={staging_id} (detailed): "
+                    log(self.tag, f"staging.id={staging_id} (detailed): "
                           f"tx={result['tx_count']} sol={result['sol_balance_count']} "
                           f"tok={result['token_balance_count']} skip={result['skipped_count']}{participant_info}")
             else:
                 summary['errors'] += 1
-                print(f"  [!] staging.id={staging_id}: ERROR - {result['error']}")
+                log(self.tag, f"staging.id={staging_id}: ERROR - {result['error']}")
 
-        # Check if any correlations are now complete and send gateway responses
         if not self.dry_run:
             for corr_id in processed_correlations:
-                stats = check_correlation_complete(self.cursor, corr_id)
+                stats = check_correlation_complete(self.cursor, corr_id, self._completed_correlations)
                 if stats:
                     summary['correlations_completed'].append(corr_id)
                     publish_shredder_response(mq_channel, corr_id, stats)
@@ -631,19 +644,16 @@ class ShredderProcessor:
 
 
 # =============================================================================
-# Staging Cleanup
+# Staging Cleanup (supervisor only)
 # =============================================================================
 
-def purge_completed_staging(cursor, conn, min_age_seconds: int = PURGE_MIN_AGE_SECONDS) -> int:
+def purge_completed_staging(cursor, conn, min_age_seconds=60):
     """
     Delete staging rows that have been fully processed (tx_state=shredded).
     Only deletes rows older than min_age_seconds to avoid racing with
     correlation completion checks.
     Returns number of staging rows deleted.
     """
-    # tx_json is no longer written to the tx table, so no need to NULL it out
-    # (previously NULLed fully-processed rows where tx_state & 60 = 60)
-
     cursor.execute(f"""
         DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
         WHERE tx_state = %s
@@ -656,124 +666,224 @@ def purge_completed_staging(cursor, conn, min_age_seconds: int = PURGE_MIN_AGE_S
 
 
 # =============================================================================
-# Daemon Mode
+# Worker Thread
 # =============================================================================
 
-def run_daemon(batch_size: int = 10, interval: int = 5, dry_run: bool = False):
-    """Run as a daemon, continuously polling the staging table"""
+class WorkerThread(threading.Thread):
+    def __init__(self, worker_id, batch_size, dry_run, stop_event,
+                 poll_idle_sec, reconnect_sec):
+        super().__init__(daemon=True)
+        self.tag = f"W-{worker_id}"
+        self.worker_id = worker_id
+        self.batch_size = batch_size
+        self.dry_run = dry_run
+        self.stop_event = stop_event
+        self.poll_idle_sec = poll_idle_sec
+        self.reconnect_sec = reconnect_sec
+
+    def run(self):
+        log(self.tag, f"Starting (batch_size={self.batch_size})")
+        db_conn = None
+        mq_channel = None
+        mq_conn = None
+
+        while not self.stop_event.is_set():
+            try:
+                # Connect DB
+                if db_conn is None:
+                    db_conn = db_connect()
+                    log(self.tag, "DB connected")
+
+                # Connect RabbitMQ
+                if mq_channel is None:
+                    mq_conn, mq_channel = rmq_connect()
+                    if mq_channel:
+                        log(self.tag, "RabbitMQ connected")
+
+                processor = ShredderProcessor(db_conn, self.dry_run, self.tag)
+
+                # Process loop
+                consecutive_empty = 0
+                while not self.stop_event.is_set():
+                    summary = processor.process_batch(self.batch_size, mq_channel)
+
+                    if summary['processed'] > 0:
+                        corr_info = f", corr_done={len(summary['correlations_completed'])}" if summary['correlations_completed'] else ""
+                        log(self.tag, f"Batch: {summary['processed']} "
+                              f"(dec={summary['decoded_count']}, det={summary['detailed_count']}, "
+                              f"err={summary['errors']}{corr_info})")
+                        consecutive_empty = 0
+                        # Process more immediately if full batch
+                        if summary['processed'] >= self.batch_size:
+                            continue
+                    else:
+                        consecutive_empty += 1
+
+                    # Adaptive sleep
+                    sleep_time = self.poll_idle_sec if consecutive_empty < 10 else self.poll_idle_sec * 2
+                    # Sleep in small increments so we can check stop_event
+                    elapsed = 0.0
+                    while elapsed < sleep_time and not self.stop_event.is_set():
+                        time.sleep(min(0.5, sleep_time - elapsed))
+                        elapsed += 0.5
+
+            except MySQLError as e:
+                log(self.tag, f"MySQL error: {e}, reconnecting in {self.reconnect_sec}s...")
+                db_conn = None
+                mq_channel = None
+                mq_conn = None
+                time.sleep(self.reconnect_sec)
+            except Exception as e:
+                log(self.tag, f"Unexpected error: {e}, retrying in {self.reconnect_sec}s...")
+                import traceback
+                traceback.print_exc()
+                db_conn = None
+                mq_channel = None
+                mq_conn = None
+                time.sleep(self.reconnect_sec)
+
+        # Cleanup
+        if db_conn:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+        if mq_conn:
+            try:
+                mq_conn.close()
+            except Exception:
+                pass
+        log(self.tag, "Stopped")
+
+
+# =============================================================================
+# Supervisor (config-driven daemon)
+# =============================================================================
+
+def read_config(cursor):
+    return {
+        'threads':          get_config_int(cursor, 'queue', 'shredder_wrk_cnt_threads', 1),
+        'batch_size':       get_config_int(cursor, 'queue', 'shredder_wrk_batch_size', 10),
+        'supervisor_poll':  get_config_float(cursor, 'queue', 'shredder_wrk_supervisor_poll_sec', 5.0),
+        'poll_idle':        get_config_float(cursor, 'queue', 'shredder_wrk_poll_idle_sec', 5.0),
+        'reconnect':        get_config_float(cursor, 'queue', 'shredder_wrk_reconnect_sec', 5.0),
+        'shutdown_timeout': get_config_float(cursor, 'queue', 'shredder_wrk_shutdown_timeout_sec', 10.0),
+        'purge_every_n':    get_config_int(cursor, 'queue', 'shredder_wrk_purge_every_n', 10),
+        'purge_min_age':    get_config_int(cursor, 'queue', 'shredder_wrk_purge_min_age_sec', 60),
+    }
+
+
+def run_supervisor(dry_run=False):
     print(f"""
 +-----------------------------------------------------------+
-|         Guide Shredder - Staging Consumer Daemon          |
-|  batch_size: {batch_size}  |  interval: {interval}s                          |
+|  Guide Shredder - Supervisor (config-driven)              |
 +-----------------------------------------------------------+
-""")
-    if dry_run:
-        print("MODE: DRY RUN\n")
+""", flush=True)
 
-    db_state = {'conn': None, 'processor': None}
-    mq_state = {'conn': None, 'channel': None}
+    workers = {}       # worker_id -> (WorkerThread, stop_event)
+    next_id = 1
+    svr_conn = None
+    svr_cursor = None
+    poll_counter = 0
 
-    def ensure_db_connection():
+    def ensure_svr_db():
+        nonlocal svr_conn, svr_cursor
         try:
-            needs_reconnect = db_state['conn'] is None
-            if not needs_reconnect:
-                try:
-                    db_state['conn'].ping(reconnect=False, attempts=1, delay=0)
-                except:
-                    needs_reconnect = True
+            if svr_conn is not None:
+                svr_conn.ping(reconnect=False, attempts=1, delay=0)
+                return True
+        except Exception:
+            svr_conn = None
 
-            if needs_reconnect:
-                if db_state['conn']:
-                    try:
-                        db_state['conn'].close()
-                    except:
-                        pass
-                db_state['conn'] = mysql.connector.connect(**DB_CONFIG)
-                db_state['processor'] = ShredderProcessor(db_state['conn'], dry_run)
-                print("[OK] Database (re)connected")
-            return db_state['processor']
+        try:
+            svr_conn = db_connect()
+            svr_cursor = svr_conn.cursor()
+            log('SVR', 'DB connected')
+            return True
         except Exception as e:
-            print(f"[WARN] Database connection failed: {e}")
-            return None
+            log('SVR', f'DB connect failed: {e}')
+            return False
 
-    def ensure_mq_connection():
-        """Ensure RabbitMQ connection for gateway responses"""
-        if not HAS_PIKA or dry_run:
-            return None
-        try:
-            if mq_state['conn'] is None or mq_state['conn'].is_closed:
-                mq_state['conn'], mq_state['channel'] = get_rabbitmq_channel()
-                if mq_state['channel']:
-                    print("[OK] RabbitMQ connected for gateway responses")
-            return mq_state['channel']
-        except Exception as e:
-            print(f"[WARN] RabbitMQ connection failed: {e}")
-            mq_state['conn'] = None
-            mq_state['channel'] = None
-            return None
+    cfg = {}
 
-    ensure_db_connection()
-    ensure_mq_connection()
-    print(f"[OK] Starting daemon, polling every {interval}s...")
-
-    consecutive_empty = 0
-    max_empty_before_slow = 10
-    batch_counter = 0
-
-    while True:
-        try:
-            processor = ensure_db_connection()
-            if not processor:
-                print("[WARN] No DB connection, waiting...")
-                time.sleep(interval * 2)
+    try:
+        while True:
+            if not ensure_svr_db():
+                time.sleep(5.0)
                 continue
 
-            mq_channel = ensure_mq_connection()
+            cfg = read_config(svr_cursor)
 
-            timestamp = datetime.now().strftime('%H:%M:%S')
-            summary = processor.process_batch(batch_size, mq_channel)
+            # Prune dead workers
+            dead = [wid for wid, (w, _) in workers.items() if not w.is_alive()]
+            for wid in dead:
+                log('SVR', f'Worker W-{wid} died, removing')
+                del workers[wid]
 
-            # Periodic purge of completed staging rows
-            batch_counter += 1
-            if batch_counter % PURGE_EVERY_N_BATCHES == 0:
-                purged = purge_completed_staging(processor.cursor, processor.db_conn)
-                if purged > 0:
-                    print(f"[{timestamp}] Purged {purged} completed staging rows")
+            active = len(workers)
 
-            if summary['processed'] > 0:
-                corr_info = f", completed_correlations={len(summary['correlations_completed'])}" if summary['correlations_completed'] else ""
-                print(f"[{timestamp}] Processed {summary['processed']} "
-                      f"(decoded={summary['decoded_count']}, detailed={summary['detailed_count']}, "
-                      f"errors={summary['errors']}{corr_info})")
-                consecutive_empty = 0
-                # Process more immediately if we had a full batch
-                if summary['processed'] >= batch_size:
-                    continue
-            else:
-                consecutive_empty += 1
+            if active != cfg['threads']:
+                log('SVR', f"Config: threads={cfg['threads']} batch_size={cfg['batch_size']} | active={active}")
 
-            # Adaptive sleep: wait longer if queue is empty
-            sleep_time = interval if consecutive_empty < max_empty_before_slow else interval * 2
-            time.sleep(sleep_time)
+            # Scale up
+            while len(workers) < cfg['threads']:
+                stop_evt = threading.Event()
+                w = WorkerThread(
+                    next_id, cfg['batch_size'], dry_run, stop_evt,
+                    cfg['poll_idle'], cfg['reconnect'])
+                w.start()
+                workers[next_id] = (w, stop_evt)
+                next_id += 1
 
-        except MySQLError as e:
-            print(f"[ERROR] MySQL error: {e}, reconnecting...")
-            db_state['conn'] = None
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            print("\n[INFO] Shutting down...")
-            break
-        except Exception as e:
-            print(f"[ERROR] Unexpected error: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(interval)
+            # Scale down (stop newest first)
+            while len(workers) > cfg['threads']:
+                wid = max(workers.keys())
+                wthread, stop_evt = workers.pop(wid)
+                log('SVR', f'Stopping W-{wid}...')
+                stop_evt.set()
 
-    if db_state['conn']:
-        db_state['conn'].close()
+            # Periodic purge (supervisor handles this, not workers)
+            poll_counter += 1
+            if cfg['purge_every_n'] > 0 and poll_counter % cfg['purge_every_n'] == 0:
+                try:
+                    purged = purge_completed_staging(svr_cursor, svr_conn, cfg['purge_min_age'])
+                    if purged > 0:
+                        log('SVR', f'Purged {purged} completed staging rows')
+                except Exception as e:
+                    log('SVR', f'Purge error: {e}')
+                    svr_conn = None  # Force reconnect
+
+            time.sleep(cfg['supervisor_poll'])
+
+    except KeyboardInterrupt:
+        log('SVR', 'Shutting down...')
+
+    shutdown_timeout = cfg.get('shutdown_timeout', 10.0)
+
+    # Signal all workers to stop
+    for wid, (w, stop_evt) in workers.items():
+        stop_evt.set()
+
+    # Wait for graceful exit
+    for wid, (w, _) in workers.items():
+        w.join(timeout=shutdown_timeout)
+        if w.is_alive():
+            log('SVR', f'W-{wid} did not stop in time')
+
+    if svr_conn:
+        try:
+            svr_conn.close()
+        except Exception:
+            pass
+
+    log('SVR', 'Shutdown complete')
 
 
-def run_once(batch_size: int = 100, dry_run: bool = False):
+# =============================================================================
+# Single-run mode (unchanged)
+# =============================================================================
+
+def run_once(batch_size=100, dry_run=False):
     """Process all pending staging rows once and exit"""
     print(f"""
 +-----------------------------------------------------------+
@@ -784,9 +894,9 @@ def run_once(batch_size: int = 100, dry_run: bool = False):
         print("MODE: DRY RUN\n")
 
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        processor = ShredderProcessor(conn, dry_run)
-        print("[OK] Database connected")
+        conn = db_connect()
+        processor = ShredderProcessor(conn, dry_run, 'ONCE')
+        log('ONCE', 'Database connected')
 
         total_processed = 0
         total_decoded = 0
@@ -813,15 +923,15 @@ def run_once(batch_size: int = 100, dry_run: bool = False):
                 if purged < 1000:
                     break
             if total_purged > 0:
-                print(f"  Purged {total_purged} completed staging rows")
+                log('ONCE', f'Purged {total_purged} completed staging rows')
 
-        print(f"\n[DONE] Total processed: {total_processed} "
+        log('ONCE', f"Total processed: {total_processed} "
               f"(decoded={total_decoded}, detailed={total_detailed}, errors={total_errors})")
 
         conn.close()
 
     except MySQLError as e:
-        print(f"[ERROR] MySQL error: {e}")
+        log('ONCE', f"MySQL error: {e}")
         return 1
 
     return 0
@@ -836,13 +946,11 @@ def main():
         description='Guide Shredder - Forward-only staging table processor'
     )
     parser.add_argument('--daemon', action='store_true',
-                        help='Run as daemon, continuously polling staging table')
+                        help='Run as daemon (supervisor + worker threads)')
     parser.add_argument('--once', action='store_true',
                         help='Process all pending rows once and exit')
-    parser.add_argument('--batch-size', type=int, default=10,
-                        help='Number of staging rows to process per batch')
-    parser.add_argument('--interval', type=int, default=5,
-                        help='Polling interval in seconds (daemon mode)')
+    parser.add_argument('--batch-size', type=int, default=None,
+                        help='Override batch size (--once mode only; daemon uses config table)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview only, no DB changes')
 
@@ -854,16 +962,12 @@ def main():
 
     if args.once:
         return run_once(
-            batch_size=args.batch_size,
+            batch_size=args.batch_size or 100,
             dry_run=args.dry_run
         )
     else:
-        # Default to daemon mode (--daemon flag optional)
-        return run_daemon(
-            batch_size=args.batch_size,
-            interval=args.interval,
-            dry_run=args.dry_run
-        )
+        # Default to daemon/supervisor mode (--daemon flag optional)
+        return run_supervisor(dry_run=args.dry_run)
 
 
 if __name__ == '__main__':
