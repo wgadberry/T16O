@@ -1106,6 +1106,45 @@ def create_app():
             'timestamp': datetime.now().isoformat() + 'Z'
         }), 200 if healthy else 503
 
+    @app.route('/api/bmap/get', methods=['GET'])
+    def bmap_get():
+        """Get bmap data for a token/signature via sp_tx_bmap_get"""
+        token_name   = request.args.get('token_name')
+        token_symbol = request.args.get('token_symbol')
+        mint_address = request.args.get('mint')
+        signature    = request.args.get('signature')
+        block_time   = request.args.get('block_time', type=int)
+        tx_limit     = request.args.get('limit', default=10, type=int)
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.callproc('sp_tx_bmap_get', [
+                token_name, token_symbol, mint_address,
+                signature, block_time, tx_limit
+            ])
+            data = None
+            for result_set in cursor.stored_results():
+                row = result_set.fetchone()
+                if row:
+                    data = json.loads(row[0])
+                    break
+            cursor.close()
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if conn:
+                conn.close()
+
+        if not data:
+            return jsonify({'error': 'No result from procedure'}), 500
+
+        if 'error' in data.get('result', {}):
+            return jsonify(data), 404
+
+        return jsonify(data), 200
+
     @app.route('/api/workers', methods=['GET'])
     def list_workers():
         """List available workers"""

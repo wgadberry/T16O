@@ -278,6 +278,69 @@
         }
       }
     },
+    "/api/bmap/get": {
+      "get": {
+        "operationId": "bmapGet",
+        "summary": "Get Bmap Data",
+        "description": "Get transaction cluster map (bmap) data for a token. Returns nodes, edges, and transaction navigation for visualization.\n\nProvide at least one of: `mint`, `token_symbol`, `token_name`, or `signature`.\n\nPriority for token resolution: `mint` > `token_symbol` > `token_name` > derived from `signature`.",
+        "tags": ["Bmap"],
+        "security": [],
+        "parameters": [
+          {
+            "name": "mint",
+            "in": "query",
+            "description": "Token mint address (44 chars)",
+            "schema": { "type": "string", "maxLength": 44 }
+          },
+          {
+            "name": "token_symbol",
+            "in": "query",
+            "description": "Token symbol (e.g., BONK, SOL)",
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "token_name",
+            "in": "query",
+            "description": "Token name",
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "signature",
+            "in": "query",
+            "description": "Jump to a specific transaction signature (88 chars)",
+            "schema": { "type": "string", "maxLength": 88 }
+          },
+          {
+            "name": "block_time",
+            "in": "query",
+            "description": "Unix timestamp — finds the nearest transaction",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Transaction window size (1, 10, 20, 50, or 100). Default: 10",
+            "schema": { "type": "integer", "default": 10, "enum": [1, 10, 20, 50, 100] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bmap data with nodes, edges, and transaction navigation",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "404": {
+            "description": "Token or signature not found"
+          },
+          "500": {
+            "description": "Database error"
+          }
+        }
+      }
+    },
     "/api/trigger/producer": {
       "post": {
         "operationId": "triggerProducer",
