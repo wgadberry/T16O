@@ -971,35 +971,48 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
             except Exception as e:
                 print(f"[{request_id[:8]}] DB lookup for signature failed: {e}")
 
-        if not sig_context_mint:
-            return {'processed': 0, 'errors': 1,
-                    'error': f'Signature not found in DB or no mint address: {filter_signature[:20]}...'}
+        # Also check if addresses were provided — use first as mint for context lookup
+        context_address = sig_context_mint
+        if not context_address:
+            addr_list = filters.get('addresses', [])
+            if not addr_list:
+                single = filters.get('mint_address') or filters.get('address')
+                if single:
+                    addr_list = [single]
+            if addr_list:
+                context_address = addr_list[0]
 
-        print(f"[{request_id[:8]}] Signature context: {filter_signature[:20]}... mint={sig_context_mint[:20]}...")
+        if context_address:
+            # We have a mint/address — fetch surrounding context from RPC
+            print(f"[{request_id[:8]}] Signature context: {filter_signature[:20]}... addr={context_address[:20]}...")
 
-        # Fetch older sigs (RPC returns newest-first, "before" = older than target)
-        older_result = fetch_signatures_rpc(rpc_session, sig_context_mint, CHAINSTACK_RPC_URL,
-                                            limit=context_size, before=filter_signature)
-        older_sigs = [s['signature'] for s in older_result.get('result', []) if s.get('signature')]
+            # Fetch older sigs (RPC returns newest-first, "before" = older than target)
+            older_result = fetch_signatures_rpc(rpc_session, context_address, CHAINSTACK_RPC_URL,
+                                                limit=context_size, before=filter_signature)
+            older_sigs = [s['signature'] for s in older_result.get('result', []) if s.get('signature')]
 
-        # Fetch newer sigs: get a window and find target's position
-        window_result = fetch_signatures_rpc(rpc_session, sig_context_mint, CHAINSTACK_RPC_URL,
-                                             limit=context_size * 2 + 20)
-        window_sigs = [s['signature'] for s in window_result.get('result', []) if s.get('signature')]
+            # Fetch newer sigs: get a window and find target's position
+            window_result = fetch_signatures_rpc(rpc_session, context_address, CHAINSTACK_RPC_URL,
+                                                 limit=context_size * 2 + 20)
+            window_sigs = [s['signature'] for s in window_result.get('result', []) if s.get('signature')]
 
-        newer_sigs = []
-        if filter_signature in window_sigs:
-            target_idx = window_sigs.index(filter_signature)
-            newer_sigs = window_sigs[max(0, target_idx - context_size):target_idx]
+            newer_sigs = []
+            if filter_signature in window_sigs:
+                target_idx = window_sigs.index(filter_signature)
+                newer_sigs = window_sigs[max(0, target_idx - context_size):target_idx]
+            else:
+                until_result = fetch_signatures_rpc(rpc_session, context_address, CHAINSTACK_RPC_URL,
+                                                    limit=context_size + 1, until=filter_signature)
+                newer_sigs = [s['signature'] for s in until_result.get('result', [])
+                              if s.get('signature') and s['signature'] != filter_signature]
+                newer_sigs = newer_sigs[:context_size]
+
+            sig_context_sigs = newer_sigs + [filter_signature] + older_sigs
+            print(f"  Found {len(newer_sigs)} newer + 1 target + {len(older_sigs)} older = {len(sig_context_sigs)} total")
         else:
-            until_result = fetch_signatures_rpc(rpc_session, sig_context_mint, CHAINSTACK_RPC_URL,
-                                                limit=context_size + 1, until=filter_signature)
-            newer_sigs = [s['signature'] for s in until_result.get('result', [])
-                          if s.get('signature') and s['signature'] != filter_signature]
-            newer_sigs = newer_sigs[:context_size]
-
-        sig_context_sigs = newer_sigs + [filter_signature] + older_sigs
-        print(f"  Found {len(newer_sigs)} newer + 1 target + {len(older_sigs)} older = {len(sig_context_sigs)} total")
+            # No mint address found — pass signature through directly
+            print(f"[{request_id[:8]}] Signature pass-through (no mint in DB): {filter_signature[:20]}...")
+            sig_context_sigs = [filter_signature]
 
         # Filter duplicates
         if db_cursor:
