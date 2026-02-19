@@ -1183,8 +1183,9 @@ def run_queue_consumer(prefetch: int = 1):
                             if single_addr:
                                 addresses = [single_addr]
 
-                        if not addresses:
-                            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address in batch.filters)")
+                        has_signature = bool(filters.get('signature'))
+                        if not addresses and not has_signature:
+                            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address or signature in batch.filters)")
                             print(f"  Keys received: {list(message.keys())}, batch keys: {list(batch.keys())}")
                             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
                             return
