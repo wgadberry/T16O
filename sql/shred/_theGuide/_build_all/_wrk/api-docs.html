@@ -110,7 +110,7 @@
                 "description": "Transaction signature to fetch context around. Returns the target plus surrounding signatures (default 5 on each side). Cannot be combined with addresses.",
                 "example": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
               },
-              "context_size": {
+              "sig_adjacent_cnt": {
                 "type": "integer",
                 "default": 5,
                 "description": "Number of signatures to fetch on each side of the target (only used with signature filter)"
@@ -137,7 +137,7 @@
               }
             }
           },
-          "size": {
+          "address_sig_cnt": {
             "type": "integer",
             "default": 10,
             "description": "Number of signatures to fetch per address"
@@ -432,12 +432,12 @@
                     "batch": {
                       "filters": {
                         "signature": "",
-                        "context_size": 5,
+                        "sig_adjacent_cnt": 5,
                         "addresses": [],
                         "before": {},
                         "until": {}
                       },
-                      "size": 10
+                      "address_sig_cnt": 10
                     }
                   }
                 },
@@ -458,7 +458,7 @@
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
                       },
-                      "size": 10
+                      "address_sig_cnt": 10
                     }
                   }
                 },
@@ -470,7 +470,7 @@
                         "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2",
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
                       },
-                      "size": 10
+                      "address_sig_cnt": 10
                     }
                   }
                 },
@@ -483,7 +483,7 @@
                         "before": { "block_time": "2025-01-20T00:00:00Z" },
                         "until": { "block_time": "2025-01-01T00:00:00Z" }
                       },
-                      "size": 100000
+                      "address_sig_cnt": 100000
                     }
                   }
                 },
@@ -496,7 +496,7 @@
                         "before": { "block_id": 285000000 },
                         "until": { "block_id": 280000000 }
                       },
-                      "size": 100000
+                      "address_sig_cnt": 100000
                     }
                   }
                 },
@@ -509,7 +509,7 @@
                         "before": { "signature": "5abc123..." },
                         "until": { "block_time": "2025-01-01T00:00:00Z" }
                       },
-                      "size": 100000
+                      "address_sig_cnt": 100000
                     }
                   }
                 }

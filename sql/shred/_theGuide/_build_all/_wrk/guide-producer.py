@@ -739,7 +739,7 @@ def process_multiple_addresses(
                     'before': request_before,
                     'until': request_until
                 },
-                'size': max_signatures
+                'address_sig_cnt': max_signatures
             }
         }
 
@@ -779,7 +779,7 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
 
     filters = batch.get('filters', {})
     address = filters.get('address') or filters.get('mint_address')
-    max_signatures = batch.get('size', 100)
+    max_signatures = batch.get('address_sig_cnt', batch.get('size', 10))
     request_before = filters.get('before')
     request_until = filters.get('until')
 
@@ -949,7 +949,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     priority = message.get('priority', 5)
 
     filters = batch.get('filters', {})
-    max_signatures = batch.get('size', 100)
+    max_signatures = batch.get('address_sig_cnt', batch.get('size', 10))
 
     # --- Pass-through mode: signatures provided directly, skip RPC ---
     direct_signatures = batch.get('signatures', [])
@@ -978,7 +978,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     sig_context_mint = None
     filter_signature = filters.get('signature')
     if filter_signature:
-        context_size = filters.get('context_size', 5)
+        context_size = filters.get('sig_adjacent_cnt', filters.get('context_size', 5))
 
         # Look up mint address from DB
         if db_cursor:
@@ -1140,7 +1140,7 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 'before': request_before,
                 'until': request_until
             },
-            'size': max_signatures
+            'address_sig_cnt': max_signatures
         }
     }
 

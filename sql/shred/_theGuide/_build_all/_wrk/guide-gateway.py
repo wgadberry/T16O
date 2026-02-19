@@ -475,7 +475,7 @@ def log_request(
             payload_hash = hashlib.sha256(payload_str.encode()).hexdigest()
             # Extract summary fields
             payload_summary = {
-                'batch_size': payload.get('batch', {}).get('size'),
+                'address_sig_cnt': payload.get('batch', {}).get('address_sig_cnt'),
                 'filters': payload.get('batch', {}).get('filters'),
                 'action': action
             }
@@ -1230,7 +1230,7 @@ def create_app():
             'request_id': request_id,
             'correlation_id': correlation_id,
             'features': features,
-            'batch': {'filters': batch_filters, 'size': 5}
+            'batch': {'filters': batch_filters, 'address_sig_cnt': 5}
         }
 
         # Log gateway billing record
