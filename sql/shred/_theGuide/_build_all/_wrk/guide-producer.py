@@ -1014,9 +1014,9 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
             print(f"[{request_id[:8]}] Signature pass-through (no mint in DB): {filter_signature[:20]}...")
             sig_context_sigs = [filter_signature]
 
-        # Filter duplicates
-        if db_cursor:
-            sig_context_sigs, sig_context_skipped = filter_existing_signatures(db_cursor, sig_context_sigs)
+        # NOTE: No duplicate filtering for signature context mode —
+        # the caller explicitly requested this signature and its context,
+        # so we always cascade them to decoder+detailer regardless of DB state.
 
     # Support both legacy string format and new object format for before/until
     # New format: {"signature": "...", "block_id": 123, "block_time": "2025-01-15T10:00:00Z"}
