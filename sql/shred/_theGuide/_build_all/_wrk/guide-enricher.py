@@ -442,6 +442,24 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                     symbol = (response.get('symbol') or '').strip() or None
                     icon = response.get('icon')
                     decimals = response.get('decimals')
+                    supply_str = response.get('supply')
+                    supply = int(supply_str) if supply_str is not None else None
+                    mint_authority = response.get('mint_authority')
+
+                    # Derive token_type from Metaplex rules:
+                    #   decimals >= 1 → fungible
+                    #   decimals = 0, no mint authority → nft (supply 0 = burned, 1 = active)
+                    #   decimals = 0, supply > 1 → semi_fungible
+                    token_type = None
+                    if decimals is not None:
+                        if decimals >= 1:
+                            token_type = 'fungible'
+                        elif not mint_authority and supply is not None and supply <= 1:
+                            token_type = 'nft'
+                        elif supply is not None and supply > 1:
+                            token_type = 'semi_fungible'
+                        else:
+                            token_type = 'unknown'
 
                     # Scam guard: flag tokens impersonating known symbols
                     if symbol and symbol.upper() in KNOWN_TOKEN_MINTS:
@@ -466,10 +484,12 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                                     token_symbol = COALESCE(%s, token_symbol),
                                     token_icon = COALESCE(%s, token_icon),
                                     decimals = COALESCE(%s, decimals),
+                                    supply = COALESCE(%s, supply),
+                                    token_type = COALESCE(%s, token_type),
                                     token_json = COALESCE(%s, token_json),
                                     attempt_cnt = 0
                                 WHERE id = %s
-                            """, (name, symbol, icon, decimals, token_json_str, token_id))
+                            """, (name, symbol, icon, decimals, supply, token_type, token_json_str, token_id))
                         else:
                             cursor.execute("""
                                 UPDATE tx_token
@@ -477,11 +497,13 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                                     token_symbol = COALESCE(%s, token_symbol),
                                     token_icon = COALESCE(%s, token_icon),
                                     decimals = COALESCE(%s, decimals),
+                                    supply = COALESCE(%s, supply),
+                                    token_type = COALESCE(%s, token_type),
                                     token_json = COALESCE(%s, token_json)
                                 WHERE id = %s
-                            """, (name, symbol, icon, decimals, token_json_str, token_id))
+                            """, (name, symbol, icon, decimals, supply, token_type, token_json_str, token_id))
                         conn.commit()
-                        log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec)")
+                        log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec) [{token_type or '?'}]")
                         stats['updated'] += 1
                     else:
                         stats['failed'] += 1

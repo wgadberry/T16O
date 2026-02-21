@@ -234,12 +234,16 @@ def run_guide_loader_batch(tag, cursor, conn, batch_size, max_retries, base_dela
     return (0, 0)
 
 
-def sync_guide_edges(tag, cursor, conn, max_retries, base_delay):
+def sync_guide_edges(tag, cursor, conn, max_retries, base_delay, stop_event=None):
     """Process all pending activities via sp_tx_guide_loader. Returns stats."""
     stats = {'batches': 0, 'edges': 0}
     batch_num = 0
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            log(tag, "[guide] Stop event received, breaking out of sync loop")
+            break
+
         batch_size = get_config_int(cursor, 'batch', 'guide_batch_size', 1000)
         edges, last_tx_id = run_guide_loader_batch(tag, cursor, conn, batch_size, max_retries, base_delay)
 
@@ -444,7 +448,7 @@ def backfill_pool_labels(tag, cursor, conn):
 # Combined sync (used by both worker and manual modes)
 # =============================================================================
 
-def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay):
+def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay, stop_event=None):
     """Run sync for specified operations. Returns stats dict."""
     stats = {
         'guide': {'batches': 0, 'edges': 0, 'pending': 0},
@@ -460,7 +464,7 @@ def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay)
 
         if pending > 0:
             log(tag, f"[guide] {pending:,} pending tx")
-            result = sync_guide_edges(tag, cursor, conn, max_retries, base_delay)
+            result = sync_guide_edges(tag, cursor, conn, max_retries, base_delay, stop_event)
             stats['guide']['batches'] = result['batches']
             stats['guide']['edges'] = result['edges']
         else:
@@ -613,7 +617,7 @@ class WorkerThread(threading.Thread):
 
             stats = run_sync(self.tag, cursor, db_conn, operations,
                              self.batch_size, self.deadlock_max_retries,
-                             self.deadlock_base_delay)
+                             self.deadlock_base_delay, self.stop_event)
 
             total = stats['guide']['edges'] + stats['tokens']['rows']
             result = {
@@ -655,7 +659,7 @@ class WorkerThread(threading.Thread):
         while not self.stop_event.is_set():
             stats = run_sync(self.tag, cursor, db_conn, ['guide', 'tokens'],
                              self.batch_size, self.deadlock_max_retries,
-                             self.deadlock_base_delay)
+                             self.deadlock_base_delay, self.stop_event)
 
             edges = stats['guide']['edges']
             token_rows = stats['tokens']['rows']

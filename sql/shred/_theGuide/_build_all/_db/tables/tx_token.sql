@@ -10,6 +10,8 @@ CREATE TABLE `tx_token` (
   `token_symbol` varchar(256) DEFAULT NULL,
   `token_icon` varchar(500) DEFAULT NULL,
   `decimals` tinyint unsigned DEFAULT NULL,
+  `supply` bigint unsigned DEFAULT NULL COMMENT 'Total supply from Solscan API',
+  `token_type` enum('fungible','semi_fungible','nft','unknown') DEFAULT NULL COMMENT 'Derived: fungible (dec>=1), semi_fungible (dec=0 supply>1), nft (dec=0 supply<=1 no mint auth)',
   `created_utc` datetime NOT NULL DEFAULT (UTC_TIMESTAMP()),
   `updated_utc` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

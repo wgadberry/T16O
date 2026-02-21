@@ -335,8 +335,8 @@ BEGIN
 
     -- ----------------------------------------------------------
     -- TOKEN BALANCE: prior-tx fallback (only rows still NULL)
-    -- Uses LATERAL JOIN: one index seek per guide row (LIMIT 1)
-    -- Split OR into two passes so each uses a composite index
+    -- Dedup: one LATERAL seek per unique (account/owner, token, block_time)
+    -- instead of per guide row — typically 3-5x fewer I/O seeks
     --
     -- READ COMMITTED: avoid gap locks on balance change indexes
     -- that deadlock with the shredder's concurrent INSERTs
@@ -352,37 +352,78 @@ BEGIN
     ) ENGINE=MEMORY;
 
     -- Pass 1: match by token_account (uses idx_tbc_acct_token_blocktime)
+    -- Dedup: one lookup per unique (token_account, token_id, block_time)
+    DROP TEMPORARY TABLE IF EXISTS tmp_dedup_from_tok_acct;
+    CREATE TEMPORARY TABLE tmp_dedup_from_tok_acct (
+        token_account_id INT UNSIGNED,
+        token_id BIGINT,
+        block_time BIGINT UNSIGNED,
+        post_balance BIGINT,
+        PRIMARY KEY (token_account_id, token_id, block_time)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_dedup_from_tok_acct (token_account_id, token_id, block_time)
+    SELECT from_token_account_id, token_id, block_time
+    FROM tmp_guide_keys
+    WHERE token_id IS NOT NULL AND from_token_account_id IS NOT NULL AND from_token_filled = 0;
+
     INSERT INTO tmp_from_token_prior
-    SELECT g.id, lat.post_balance
+    SELECT g.id, d.post_balance
     FROM tmp_guide_keys g
-    CROSS JOIN LATERAL (
-        SELECT tbc.post_balance
-        FROM tx_token_balance_change tbc
-        WHERE tbc.token_account_address_id = g.from_token_account_id
-          AND tbc.token_id = g.token_id
-          AND tbc.block_time < g.block_time
-        ORDER BY tbc.block_time DESC
-        LIMIT 1
-    ) lat
-    WHERE g.token_id IS NOT NULL
-      AND g.from_token_account_id IS NOT NULL
-      AND g.from_token_filled = 0;
+    JOIN (
+        SELECT u.token_account_id, u.token_id, u.block_time, lat.post_balance
+        FROM tmp_dedup_from_tok_acct u
+        CROSS JOIN LATERAL (
+            SELECT tbc.post_balance
+            FROM tx_token_balance_change tbc
+            WHERE tbc.token_account_address_id = u.token_account_id
+              AND tbc.token_id = u.token_id
+              AND tbc.block_time < u.block_time
+            ORDER BY tbc.block_time DESC
+            LIMIT 1
+        ) lat
+    ) d ON d.token_account_id = g.from_token_account_id
+        AND d.token_id = g.token_id AND d.block_time = g.block_time
+    WHERE g.token_id IS NOT NULL AND g.from_token_account_id IS NOT NULL AND g.from_token_filled = 0;
+
+    DROP TEMPORARY TABLE tmp_dedup_from_tok_acct;
 
     -- Pass 2: fallback by owner (uses idx_tbc_owner_token_blocktime)
+    -- Dedup: one lookup per unique (owner, token_id, block_time)
+    DROP TEMPORARY TABLE IF EXISTS tmp_dedup_from_tok_own;
+    CREATE TEMPORARY TABLE tmp_dedup_from_tok_own (
+        owner_id INT UNSIGNED,
+        token_id BIGINT,
+        block_time BIGINT UNSIGNED,
+        post_balance BIGINT,
+        PRIMARY KEY (owner_id, token_id, block_time)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_dedup_from_tok_own (owner_id, token_id, block_time)
+    SELECT from_address_id, token_id, block_time
+    FROM tmp_guide_keys
+    WHERE token_id IS NOT NULL AND from_token_filled = 0;
+
     INSERT IGNORE INTO tmp_from_token_prior
-    SELECT g.id, lat.post_balance
+    SELECT g.id, d.post_balance
     FROM tmp_guide_keys g
-    CROSS JOIN LATERAL (
-        SELECT tbc.post_balance
-        FROM tx_token_balance_change tbc
-        WHERE tbc.owner_address_id = g.from_address_id
-          AND tbc.token_id = g.token_id
-          AND tbc.block_time < g.block_time
-        ORDER BY tbc.block_time DESC
-        LIMIT 1
-    ) lat
-    WHERE g.token_id IS NOT NULL
-      AND g.from_token_filled = 0;
+    JOIN (
+        SELECT u.owner_id, u.token_id, u.block_time, lat.post_balance
+        FROM tmp_dedup_from_tok_own u
+        CROSS JOIN LATERAL (
+            SELECT tbc.post_balance
+            FROM tx_token_balance_change tbc
+            WHERE tbc.owner_address_id = u.owner_id
+              AND tbc.token_id = u.token_id
+              AND tbc.block_time < u.block_time
+            ORDER BY tbc.block_time DESC
+            LIMIT 1
+        ) lat
+    ) d ON d.owner_id = g.from_address_id
+        AND d.token_id = g.token_id AND d.block_time = g.block_time
+    WHERE g.token_id IS NOT NULL AND g.from_token_filled = 0;
+
+    DROP TEMPORARY TABLE tmp_dedup_from_tok_own;
 
     UPDATE tx_guide g
     JOIN tmp_from_token_prior fp ON fp.guide_id = g.id
@@ -399,37 +440,76 @@ BEGIN
     ) ENGINE=MEMORY;
 
     -- Pass 1: match by token_account (uses idx_tbc_acct_token_blocktime)
+    DROP TEMPORARY TABLE IF EXISTS tmp_dedup_to_tok_acct;
+    CREATE TEMPORARY TABLE tmp_dedup_to_tok_acct (
+        token_account_id INT UNSIGNED,
+        token_id BIGINT,
+        block_time BIGINT UNSIGNED,
+        post_balance BIGINT,
+        PRIMARY KEY (token_account_id, token_id, block_time)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_dedup_to_tok_acct (token_account_id, token_id, block_time)
+    SELECT to_token_account_id, token_id, block_time
+    FROM tmp_guide_keys
+    WHERE token_id IS NOT NULL AND to_token_account_id IS NOT NULL AND to_token_filled = 0;
+
     INSERT INTO tmp_to_token_prior
-    SELECT g.id, lat.post_balance
+    SELECT g.id, d.post_balance
     FROM tmp_guide_keys g
-    CROSS JOIN LATERAL (
-        SELECT tbc.post_balance
-        FROM tx_token_balance_change tbc
-        WHERE tbc.token_account_address_id = g.to_token_account_id
-          AND tbc.token_id = g.token_id
-          AND tbc.block_time < g.block_time
-        ORDER BY tbc.block_time DESC
-        LIMIT 1
-    ) lat
-    WHERE g.token_id IS NOT NULL
-      AND g.to_token_account_id IS NOT NULL
-      AND g.to_token_filled = 0;
+    JOIN (
+        SELECT u.token_account_id, u.token_id, u.block_time, lat.post_balance
+        FROM tmp_dedup_to_tok_acct u
+        CROSS JOIN LATERAL (
+            SELECT tbc.post_balance
+            FROM tx_token_balance_change tbc
+            WHERE tbc.token_account_address_id = u.token_account_id
+              AND tbc.token_id = u.token_id
+              AND tbc.block_time < u.block_time
+            ORDER BY tbc.block_time DESC
+            LIMIT 1
+        ) lat
+    ) d ON d.token_account_id = g.to_token_account_id
+        AND d.token_id = g.token_id AND d.block_time = g.block_time
+    WHERE g.token_id IS NOT NULL AND g.to_token_account_id IS NOT NULL AND g.to_token_filled = 0;
+
+    DROP TEMPORARY TABLE tmp_dedup_to_tok_acct;
 
     -- Pass 2: fallback by owner (uses idx_tbc_owner_token_blocktime)
+    DROP TEMPORARY TABLE IF EXISTS tmp_dedup_to_tok_own;
+    CREATE TEMPORARY TABLE tmp_dedup_to_tok_own (
+        owner_id INT UNSIGNED,
+        token_id BIGINT,
+        block_time BIGINT UNSIGNED,
+        post_balance BIGINT,
+        PRIMARY KEY (owner_id, token_id, block_time)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_dedup_to_tok_own (owner_id, token_id, block_time)
+    SELECT to_address_id, token_id, block_time
+    FROM tmp_guide_keys
+    WHERE token_id IS NOT NULL AND to_token_filled = 0;
+
     INSERT IGNORE INTO tmp_to_token_prior
-    SELECT g.id, lat.post_balance
+    SELECT g.id, d.post_balance
     FROM tmp_guide_keys g
-    CROSS JOIN LATERAL (
-        SELECT tbc.post_balance
-        FROM tx_token_balance_change tbc
-        WHERE tbc.owner_address_id = g.to_address_id
-          AND tbc.token_id = g.token_id
-          AND tbc.block_time < g.block_time
-        ORDER BY tbc.block_time DESC
-        LIMIT 1
-    ) lat
-    WHERE g.token_id IS NOT NULL
-      AND g.to_token_filled = 0;
+    JOIN (
+        SELECT u.owner_id, u.token_id, u.block_time, lat.post_balance
+        FROM tmp_dedup_to_tok_own u
+        CROSS JOIN LATERAL (
+            SELECT tbc.post_balance
+            FROM tx_token_balance_change tbc
+            WHERE tbc.owner_address_id = u.owner_id
+              AND tbc.token_id = u.token_id
+              AND tbc.block_time < u.block_time
+            ORDER BY tbc.block_time DESC
+            LIMIT 1
+        ) lat
+    ) d ON d.owner_id = g.to_address_id
+        AND d.token_id = g.token_id AND d.block_time = g.block_time
+    WHERE g.token_id IS NOT NULL AND g.to_token_filled = 0;
+
+    DROP TEMPORARY TABLE tmp_dedup_to_tok_own;
 
     UPDATE tx_guide g
     JOIN tmp_to_token_prior tp ON tp.guide_id = g.id
@@ -501,7 +581,8 @@ BEGIN
     DROP TEMPORARY TABLE tmp_to_sol_same;
 
     -- ----------------------------------------------------------
-    -- SOL BALANCE: prior-tx fallback (LATERAL, one seek per guide)
+    -- SOL BALANCE: prior-tx fallback
+    -- Dedup: one LATERAL seek per unique (address_id, block_time)
     -- ----------------------------------------------------------
 
     -- === FROM sol prior ===
@@ -511,18 +592,35 @@ BEGIN
         post_balance BIGINT
     ) ENGINE=MEMORY;
 
+    DROP TEMPORARY TABLE IF EXISTS tmp_dedup_from_sol;
+    CREATE TEMPORARY TABLE tmp_dedup_from_sol (
+        address_id INT UNSIGNED,
+        block_time BIGINT UNSIGNED,
+        post_balance BIGINT,
+        PRIMARY KEY (address_id, block_time)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_dedup_from_sol (address_id, block_time)
+    SELECT from_address_id, block_time FROM tmp_guide_keys WHERE from_sol_filled = 0;
+
     INSERT INTO tmp_from_sol_prior
-    SELECT g.id, lat.post_balance
+    SELECT g.id, d.post_balance
     FROM tmp_guide_keys g
-    CROSS JOIN LATERAL (
-        SELECT sbc.post_balance
-        FROM tx_sol_balance_change sbc
-        WHERE sbc.address_id = g.from_address_id
-          AND sbc.block_time < g.block_time
-        ORDER BY sbc.block_time DESC
-        LIMIT 1
-    ) lat
+    JOIN (
+        SELECT u.address_id, u.block_time, lat.post_balance
+        FROM tmp_dedup_from_sol u
+        CROSS JOIN LATERAL (
+            SELECT sbc.post_balance
+            FROM tx_sol_balance_change sbc
+            WHERE sbc.address_id = u.address_id
+              AND sbc.block_time < u.block_time
+            ORDER BY sbc.block_time DESC
+            LIMIT 1
+        ) lat
+    ) d ON d.address_id = g.from_address_id AND d.block_time = g.block_time
     WHERE g.from_sol_filled = 0;
+
+    DROP TEMPORARY TABLE tmp_dedup_from_sol;
 
     UPDATE tx_guide g
     JOIN tmp_from_sol_prior fp ON fp.guide_id = g.id
@@ -538,18 +636,35 @@ BEGIN
         post_balance BIGINT
     ) ENGINE=MEMORY;
 
+    DROP TEMPORARY TABLE IF EXISTS tmp_dedup_to_sol;
+    CREATE TEMPORARY TABLE tmp_dedup_to_sol (
+        address_id INT UNSIGNED,
+        block_time BIGINT UNSIGNED,
+        post_balance BIGINT,
+        PRIMARY KEY (address_id, block_time)
+    ) ENGINE=MEMORY;
+
+    INSERT IGNORE INTO tmp_dedup_to_sol (address_id, block_time)
+    SELECT to_address_id, block_time FROM tmp_guide_keys WHERE to_sol_filled = 0;
+
     INSERT INTO tmp_to_sol_prior
-    SELECT g.id, lat.post_balance
+    SELECT g.id, d.post_balance
     FROM tmp_guide_keys g
-    CROSS JOIN LATERAL (
-        SELECT sbc.post_balance
-        FROM tx_sol_balance_change sbc
-        WHERE sbc.address_id = g.to_address_id
-          AND sbc.block_time < g.block_time
-        ORDER BY sbc.block_time DESC
-        LIMIT 1
-    ) lat
+    JOIN (
+        SELECT u.address_id, u.block_time, lat.post_balance
+        FROM tmp_dedup_to_sol u
+        CROSS JOIN LATERAL (
+            SELECT sbc.post_balance
+            FROM tx_sol_balance_change sbc
+            WHERE sbc.address_id = u.address_id
+              AND sbc.block_time < u.block_time
+            ORDER BY sbc.block_time DESC
+            LIMIT 1
+        ) lat
+    ) d ON d.address_id = g.to_address_id AND d.block_time = g.block_time
     WHERE g.to_sol_filled = 0;
+
+    DROP TEMPORARY TABLE tmp_dedup_to_sol;
 
     UPDATE tx_guide g
     JOIN tmp_to_sol_prior tp ON tp.guide_id = g.id

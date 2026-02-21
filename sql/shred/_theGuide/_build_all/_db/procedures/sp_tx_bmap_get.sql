@@ -44,6 +44,7 @@ BEGIN
     DECLARE v_token_id BIGINT;
     DECLARE v_mint_address VARCHAR(44);
     DECLARE v_token_symbol VARCHAR(128);
+    DECLARE v_token_type VARCHAR(20);
     DECLARE v_decimals TINYINT UNSIGNED;
 
     DECLARE v_signature VARCHAR(88);
@@ -73,16 +74,16 @@ BEGIN
     -- STEP 1: Resolve token
     -- ==========================================================================
     IF p_mint_address IS NOT NULL THEN
-        SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
         WHERE mint.address = p_mint_address
         LIMIT 1;
     ELSEIF p_token_symbol IS NOT NULL THEN
         -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
-        SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
         LEFT JOIN (SELECT token_id, COUNT(*) AS cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
@@ -91,8 +92,8 @@ BEGIN
         LIMIT 1;
     ELSEIF p_token_name IS NOT NULL THEN
         -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
-        SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
         LEFT JOIN (SELECT token_id, COUNT(*) AS cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
@@ -105,8 +106,8 @@ BEGIN
 
         -- Derive primary token from signature's tx_guide activity (for display only)
         -- Prefer "interesting" tokens over base currencies (SOL, WSOL, stablecoins)
-        SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx t
         JOIN tx_guide g ON g.tx_id = t.id
         JOIN tx_token tk ON tk.id = g.token_id
@@ -122,8 +123,8 @@ BEGIN
 
         -- Fallback: if no interesting token found, take any token
         IF v_token_id IS NULL THEN
-            SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.decimals
-            INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_decimals
+            SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+            INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
             FROM tx t
             JOIN tx_guide g ON g.tx_id = t.id
             JOIN tx_token tk ON tk.id = g.token_id
@@ -238,42 +239,45 @@ BEGIN
         VALUES (v_tx_id, v_signature, v_block_time, 0);
 
         -- Previous 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
+        -- Inner query uses idx_token_cover (token_id, block_time, tx_id) as covering index
+        -- Outer join fetches signature from tx only for the 5 results
         SET @sql_prev = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
-            SELECT t.id, t.signature, t.block_time,
+            SELECT sub.tx_id, t.signature, sub.block_time,
                    -1 * (@prev_row := @prev_row + 1)
             FROM (SELECT @prev_row := 0) init,
                  (
-                    SELECT DISTINCT t.id, t.signature, g.block_time
+                    SELECT DISTINCT g.tx_id, g.block_time
                     FROM tx_guide g
-                    JOIN tx t ON t.id = g.tx_id
                     WHERE g.token_id = ', v_token_id, '
-                      AND g.block_time < ', v_block_time, '
-                    ORDER BY g.block_time DESC
+                      AND (g.block_time, g.tx_id) < (', v_block_time, ', ', v_tx_id, ')
+                    ORDER BY g.block_time DESC, g.tx_id DESC
                     LIMIT 5
-                 ) t
-            ORDER BY t.block_time DESC
+                 ) sub
+            JOIN tx t ON t.id = sub.tx_id
+            ORDER BY sub.block_time DESC, sub.tx_id DESC
         ');
         PREPARE stmt_prev FROM @sql_prev;
         EXECUTE stmt_prev;
         DEALLOCATE PREPARE stmt_prev;
 
         -- Next 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
+        -- Inner query uses idx_token_cover (token_id, block_time, tx_id) as covering index
         SET @sql_next = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
-            SELECT t.id, t.signature, t.block_time,
+            SELECT sub.tx_id, t.signature, sub.block_time,
                    @next_row := @next_row + 1
             FROM (SELECT @next_row := 0) init,
                  (
-                    SELECT DISTINCT t.id, t.signature, g.block_time
+                    SELECT DISTINCT g.tx_id, g.block_time
                     FROM tx_guide g
-                    JOIN tx t ON t.id = g.tx_id
                     WHERE g.token_id = ', v_token_id, '
-                      AND g.block_time > ', v_block_time, '
-                    ORDER BY g.block_time ASC
+                      AND (g.block_time, g.tx_id) > (', v_block_time, ', ', v_tx_id, ')
+                    ORDER BY g.block_time ASC, g.tx_id ASC
                     LIMIT 5
-                 ) t
-            ORDER BY t.block_time ASC
+                 ) sub
+            JOIN tx t ON t.id = sub.tx_id
+            ORDER BY sub.block_time ASC, sub.tx_id ASC
         ');
         PREPARE stmt_next FROM @sql_next;
         EXECUTE stmt_next;
@@ -315,7 +319,7 @@ BEGIN
             ) AS nav_data
             FROM tmp_window w
             WHERE w.window_pos < 0
-            ORDER BY w.block_time DESC
+            ORDER BY w.block_time DESC, w.tx_id DESC
         ) nav_outer;
 
         -- Next 5 with edge_types
@@ -338,7 +342,7 @@ BEGIN
             ) AS nav_data
             FROM tmp_window w
             WHERE w.window_pos > 0
-            ORDER BY w.block_time ASC
+            ORDER BY w.block_time ASC, w.tx_id ASC
         ) nav_outer;
 
         -- Current frame edge_types
@@ -771,6 +775,7 @@ BEGIN
                 'mint', mint_addr.address,
                 'symbol', COALESCE(tk.token_symbol, 'Unknown'),
                 'name', tk.token_name,
+                'token_type', tk.token_type,
                 'swap_count', COUNT(DISTINCT g.tx_id),
                 'total_volume', ROUND(SUM(g.amount / POW(10, COALESCE(g.decimals, 9))), 6)
             ) AS related_data
@@ -782,7 +787,7 @@ BEGIN
             WHERE g.token_id IS NOT NULL
               AND g.token_id != v_token_id
               AND gt.type_code IN ('swap_in', 'swap_out')
-            GROUP BY tk.id, mint_addr.address, tk.token_symbol, tk.token_name
+            GROUP BY tk.id, mint_addr.address, tk.token_symbol, tk.token_name, tk.token_type
             ORDER BY COUNT(DISTINCT g.tx_id) DESC, SUM(g.amount) DESC
             LIMIT 20
         ) related_outer;
@@ -796,7 +801,8 @@ BEGIN
             'result', JSON_OBJECT(
                 'token', JSON_OBJECT(
                     'mint', v_mint_address,
-                    'symbol', v_token_symbol
+                    'symbol', v_token_symbol,
+                    'token_type', v_token_type
                 ),
                 'txs', JSON_OBJECT(
                     'signature', v_signature,

@@ -1,0 +1,3334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMap Token State Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;600;700&display=swap" rel="stylesheet">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0f3460;
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 2800px; margin: 0 auto; }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: var(--accent);
+        }
+
+        /* Query Form */
+        .query-form {
+            background: var(--bg-card);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group label { color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+
+        .form-group input {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus { outline: none; border-color: var(--accent); }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Edge Type Badges */
+        .edge-types {
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .edge-type {
+            background: var(--accent);
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 11px;
+        }
+
+        /* Swap category - green/red */
+        .edge-type.swap_in { background: #22c55e; }
+        .edge-type.swap_out { background: #ef4444; }
+        /* Transfer category - blue */
+        .edge-type.spl_transfer { background: #3b82f6; }
+        .edge-type.sol_transfer { background: #60a5fa; }
+        .edge-type.wallet_funded { background: #a855f7; }
+        .edge-type.funded_by { background: #a855f7; }
+        /* Account category - cyan */
+        .edge-type.create_ata { background: #06b6d4; }
+        .edge-type.close_ata { background: #0891b2; }
+        /* Fee category - gray */
+        .edge-type.fee { background: #6b7280; }
+        .edge-type.priority_fee { background: #4b5563; }
+        .edge-type.protocol_fee { background: #9ca3af; }
+        /* Lending category - orange */
+        .edge-type.lend_deposit { background: #f97316; }
+        .edge-type.lend_withdraw { background: #ea580c; }
+        .edge-type.borrow { background: #fb923c; }
+        .edge-type.repay { background: #fdba74; }
+        .edge-type.liquidation { background: #c2410c; }
+        /* Staking category - amber */
+        .edge-type.stake { background: #f59e0b; }
+        .edge-type.unstake { background: #d97706; }
+        .edge-type.stake_reward { background: #fbbf24; }
+        /* Liquidity category - teal */
+        .edge-type.add_liquidity { background: #14b8a6; }
+        .edge-type.remove_liquidity { background: #0d9488; }
+        .edge-type.farm_deposit { background: #2dd4bf; }
+        .edge-type.farm_withdraw { background: #5eead4; }
+        .edge-type.lp_reward { background: #99f6e4; color: #0f172a; }
+        /* Bridge category - indigo */
+        .edge-type.bridge_in { background: #6366f1; }
+        .edge-type.bridge_out { background: #818cf8; }
+        /* Perp category - rose */
+        .edge-type.perp_open { background: #f43f5e; }
+        .edge-type.perp_close { background: #fb7185; }
+        .edge-type.perp_deposit { background: #e11d48; }
+        .edge-type.perp_withdraw { background: #be123c; }
+        .edge-type.margin_deposit { background: #fda4af; }
+        .edge-type.margin_withdraw { background: #fecdd3; color: #0f172a; }
+        .edge-type.margin_call { background: #9f1239; }
+        .edge-type.perp_liquidation { background: #881337; }
+        .edge-type.funding_payment { background: #fecaca; color: #0f172a; }
+        .edge-type.pnl_settlement { background: #fca5a5; color: #0f172a; }
+        /* NFT category - pink */
+        .edge-type.nft_mint { background: #ec4899; }
+        .edge-type.nft_sale { background: #f472b6; }
+        .edge-type.nft_transfer { background: #f9a8d4; color: #0f172a; }
+        /* Other category - slate */
+        .edge-type.mint { background: #22d3ee; }
+        .edge-type.burn { background: #ff6b6b; }
+        .edge-type.airdrop { background: #a78bfa; }
+        .edge-type.unknown { background: #475569; }
+
+        /* Token Info */
+        .token-info {
+            background: var(--bg-card);
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+
+        .token-info .symbol { font-size: 24px; font-weight: bold; color: var(--accent); }
+        .token-info .mint { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+
+        /* Data Grid */
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) { .data-grid { grid-template-columns: 1fr; } }
+
+        .data-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .data-section h3 {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .data-content {
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        /* Nodes */
+        .node {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .node .address {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            word-break: break-all;
+        }
+
+        .node .label { color: var(--text-secondary); font-size: 12px; margin-top: 5px; }
+
+        .node .stats {
+            display: flex;
+            gap: 15px;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+
+        .node .stat-value { color: var(--success); font-weight: bold; }
+
+        /* Edges */
+        .edge {
+            background: var(--bg-input);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .edge .flow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .edge .addr {
+            font-family: monospace;
+            font-size: 10px;
+            color: var(--accent);
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .edge .arrow { color: var(--warning); font-size: 16px; }
+        .edge .amount { color: var(--success); font-weight: bold; }
+
+        .edge .meta {
+            display: flex;
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+
+        /* Error */
+        .error {
+            background: #7f1d1d;
+            color: #fca5a5;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .loading::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+        /* Bubble Map */
+        .bubble-map-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .bubble-map-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .bubble-map-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+        }
+
+        .bubble-map-controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        .bubble-map-controls button {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .bubble-map-controls button:hover {
+            border-color: var(--accent);
+        }
+
+        #bubble-map {
+            width: 100%;
+            height: 1000px;
+            background: radial-gradient(ellipse at center, #1a1a2e 0%, #0d0d1a 100%);
+        }
+
+        #bubble-map svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .node-circle {
+            cursor: pointer;
+            transition: stroke-width 0.2s;
+        }
+
+        .node-circle:hover {
+            stroke-width: 3px;
+        }
+
+        .node-label {
+            font-size: 10px;
+            fill: var(--text-secondary);
+            pointer-events: none;
+            text-anchor: middle;
+        }
+
+        .edge-line {
+            stroke-opacity: 0.6;
+            fill: none;
+        }
+
+        .edge-arrow {
+            fill: var(--text-secondary);
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 300px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+
+        .tooltip .address {
+            font-family: monospace;
+            color: var(--accent);
+            word-break: break-all;
+            margin-bottom: 8px;
+        }
+
+        .tooltip .stats {
+            color: var(--text-secondary);
+        }
+
+        .tooltip .stats span {
+            color: var(--success);
+        }
+
+        .legend {
+            display: flex;
+            gap: 15px;
+            padding: 10px 20px;
+            background: var(--bg-input);
+            font-size: 11px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        /* Timeline Slider */
+        .timeline-container {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .timeline-header h3 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+            color: var(--text-secondary);
+        }
+
+        .timeline-stats {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .timeline-stats span {
+            color: var(--accent);
+        }
+
+        .timeline-slider-wrap {
+            position: relative;
+            padding: 10px 0;
+        }
+
+        .timeline-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .timeline-slider {
+            width: 100%;
+            height: 8px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: var(--bg-input);
+            border-radius: 4px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .timeline-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            transition: transform 0.1s;
+        }
+
+        .timeline-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .timeline-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+
+        .timeline-current {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        .timeline-current .time {
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        .timeline-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .timeline-buttons button {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .timeline-buttons button:hover {
+            border-color: var(--accent);
+            background: var(--bg-card);
+        }
+
+        .timeline-buttons button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Compact Current TX Bar */
+        .current-tx-bar {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .current-tx-bar .sig-section {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .current-tx-bar .signature {
+            font-family: monospace;
+            font-size: 11px;
+            color: var(--accent);
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .current-tx-bar .time {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        /* Collapsible Section */
+        .collapsible-section {
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .collapsible-header {
+            background: var(--bg-input);
+            padding: 12px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }
+
+        .collapsible-header:hover {
+            background: #1a4a7a;
+        }
+
+        .collapsible-header h3 {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .collapsible-header .toggle-icon {
+            transition: transform 0.3s;
+            font-size: 12px;
+        }
+
+        .collapsible-header.collapsed .toggle-icon {
+            transform: rotate(-90deg);
+        }
+
+        .collapsible-content {
+            padding: 15px 20px;
+            display: block;
+        }
+
+        .collapsible-content.collapsed {
+            display: none;
+        }
+
+        .nav-compact {
+            display: flex;
+            gap: 20px;
+        }
+
+        .nav-compact .nav-list {
+            flex: 1;
+        }
+
+        .nav-compact .nav-list h4 {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .nav-compact .nav-item {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            border-radius: 5px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .nav-compact .nav-item:hover {
+            border-color: var(--accent);
+        }
+
+        /* Funder Filter Panel */
+        .funder-panel { background: var(--bg-input); border-radius: 8px; padding: 12px; margin: 10px; max-height: 300px; overflow-y: auto; }
+        .funder-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        .funder-panel-header h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin: 0; }
+        .funder-clear-btn { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .funder-clear-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .funder-clear-btn.hidden { display: none; }
+        .funder-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 6px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+        .funder-item:hover { border-color: var(--accent); background: rgba(233, 69, 96, 0.1); }
+        .funder-item.active { border-color: var(--accent); background: rgba(233, 69, 96, 0.2); }
+        .funder-dot { width: 10px; height: 10px; border-radius: 50%; background: #a855f7; flex-shrink: 0; }
+        .funder-address { font-family: monospace; font-size: 11px; color: var(--accent); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .funder-count { background: var(--bg-input); padding: 2px 8px; border-radius: 10px; font-size: 10px; color: var(--text-secondary); }
+        .funder-empty { color: var(--text-secondary); font-size: 12px; text-align: center; padding: 20px; }
+        .bubble-map-layout { display: flex; gap: 0; }
+        .bubble-map-main { flex: 1; min-width: 0; }
+        .bubble-map-sidebar { width: 280px; flex-shrink: 0; background: var(--bg-card); border-left: 1px solid var(--border); }
+        @media (max-width: 900px) { .bubble-map-layout { flex-direction: column; } .bubble-map-sidebar { width: 100%; border-left: none; border-top: 1px solid var(--border); } }
+        .filter-active-badge { background: var(--accent); color: white; padding: 2px 8px; border-radius: 10px; font-size: 10px; margin-left: 10px; }
+
+        /* TX Flow Solscan-style Layout */
+        .tx-flow-container { display: flex; height: 100%; min-height: 600px; }
+        .tx-flow-diagram { flex: 1; min-width: 0; position: relative; overflow: hidden; }
+        .tx-flow-actions { width: 380px; flex-shrink: 0; background: #fff; border-left: 1px solid #e5e7eb; overflow-y: auto; padding: 20px; color: #1f2937; }
+        @media (max-width: 1000px) { .tx-flow-container { flex-direction: column; } .tx-flow-actions { width: 100%; border-left: none; border-top: 1px solid #e5e7eb; max-height: 400px; } }
+
+        .tx-flow-actions h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: #111827; }
+        .tx-flow-actions .info-row { margin-bottom: 12px; }
+        .tx-flow-actions .info-label { font-size: 12px; font-weight: 500; color: #6b7280; margin-bottom: 2px; display: block; }
+        .tx-flow-actions .info-value { font-size: 13px; color: #111827; word-break: break-all; }
+        .tx-flow-actions .info-value a { color: #3b82f6; text-decoration: none; }
+        .tx-flow-actions .info-value a:hover { text-decoration: underline; }
+        .tx-flow-actions .info-value.mono { font-family: monospace; font-size: 11px; }
+
+        .tx-flow-actions .status-badge { display: inline-flex; align-items: center; gap: 4px; background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+        .tx-flow-actions .status-badge::before { content: ''; width: 6px; height: 6px; background: #22c55e; border-radius: 50%; }
+
+        .tx-flow-actions .tx-actions-header { font-size: 14px; font-weight: 600; color: #111827; margin: 20px 0 12px; padding-top: 16px; border-top: 1px solid #e5e7eb; }
+        .tx-flow-actions .instruction-group { margin-bottom: 16px; }
+        .tx-flow-actions .instruction-header { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #4b5563; margin-bottom: 8px; flex-wrap: wrap; }
+        .tx-flow-actions .instruction-badge { background: #f3f4f6; color: #374151; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 10px; }
+        .tx-flow-actions .program-link { color: #3b82f6; text-decoration: none; display: inline-flex; align-items: center; gap: 2px; }
+        .tx-flow-actions .program-link:hover { text-decoration: underline; }
+
+        .tx-flow-actions .action-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; font-size: 12px; line-height: 1.5; }
+        .tx-flow-actions .action-icon { width: 16px; height: 16px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; margin-top: 2px; }
+        .tx-flow-actions .action-icon.create { color: #3b82f6; }
+        .tx-flow-actions .action-icon.transfer { color: #8b5cf6; }
+        .tx-flow-actions .action-icon.close { color: #ef4444; }
+        .tx-flow-actions .action-text { flex: 1; color: #374151; }
+        .tx-flow-actions .action-text .addr { color: #3b82f6; cursor: pointer; }
+        .tx-flow-actions .action-text .addr:hover { text-decoration: underline; }
+        .tx-flow-actions .action-text .amount { color: #111827; font-weight: 500; }
+        .tx-flow-actions .action-text .usd { color: #6b7280; font-size: 11px; }
+        .tx-flow-actions .action-text .token { display: inline-flex; align-items: center; gap: 3px; background: #f3f4f6; padding: 1px 6px; border-radius: 10px; font-size: 11px; }
+        .tx-flow-actions .action-text .token-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+        .tx-flow-actions .copy-btn { background: none; border: none; cursor: pointer; padding: 2px; color: #9ca3af; font-size: 12px; }
+        .tx-flow-actions .copy-btn:hover { color: #3b82f6; }
+
+        .copy-addr { background: none; border: none; cursor: pointer; padding: 1px 4px; color: var(--text-secondary); font-size: 11px; opacity: 0.6; transition: opacity 0.2s, color 0.2s; vertical-align: middle; }
+        .copy-addr:hover { opacity: 1; color: var(--accent); }
+        .copy-addr.copied { color: var(--success); opacity: 1; }
+
+        /* Main Layout with Left Sidebar */
+        .main-layout { display: flex; gap: 15px; }
+        .left-sidebar { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 15px; }
+        .main-content { flex: 1; min-width: 0; }
+        @media (max-width: 1100px) { .main-layout { flex-direction: column; } .left-sidebar { width: 100%; } }
+        
+        /* Compact Query Form for Sidebar */
+        .query-form-compact { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .query-form-compact .form-group { margin-bottom: 10px; }
+        .query-form-compact .form-group:last-child { margin-bottom: 0; }
+        .query-form-compact input, .query-form-compact select { width: 100%; padding: 8px 10px; font-size: 12px; }
+        .query-form-compact .btn { width: 100%; padding: 10px; font-size: 12px; }
+        
+        /* Token Info Sidebar Card */
+        .token-sidebar { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .token-sidebar .symbol { font-size: 20px; font-weight: bold; color: var(--accent); margin-bottom: 8px; }
+        .token-sidebar .info-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+        .token-sidebar .info-row:last-child { border-bottom: none; }
+        .token-sidebar .info-label { color: var(--text-secondary); }
+        .token-sidebar .info-value { color: var(--text-primary); font-family: monospace; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+        .token-sidebar .symbol-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .token-type-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: bold; letter-spacing: 0.5px; color: #fff; }
+        .token-type-badge.ft { background: #22c55e; }
+        .token-type-badge.sft { background: #f59e0b; }
+        .token-type-badge.nft { background: #a855f7; }
+        .token-type-badge.unknown { background: #6b7280; }
+        .token-type-badge.sm { font-size: 8px; padding: 0px 4px; }
+
+        /* Current TX Sidebar Card */
+        .tx-sidebar { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .tx-sidebar h4 { font-size: 11px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 10px; }
+        .tx-sidebar .sig { font-family: monospace; font-size: 10px; color: var(--accent); word-break: break-all; margin-bottom: 8px; }
+        .tx-sidebar .time { font-size: 11px; color: var(--text-secondary); }
+
+        /* Related Tokens */
+        .related-tokens { background: var(--bg-card); padding: 15px; border-radius: 10px; }
+        .related-tokens h4 { font-size: 11px; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 10px; }
+        .related-token-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
+        .related-token-item:last-child { border-bottom: none; }
+        .related-token-item:hover { background: rgba(255,255,255,0.05); margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 4px; }
+        .related-token-item .token-info { display: flex; flex-direction: column; gap: 2px; }
+        .related-token-item .token-symbol { font-weight: bold; color: var(--accent); font-size: 12px; }
+        .related-token-item .token-name { font-size: 10px; color: var(--text-secondary); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .related-token-item .token-stats { text-align: right; font-size: 10px; color: var(--text-secondary); }
+        .related-token-item .swap-count { color: #22c55e; font-weight: 500; }
+        
+        /* Fetch Status Toast */
+        .fetch-toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg-card); border: 1px solid var(--accent); padding: 15px 20px; border-radius: 8px; z-index: 2000; display: none; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        .fetch-toast.show { display: block; }
+        .fetch-toast.success { border-color: var(--success); }
+        .fetch-toast.error { border-color: #ef4444; }
+
+        /* AI Explanation Panel */
+        .explain-checkbox { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+        .explain-checkbox input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+        .explain-checkbox label { font-size: 12px; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+        .explain-checkbox .ai-badge { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+
+        .explanation-panel { background: #fafafa; border-radius: 10px; margin-bottom: 20px; overflow: hidden; border: 1px solid #e0e0e0; font-family: 'Raleway', sans-serif; }
+        .explanation-header { background: #f0f0f0; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e0e0e0; }
+        .explanation-header h3 { font-size: 13px; margin: 0; color: #444; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+        .explanation-header .model-badge { background: #e0e0e0; color: #666; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
+        .explanation-cost { padding: 8px 20px; background: #f5f5f5; border-bottom: 1px solid #e0e0e0; font-size: 16.5px; color: #888; display: flex; gap: 16px; }
+        .explanation-cost .cost-value { color: #555; font-weight: 600; }
+        .explanation-cost .cost-usd { color: #d97706; font-weight: 600; }
+        .explanation-content { padding: 28px 32px; line-height: 1.75; color: #1a1a1a; font-size: 14px; font-weight: 400; }
+        .explanation-content .section-heading { font-size: 15px; font-weight: 700; color: #111; margin: 24px 0 8px 0; }
+        .explanation-content .section-heading:first-child { margin-top: 0; }
+        .explanation-content .section-body { margin: 0 0 0 32px; margin-bottom: 4px; }
+        .explanation-loading { padding: 30px; text-align: center; color: #888; background: #fafafa; }
+        .explanation-loading::after { content: ''; animation: dots 1.5s infinite; }
+        .explanation-error { padding: 20px; color: #dc2626; background: #fef2f2; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 style="margin-bottom: 15px;">BMap Token State Viewer</h1>
+        
+        <div class="main-layout">
+            <!-- Left Sidebar -->
+            <div class="left-sidebar">
+                <!-- Query Form -->
+                <div class="query-form-compact">
+                    <div class="form-group">
+                        <label>Token Symbol</label>
+                        <input type="text" id="token_symbol" placeholder="e.g. BONK">
+                    </div>
+                    <div class="form-group">
+                        <label>Mint Address</label>
+                        <input type="text" id="mint_address" placeholder="Mint address...">
+                    </div>
+                    <div class="form-group">
+                        <label>TX Signature</label>
+                        <input type="text" id="signature" placeholder="Paste signature..." style="font-family: monospace; font-size: 10px;">
+                    </div>
+                    <div class="form-group">
+                        <label>TX Window</label>
+                        <select id="tx_limit" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); padding: 8px 10px; border-radius: 5px; font-size: 12px; width: 100%;">
+                            <option value="flow">TX Flow</option>
+                            <option value="1">Single TX</option>
+                            <option value="10" selected>10 (5+5)</option>
+                            <option value="20">20 (10+10)</option>
+                            <option value="50">50 (25+25)</option>
+                            <option value="100">100 (50+50)</option>
+                        </select>
+                    </div>
+                    <input type="hidden" id="token_name">
+                    <input type="hidden" id="block_time">
+                    <div class="explain-checkbox">
+                        <input type="checkbox" id="enable_explain">
+                        <label for="enable_explain">
+                            <span class="ai-badge">AI</span> Explain Transaction
+                        </label>
+                    </div>
+                    <button class="btn" onclick="fetchData()">Load Token</button>
+                </div>
+                
+                <!-- Token Info (populated dynamically) -->
+                <div id="sidebar-token-info"></div>
+                
+                <!-- Current TX Info (populated dynamically) -->
+                <div id="sidebar-tx-info"></div>
+
+                <!-- Related Tokens (populated dynamically) -->
+                <div id="sidebar-related-tokens"></div>
+            </div>
+            
+            <!-- Main Content -->
+            <div class="main-content">
+                <div id="results"></div>
+            </div>
+        </div>
+        
+        <!-- Fetch Toast -->
+        <div id="fetch-toast" class="fetch-toast"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/bmap';
+        let currentData = null;
+
+        async function fetchData(params = null) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="loading">Loading</div>';
+
+            // Reset timeline if loading fresh (not navigating)
+            const isNavigation = params && (params.signature || params.block_time);
+            if (!isNavigation) {
+                timelineData = { minTime: 0, maxTime: 0, currentTime: 0, txCount: 0 };
+                // Reset filters only on fresh load
+                activeTokenFilters = {};
+                activeCategoryFilters = {
+                    swap: true, transfer: true, account: true, fee: true,
+                    lending: true, staking: true, liquidity: true, bridge: true,
+                    perp: true, nft: true, other: true
+                };
+                showFundedBy = true;
+            }
+
+            // Build query params
+            if (!params) {
+                params = {
+                    token_name: document.getElementById('token_name').value || undefined,
+                    token_symbol: document.getElementById('token_symbol').value || undefined,
+                    mint_address: document.getElementById('mint_address').value || undefined,
+                    signature: document.getElementById('signature').value || undefined,
+                    block_time: document.getElementById('block_time').value || undefined,
+                    tx_limit: document.getElementById('tx_limit').value || undefined
+                };
+
+                // Detect signature-only mode (signature provided, no token identifiers)
+                signatureOnlyMode = !!(params.signature && !params.mint_address && !params.token_symbol && !params.token_name);
+            } else {
+                // Add tx_limit to navigation params
+                params.tx_limit = document.getElementById('tx_limit').value || undefined;
+
+                // Check if this is signature-only navigation
+                if (params.signature && !params.mint_address && !params.token_symbol) {
+                    signatureOnlyMode = true;
+                }
+            }
+
+            // TX Flow mode sends tx_limit=1 to API
+            if (params.tx_limit === 'flow') params.tx_limit = '1';
+
+            // Remove undefined params
+            Object.keys(params).forEach(k => params[k] === undefined && delete params[k]);
+
+            const queryString = new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(`${API_BASE}?${queryString}`);
+                const data = await response.json();
+                currentData = data;
+                renderResults(data);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function navigateTo(signature) {
+            // Update signature input and fetch
+            document.getElementById('signature').value = signature;
+
+            if (signatureOnlyMode) {
+                // Signature-only mode - just pass signature to show all tokens
+                fetchData({ signature });
+            } else {
+                // Normal token navigation - use form values
+                const mintFromForm = document.getElementById('mint_address').value;
+                const symbolFromForm = document.getElementById('token_symbol').value;
+                fetchData({
+                    signature,
+                    mint_address: mintFromForm || undefined,
+                    token_symbol: (!mintFromForm && symbolFromForm) ? symbolFromForm : undefined
+                });
+            }
+        }
+
+        function loadToken(mintAddress) {
+            // Clear other inputs and load new token by mint address
+            document.getElementById('token_symbol').value = '';
+            document.getElementById('token_name').value = '';
+            document.getElementById('mint_address').value = mintAddress;
+            document.getElementById('signature').value = '';
+            document.getElementById('block_time').value = '';
+            fetchData({ mint_address: mintAddress });
+        }
+
+        function renderResults(data) {
+            const resultsDiv = document.getElementById('results');
+
+            if (data.result?.error) {
+                resultsDiv.innerHTML = `<div class="error">${data.result.error}</div>`;
+                return;
+            }
+
+            const { txs, token, nodes, edges } = data.result;
+
+            // Populate mint_address field if we have it (for consistent navigation)
+            // But NOT in signature-only mode (we want to keep showing all tokens)
+            if (token?.mint && !signatureOnlyMode && !document.getElementById('mint_address').value) {
+                document.getElementById('mint_address').value = token.mint;
+            }
+
+            // Update sidebar token info
+            const sidebarToken = document.getElementById('sidebar-token-info');
+            if (sidebarToken && token) {
+                sidebarToken.innerHTML = `
+                    <div class="token-sidebar">
+                        <div class="symbol-row">
+                            <div class="symbol">${token.symbol || 'Unknown'}</div>
+                            ${tokenTypeBadge(token.token_type)}
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Mint</span>
+                            <span class="info-value" title="${token.mint}">${token.mint.slice(0,8)}...${token.mint.slice(-6)}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Holders</span>
+                            <span class="info-value">${(nodes || []).length}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Edges</span>
+                            <span class="info-value">${(edges || []).length}</span>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Update sidebar TX info
+            const sidebarTx = document.getElementById('sidebar-tx-info');
+            if (sidebarTx && txs) {
+                sidebarTx.innerHTML = `
+                    <div class="tx-sidebar">
+                        <h4>Current Transaction</h4>
+                        <div class="sig">${txs.signature}</div>
+                        <div class="time">${txs.block_time_utc}</div>
+                        <div class="edge-types" style="margin-top: 8px; justify-content: flex-start;">
+                            ${(txs.edge_types || []).map(t =>
+                                `<span class="edge-type ${t}">${t}</span>`
+                            ).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Update related tokens
+            const relatedTokens = data.result.related_tokens || [];
+            const sidebarRelated = document.getElementById('sidebar-related-tokens');
+            if (sidebarRelated) {
+                if (relatedTokens.length > 0) {
+                    sidebarRelated.innerHTML = `
+                        <div class="related-tokens">
+                            <h4>Tokens in Transactions</h4>
+                            ${relatedTokens.map(rt => `
+                                <div class="related-token-item" onclick="loadToken('${rt.mint}')" title="Click to view ${rt.symbol}">
+                                    <div class="token-info">
+                                        <span class="token-symbol">${rt.symbol || 'Unknown'} ${tokenTypeBadge(rt.token_type, true)}</span>
+                                        <span class="token-name">${rt.name || rt.mint.slice(0,12) + '...'}</span>
+                                    </div>
+                                    <div class="token-stats">
+                                        <span class="swap-count">${rt.swap_count} swaps</span>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    `;
+                } else {
+                    sidebarRelated.innerHTML = '';
+                }
+            }
+
+            let html = '';
+
+            // AI Explanation Panel (placeholder - populated async)
+            html += `<div id="explanation-container"></div>`;
+
+            // Timeline Slider (visible if we have timeline data)
+            const timelineVisible = timelineData.minTime > 0 ? 'block' : 'none';
+            html += `
+                <div class="timeline-container" id="timeline-section" style="display: ${timelineVisible};">
+                    <div class="timeline-header">
+                        <h3>Timeline</h3>
+                        <div class="timeline-stats">
+                            <span id="timeline-tx-count">0</span> transactions
+                        </div>
+                    </div>
+                    <div class="timeline-slider-wrap">
+                        <div class="timeline-labels">
+                            <span id="timeline-min-label">--</span>
+                            <span id="timeline-max-label">--</span>
+                        </div>
+                        <input type="range" class="timeline-slider" id="timeline-slider"
+                            min="0" max="100" value="50">
+                    </div>
+                    <div class="timeline-current">
+                        Current: <span class="time" id="timeline-current-time">--</span>
+                    </div>
+                    <div class="timeline-buttons">
+                        <button onclick="timelineJump('start')">⏮ First</button>
+                        <button onclick="timelineStep(-1)">◀ Prev</button>
+                        <button onclick="timelineStep(1)">Next ▶</button>
+                        <button onclick="timelineJump('end')">Last ⏭</button>
+                    </div>
+                </div>
+            `;
+
+            // Bubble Map with Funder Sidebar
+            html += `
+                <div class="bubble-map-container">
+                    <div class="bubble-map-header">
+                        <h3>Bubble Map<span id="filter-badge" class="filter-active-badge" style="display:none;">Filtered</span></h3>
+                        <div class="bubble-map-controls">
+                            <div class="edge-type-filters" style="display: flex; gap: 8px; margin-right: 15px; flex-wrap: wrap;">
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-swap" ${activeCategoryFilters.swap ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type swap_in">swap</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-transfer" ${activeCategoryFilters.transfer ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type spl_transfer">transfer</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-account" ${activeCategoryFilters.account ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type create_ata">account</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-lending" ${activeCategoryFilters.lending ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type lend_deposit">lending</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-staking" ${activeCategoryFilters.staking ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type stake">staking</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-liquidity" ${activeCategoryFilters.liquidity ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type add_liquidity">liquidity</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-cat-other" ${activeCategoryFilters.other ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type burn">other</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px;">
+                                    <input type="checkbox" id="filter-funded_by" ${showFundedBy ? 'checked' : ''} onchange="applyEdgeFilters()">
+                                    <span class="edge-type funded_by">funders</span>
+                                </label>
+                            </div>
+                            <button onclick="resetZoom()">Reset Zoom</button>
+                            <button onclick="toggleLabels()">Toggle Labels</button>
+                        </div>
+                    </div>
+                    <div class="bubble-map-layout">
+                        <div class="bubble-map-main">
+                            <div id="bubble-map"></div>
+                        </div>
+                        <div class="bubble-map-sidebar">
+                            <div class="funder-panel">
+                                <div class="funder-panel-header">
+                                    <h4>Tokens</h4>
+                                    <button class="funder-clear-btn hidden" id="token-clear-btn" onclick="clearTokenFilter()">Clear</button>
+                                </div>
+                                <div id="token-filter-list"></div>
+                            </div>
+                            <div class="funder-panel" style="margin-top: 10px;">
+                                <div class="funder-panel-header">
+                                    <h4>Funders</h4>
+                                    <button class="funder-clear-btn hidden" id="funder-clear-btn" onclick="clearFunderFilter()">Clear</button>
+                                </div>
+                                <div id="funder-list"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item"><div class="legend-dot" style="background: #e94560;"></div> High Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #3b82f6;"></div> Medium Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #22c55e;"></div> Low Balance</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #666;"></div> Zero/Sold (Pools, ATAs)</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #a855f7;"></div> Funded By Link</div>
+                    </div>
+                </div>
+            `;
+
+            // Collapsible Prev/Next Navigation
+            if (txs) {
+                const prevCount = (txs.prev || []).length;
+                const nextCount = (txs.next || []).length;
+                html += `
+                    <div class="collapsible-section">
+                        <div class="collapsible-header collapsed" onclick="toggleCollapsible(this)">
+                            <h3>
+                                <span class="toggle-icon">▼</span>
+                                Transaction Navigation
+                                <span style="font-weight: normal; color: var(--text-secondary);">(${prevCount} prev / ${nextCount} next)</span>
+                            </h3>
+                        </div>
+                        <div class="collapsible-content collapsed">
+                            <div class="nav-compact">
+                                <div class="nav-list">
+                                    <h4>← Previous (${prevCount})</h4>
+                                    ${(txs.prev || []).map(p => `
+                                        <div class="nav-item" onclick="navigateTo('${p.signature}')">
+                                            <div class="sig" style="font-family: monospace; color: var(--accent);">${p.signature.slice(0, 20)}...</div>
+                                            <div class="time" style="color: var(--text-secondary); font-size: 10px;">${p.block_time_utc}</div>
+                                            <div class="edge-types" style="justify-content: flex-start; margin-top: 4px;">
+                                                ${(p.edge_types || []).map(t =>
+                                                    `<span class="edge-type ${t}">${t}</span>`
+                                                ).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                    ${prevCount === 0 ? '<div style="color: var(--text-secondary); font-size: 12px;">No previous transactions</div>' : ''}
+                                </div>
+                                <div class="nav-list">
+                                    <h4>Next → (${nextCount})</h4>
+                                    ${(txs.next || []).map(n => `
+                                        <div class="nav-item" onclick="navigateTo('${n.signature}')">
+                                            <div class="sig" style="font-family: monospace; color: var(--accent);">${n.signature.slice(0, 20)}...</div>
+                                            <div class="time" style="color: var(--text-secondary); font-size: 10px;">${n.block_time_utc}</div>
+                                            <div class="edge-types" style="justify-content: flex-start; margin-top: 4px;">
+                                                ${(n.edge_types || []).map(t =>
+                                                    `<span class="edge-type ${t}">${t}</span>`
+                                                ).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                    ${nextCount === 0 ? '<div style="color: var(--text-secondary); font-size: 12px;">No next transactions</div>' : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Data Grid
+            html += '<div class="data-grid">';
+
+            // Nodes
+            html += `
+                <div class="data-section">
+                    <h3>Nodes (${(nodes || []).length} holders)</h3>
+                    <div class="data-content">
+                        ${(nodes || []).map(n => `
+                            <div class="node">
+                                <div class="address">${n.address} <button class="copy-addr" onclick="copyAddr('${n.address}', this)" title="Copy address">\u{1F4CB}</button></div>
+                                <div class="label">${(n.address_type === 'mint' && n.token_name) ? n.token_name : (n.label || 'Unknown')}${n.pool_label ? ` - ${n.pool_label}` : ''}${(n.address_type !== 'mint' && n.token_name) ? ` - ${n.token_name}` : ''}</div>
+                                <div class="stats">
+                                    <span>Balance: <span class="stat-value">${formatNumber(n.balance)}</span></span>
+                                    <span>SOL: <span class="stat-value">${n.sol_balance?.toFixed(4) || '0'}</span></span>
+                                </div>
+                                ${n.funded_by ? `<div class="label" style="margin-top: 5px;">Funded by: ${n.funded_by.slice(0, 8)}...${n.funded_by.slice(-4)} <button class="copy-addr" onclick="copyAddr('${n.funded_by}', this)" title="Copy funder address">\u{1F4CB}</button></div>` : ''}
+                                ${n.interactions && (n.interactions.dexes?.length || n.interactions.pools?.length || n.interactions.programs?.length) ? `
+                                <div style="margin-top: 6px; font-size: 11px; color: var(--text-secondary);">
+                                    ${n.interactions.dexes?.length ? `<div>DEXes: <span style="color: var(--warning);">${n.interactions.dexes.join(', ')}</span></div>` : ''}
+                                    ${n.interactions.pools?.length ? `<div>Pools: <span style="color: var(--accent);">${n.interactions.pools.map(p => p.label || p.address?.slice(0,8)).join(', ')}</span></div>` : ''}
+                                    ${n.interactions.programs?.length ? `<div>Programs: <span style="color: #3b82f6;">${n.interactions.programs.map(p => p.slice(0,8) + '...').join(', ')}</span></div>` : ''}
+                                </div>` : ''}
+                            </div>
+                        `).join('')}
+                        ${(nodes || []).length === 0 ? '<div style="color: var(--text-secondary);">No nodes</div>' : ''}
+                    </div>
+                </div>
+            `;
+
+            // Edges
+            html += `
+                <div class="data-section">
+                    <h3>Edges (${(edges || []).length} transfers)</h3>
+                    <div class="data-content">
+                        ${(edges || []).map(e => `
+                            <div class="edge">
+                                <div class="flow">
+                                    <span class="addr" title="${e.source}">${e.source.slice(0, 12)}...</span>
+                                    <span class="arrow">→</span>
+                                    <span class="addr" title="${e.target}">${e.target.slice(0, 12)}...</span>
+                                    <span class="amount">${formatNumber(e.amount)}</span>
+                                    <span class="edge-type ${e.type}">${e.type}</span>
+                                    ${e.dex ? `<span style="color: var(--warning); font-size: 10px;">${e.dex}</span>` : ''}
+                                </div>
+                                <div class="meta">
+                                    <span>${e.block_time_utc}</span>
+                                    <span title="${e.signature}">${e.signature.slice(0, 16)}...</span>
+                                    ${e.ins_index !== null ? `<span style="color: var(--text-secondary);">#${e.ins_index}</span>` : ''}
+                                </div>
+                                ${e.pool_label ? `
+                                <div class="meta" style="margin-top: 4px;">
+                                    <span style="color: var(--warning);">${e.pool_label}</span>
+                                </div>
+                                ` : ''}
+                            </div>
+                        `).join('')}
+                        ${(edges || []).length === 0 ? '<div style="color: var(--text-secondary);">No edges</div>' : ''}
+                    </div>
+                </div>
+            `;
+
+            html += '</div>';
+
+            resultsDiv.innerHTML = html;
+
+            // Fetch AI explanation if checkbox is enabled (after DOM is ready)
+            if (document.getElementById('enable_explain').checked && txs?.signature) {
+                fetchExplanation(txs.signature);
+            }
+
+            // Store nodes/edges and render appropriate view
+            allNodes = nodes;
+            allEdges = edges;
+            const viewMode = document.getElementById('tx_limit').value;
+            setTimeout(() => {
+                if (viewMode === 'flow') {
+                    renderTxFlow(nodes, edges);
+                } else {
+                    renderBubbleMap(nodes, edges);
+                }
+                renderTokenFilterList(edges);
+                renderFunderList(nodes);
+                // Apply existing filters if any are set (preserves selections during navigation)
+                const hasTokenFilters = Object.values(activeTokenFilters).some(v => v === false);
+                const hasCategoryFilters = Object.values(activeCategoryFilters).some(v => v === false);
+                if (hasTokenFilters || hasCategoryFilters || !showFundedBy) {
+                    applyAllFilters();
+                }
+            }, 100);
+
+            // Initialize/update timeline
+            if (token) {
+                if (timelineData.minTime === 0) {
+                    // First load - fetch time range
+                    initTimeline(token);
+                } else {
+                    // Restore timeline UI and update position
+                    restoreTimelineUI();
+                    updateTimelinePosition(txs?.block_time);
+                }
+            }
+        }
+
+        // ================================================================
+        // TX Flow Diagram - Solscan-style visualization
+        // ================================================================
+        function renderTxFlow(nodes, edges) {
+            const container = document.getElementById('bubble-map');
+            if (!container) return;
+            container.innerHTML = '';
+
+            // Get transaction info from currentData
+            const txs = currentData?.result?.txs;
+            const signature = txs?.signature || '';
+            const blockTimeUtc = txs?.block_time_utc || '';
+
+            // Edge type colors
+            const edgeColors = {
+                'swap_in': '#22c55e', 'swap_out': '#ef4444',
+                'spl_transfer': '#3b82f6', 'sol_transfer': '#60a5fa', 'wallet_funded': '#a855f7', 'funded_by': '#a855f7',
+                'create_ata': '#06b6d4', 'close_ata': '#0891b2',
+                'fee': '#6b7280', 'priority_fee': '#4b5563', 'protocol_fee': '#9ca3af',
+                'lend_deposit': '#f97316', 'lend_withdraw': '#ea580c', 'borrow': '#fb923c', 'repay': '#fdba74', 'liquidation': '#c2410c',
+                'stake': '#f59e0b', 'unstake': '#d97706', 'stake_reward': '#fbbf24',
+                'add_liquidity': '#14b8a6', 'remove_liquidity': '#0d9488', 'farm_deposit': '#2dd4bf', 'farm_withdraw': '#5eead4', 'lp_reward': '#99f6e4',
+                'bridge_in': '#6366f1', 'bridge_out': '#818cf8',
+                'perp_open': '#f43f5e', 'perp_close': '#fb7185', 'perp_deposit': '#e11d48', 'perp_withdraw': '#be123c',
+                'margin_deposit': '#fda4af', 'margin_withdraw': '#fecdd3', 'margin_call': '#9f1239', 'perp_liquidation': '#881337',
+                'funding_payment': '#fecaca', 'pnl_settlement': '#fca5a5',
+                'nft_mint': '#ec4899', 'nft_sale': '#f472b6', 'nft_transfer': '#f9a8d4',
+                'mint': '#22d3ee', 'burn': '#ff6b6b', 'airdrop': '#a78bfa', 'unknown': '#475569'
+            };
+
+            // Token colors for visual distinction
+            const tokenColors = {};
+            const colorPalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316'];
+            let colorIdx = 0;
+            function getTokenColor(symbol) {
+                if (!symbol) return '#6b7280';
+                if (symbol === 'SOL' || symbol === 'WSOL') return '#9945FF';
+                if (!tokenColors[symbol]) {
+                    tokenColors[symbol] = colorPalette[colorIdx % colorPalette.length];
+                    colorIdx++;
+                }
+                return tokenColors[symbol];
+            }
+
+            // Build node map
+            const nodeMap = new Map();
+            (nodes || []).forEach(n => nodeMap.set(n.address, n));
+
+            // Filter valid edges and sort by ins_index
+            // Dedup no longer needed — tx_guide enriches transfer rows with swap metadata
+            // instead of creating separate swap rows
+
+            const flowEdges = (edges || [])
+                .filter(e => {
+                    if (!e.source || !e.target) return false;
+                    if (e.source === e.target) return false;
+                    if (e.ins_index === null || e.ins_index === undefined) return false;
+                    if (e.type === 'funded_by') return false;
+                    return true;
+                })
+                .sort((a, b) => a.ins_index - b.ins_index);
+            assignStepLabels(flowEdges);
+            flowEdges.forEach((e, i) => { e.stepNum = i + 1; });
+
+            if (flowEdges.length === 0) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #aaa;">No transaction flow to display</div>';
+                return;
+            }
+
+            // Identify the signer from proc-provided field, fallback to first wallet node
+            let signerAddr = currentData?.result?.txs?.signer || null;
+            if (!signerAddr) {
+                for (const n of (nodes || [])) {
+                    if (n.label === 'wallet' || n.label === 'Token Creator') {
+                        signerAddr = n.address;
+                        break;
+                    }
+                }
+            }
+            if (!signerAddr) signerAddr = flowEdges[0].source;
+
+            // Collect counterparties (unique addresses that are not the signer)
+            const counterparties = [];
+            const cpSet = new Set();
+            flowEdges.forEach(e => {
+                [e.source, e.target].forEach(addr => {
+                    if (addr !== signerAddr && !cpSet.has(addr)) {
+                        cpSet.add(addr);
+                        const firstStep = flowEdges.findIndex(fe => fe.source === addr || fe.target === addr);
+                        counterparties.push({ address: addr, firstStep });
+                    }
+                });
+            });
+            counterparties.sort((a, b) => a.firstStep - b.firstStep);
+
+            // Helper functions
+            const shortAddr = (addr) => addr ? addr.slice(0, 6) + '...' + addr.slice(-4) : '';
+            const getNodeLabel = (addr) => {
+                const n = nodeMap.get(addr);
+                if (!n) return shortAddr(addr);
+                return (n.address_type === 'mint' && n.token_name) ? n.token_name : (n.pool_label || n.label || n.address_type || shortAddr(addr));
+            };
+            // Make copyToClipboard available globally for inline handlers
+            window.copyToClipboard = (text) => {
+                navigator.clipboard.writeText(text).then(() => {
+                    showToast(`Copied ${text.slice(0,8)}...${text.slice(-4)}`, 'success');
+                }).catch(() => {});
+            };
+
+            // Build the split layout HTML
+            container.innerHTML = `
+                <div class="tx-flow-container">
+                    <div class="tx-flow-diagram" id="tx-flow-svg-container"></div>
+                    <div class="tx-flow-actions" id="tx-flow-actions-panel"></div>
+                </div>
+            `;
+
+            const svgContainer = document.getElementById('tx-flow-svg-container');
+            const actionsPanel = document.getElementById('tx-flow-actions-panel');
+
+            // Render the actions panel
+            const signerNode = nodeMap.get(signerAddr);
+            const signerLabel = 'Signer';
+
+            // Group edges by program/dex for instruction grouping
+            const groupedActions = [];
+            let currentGroup = null;
+            flowEdges.forEach(e => {
+                const program = e.dex || e.pool_label || 'Token Program';
+                const instruction = getInstructionName(e.type);
+
+                if (!currentGroup || currentGroup.program !== program) {
+                    currentGroup = { program, instruction, actions: [] };
+                    groupedActions.push(currentGroup);
+                }
+                currentGroup.actions.push(e);
+            });
+
+            function getInstructionName(type) {
+                const names = {
+                    'swap_in': 'Swap', 'swap_out': 'Swap',
+                    'spl_transfer': 'Transfer', 'sol_transfer': 'Transfer',
+                    'create_ata': 'CreateIdempotent', 'close_ata': 'CloseAccount',
+                    'fee': 'Transfer', 'priority_fee': 'Transfer', 'protocol_fee': 'Transfer',
+                    'add_liquidity': 'AddLiquidity', 'remove_liquidity': 'RemoveLiquidity',
+                    'stake': 'Stake', 'unstake': 'Unstake',
+                    'mint': 'MintTo', 'burn': 'Burn'
+                };
+                return names[type] || 'Transfer';
+            }
+
+            function getActionIcon(type) {
+                if (type === 'create_ata') return '<span class="action-icon create">+</span>';
+                if (type === 'close_ata') return '<span class="action-icon close">x</span>';
+                if (type === 'swap_out') return '<span class="action-icon" style="color:#22c55e">buy</span>';
+                if (type === 'swap_in') return '<span class="action-icon" style="color:#ef4444">sell</span>';
+                return '<span class="action-icon transfer">↗</span>';
+            }
+
+            function formatActionText(e) {
+                const fromLabel = getNodeLabel(e.source);
+                const toLabel = getNodeLabel(e.target);
+                const amount = formatNumber(e.amount);
+                const symbol = e.token_symbol || '';
+                const tokenColor = getTokenColor(symbol);
+
+                if (e.type === 'create_ata') {
+                    return `Create <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span> with deposit of <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol || 'SOL'}</span> from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span>`;
+                }
+                if (e.type === 'close_ata') {
+                    return `Close Token Account <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span> and redeem <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol || 'SOL'}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span>`;
+                }
+                if (e.type === 'swap_out') {
+                    return `Buy <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol}</span> from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${fromLabel}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span>`;
+                }
+                if (e.type === 'swap_in') {
+                    return `Sell <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol}</span> from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${toLabel}</span>`;
+                }
+                return `Transfer from <span class="addr" onclick="copyToClipboard('${e.source}')" title="${e.source}">${shortAddr(e.source)}</span> to <span class="addr" onclick="copyToClipboard('${e.target}')" title="${e.target}">${shortAddr(e.target)}</span> for <span class="amount">${amount}</span> <span class="token"><span class="token-dot" style="background:${tokenColor}"></span>${symbol || 'tokens'}</span>`;
+            }
+
+            actionsPanel.innerHTML = `
+                <h2>Transaction Visualization</h2>
+                <div class="info-row">
+                    <span class="info-label">Signature</span>
+                    <span class="info-value mono">${signature} <button class="copy-btn" onclick="navigator.clipboard.writeText('${signature}')">📋</button></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Signer</span>
+                    <span class="info-value"><a href="#" onclick="return false;">${shortAddr(signerAddr)}</a> <button class="copy-btn" onclick="navigator.clipboard.writeText('${signerAddr}')">📋</button></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Time</span>
+                    <span class="info-value">${blockTimeUtc}</span>
+                </div>
+                <div class="info-row">
+                    <span class="status-badge">SUCCESS</span> <span style="color: #22c55e; font-size: 11px; margin-left: 8px;">Finalized</span>
+                </div>
+                <div class="tx-actions-header">Transaction Actions</div>
+                ${groupedActions.map(g => `
+                    <div class="instruction-group">
+                        <div class="instruction-header">
+                            Interact with instruction <span class="instruction-badge">${g.instruction}</span> on <span class="program-link">${g.program}</span>
+                        </div>
+                        ${g.actions.map(e => `
+                            <div class="action-item">
+                                ${getActionIcon(e.type)}
+                                <div class="action-text">${formatActionText(e)}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `).join('')}
+            `;
+
+            // ==============================
+            // Render SVG Flow Diagram
+            // ==============================
+            const width = svgContainer.clientWidth || 650;
+            const height = Math.max(500, 400);
+
+            function getProtocolIcon(label) {
+                const lowerLabel = (label || '').toLowerCase();
+                if (lowerLabel.includes('raydium')) return { emoji: '🔮', color: '#8b5cf6' };
+                if (lowerLabel.includes('orca')) return { emoji: '🐋', color: '#f97316' };
+                if (lowerLabel.includes('jupiter')) return { emoji: '🪐', color: '#22c55e' };
+                if (lowerLabel.includes('phantom') || lowerLabel.includes('fee')) return { emoji: '👻', color: '#8b5cf6' };
+                if (lowerLabel.includes('meteora')) return { emoji: '☄️', color: '#3b82f6' };
+                if (lowerLabel.includes('pump') || lowerLabel.includes('bonding')) return { emoji: '💊', color: '#22c55e' };
+                if (lowerLabel.includes('okx') || lowerLabel.includes('router')) return { emoji: '🔄', color: '#f59e0b' };
+                if (lowerLabel.includes('pool') || lowerLabel.includes('market') || lowerLabel.includes('vault')) return { emoji: '🏦', color: '#8b5cf6' };
+                if (lowerLabel === 'wallet') return { emoji: '👛', color: '#3b82f6' };
+                return { emoji: '📍', color: '#6b7280' };
+            }
+
+            // Build unique graph nodes from edge addresses
+            const nodeAddrs = new Set();
+            flowEdges.forEach(e => { nodeAddrs.add(e.source); nodeAddrs.add(e.target); });
+
+            const graphNodes = [...nodeAddrs].map(addr => {
+                const n = nodeMap.get(addr) || {};
+                const isSigner = addr === signerAddr;
+                const label = isSigner ? 'Signer' : ((n.address_type === 'mint' && n.token_name) ? n.token_name : (n.pool_label || n.label || n.address_type || shortAddr(addr)));
+                const icon = getProtocolIcon(label);
+                return {
+                    id: addr, label, shortAddr: shortAddr(addr), isSigner,
+                    addressType: n.address_type || 'unknown', icon,
+                    x: isSigner ? width * 0.25 : width * 0.5 + (Math.random() - 0.5) * width * 0.3,
+                    y: height * 0.5 + (Math.random() - 0.5) * height * 0.3
+                };
+            });
+
+            // Build graph links with parallel-edge offsets
+            const edgeTypeColors = {
+                'swap_in': '#8b5cf6', 'swap_out': '#8b5cf6',
+                'spl_transfer': '#3b82f6', 'sol_transfer': '#3b82f6',
+                'burn': '#ef4444', 'mint': '#22c55e',
+                'create_ata': '#06b6d4', 'close_ata': '#0891b2',
+                'default': '#6b7280'
+            };
+
+            const pairCounts = {};
+            flowEdges.forEach(e => {
+                const key = [e.source, e.target].sort().join('|');
+                pairCounts[key] = (pairCounts[key] || 0) + 1;
+            });
+
+            const pairSeen = {};
+            const graphLinks = flowEdges.map(e => {
+                const key = [e.source, e.target].sort().join('|');
+                pairSeen[key] = (pairSeen[key] || 0) + 1;
+                const total = pairCounts[key];
+                const idx = pairSeen[key];
+                const offset = (idx - (total + 1) / 2) * 20;
+                const color = edgeTypeColors[e.type] || edgeTypeColors.default;
+                return {
+                    source: e.source, target: e.target, edge: e,
+                    color, tokenColor: getTokenColor(e.token_symbol),
+                    parallelOffset: total > 1 ? offset : 0
+                };
+            });
+
+            // SVG + zoom
+            const svgEl = d3.select(svgContainer).append('svg')
+                .attr('width', width)
+                .attr('height', height)
+                .style('background', '#fafafa');
+
+            const gEl = svgEl.append('g');
+            const zoomBehavior = d3.zoom()
+                .scaleExtent([0.3, 4])
+                .on('zoom', (event) => gEl.attr('transform', event.transform));
+            svgEl.call(zoomBehavior);
+
+            // Arrow markers per color
+            const defs = gEl.append('defs');
+            const uniqueColors = [...new Set(Object.values(edgeTypeColors))];
+            uniqueColors.forEach((color, i) => {
+                defs.append('marker')
+                    .attr('id', `fa-${i}`)
+                    .attr('viewBox', '0 0 10 6')
+                    .attr('refX', 10).attr('refY', 3)
+                    .attr('markerWidth', 7).attr('markerHeight', 5)
+                    .attr('orient', 'auto')
+                    .append('path')
+                    .attr('d', 'M0,0 L10,3 L0,6 Z')
+                    .attr('fill', color);
+            });
+            const getArrowId = (color) => `fa-${uniqueColors.indexOf(color)}`;
+
+            // Drop shadow filter for nodes
+            const filter = defs.append('filter').attr('id', 'node-shadow')
+                .attr('x', '-10%').attr('y', '-10%').attr('width', '130%').attr('height', '130%');
+            filter.append('feDropShadow')
+                .attr('dx', 0).attr('dy', 1).attr('stdDeviation', 2).attr('flood-opacity', 0.1);
+
+            const NODE_MIN_W = 150, NODE_H = 42;
+            // Measure text to auto-size node widths
+            const measureCtx = document.createElement('canvas').getContext('2d');
+            measureCtx.font = '500 11px sans-serif';
+            graphNodes.forEach(d => {
+                const textW = measureCtx.measureText(d.label).width;
+                d.nodeW = Math.max(NODE_MIN_W, textW + 60); // 30px left pad + 30px right pad
+            });
+
+            // Helper: compute curved path between two points with offset
+            function edgePath(d) {
+                const sx = d.source.x, sy = d.source.y;
+                const tx = d.target.x, ty = d.target.y;
+                const dx = tx - sx, dy = ty - sy;
+                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                // Shorten line to stop at node boundaries
+                const pad = 40;
+                const ux = dx / dist, uy = dy / dist;
+                const x1 = sx + ux * pad, y1 = sy + uy * pad;
+                const x2 = tx - ux * pad, y2 = ty - uy * pad;
+                // Perpendicular offset for parallel edges
+                // Normalize direction so A→B and B→A curve to opposite sides
+                // by flipping offset when source id > target id
+                const flip = (d.source.id || '') > (d.target.id || '') ? -1 : 1;
+                const offset = d.parallelOffset * flip;
+                const nx = -uy * offset;
+                const ny = ux * offset;
+                const mx = (x1 + x2) / 2 + nx, my = (y1 + y2) / 2 + ny;
+                return { path: `M${x1},${y1} Q${mx},${my} ${x2},${y2}`, mx, my };
+            }
+
+            // Draw edges (curved paths)
+            const linkGroup = gEl.append('g');
+            const links = linkGroup.selectAll('path')
+                .data(graphLinks).join('path')
+                .attr('fill', 'none')
+                .attr('stroke', d => {
+                    if (d.edge.type === 'swap_out') return '#22c55e';
+                    if (d.edge.type === 'swap_in') return '#ef4444';
+                    return d.color;
+                })
+                .attr('stroke-width', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? 3 : 2)
+                .attr('stroke-opacity', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? 0.8 : 0.5)
+                .attr('marker-end', d => `url(#${getArrowId(d.color)})`);
+
+            // Edge midpoint dots — hover target for amount tooltip
+            const edgeDotGroup = gEl.append('g');
+            const edgeDots = edgeDotGroup.selectAll('g')
+                .data(graphLinks).join('g')
+                .style('cursor', 'pointer');
+
+            edgeDots.append('circle')
+                .attr('r', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? 12 : 8)
+                .attr('fill', d => {
+                    if (d.edge.type === 'swap_out') return '#22c55e';
+                    if (d.edge.type === 'swap_in') return '#ef4444';
+                    return d.tokenColor;
+                })
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 2);
+
+            edgeDots.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'central')
+                .attr('fill', '#fff')
+                .attr('font-size', d => (d.edge.type === 'swap_in' || d.edge.type === 'swap_out') ? '8px' : '7px')
+                .attr('font-weight', 'bold')
+                .attr('pointer-events', 'none')
+                .text(d => {
+                    if (d.edge.type === 'swap_out') return 'BUY';
+                    if (d.edge.type === 'swap_in') return 'SELL';
+                    return d.edge.stepLabel;
+                });
+
+            // Tooltip div
+            const tooltip = d3.select(svgContainer).append('div')
+                .style('position', 'absolute')
+                .style('background', 'rgba(15,15,30,0.95)')
+                .style('color', '#fff')
+                .style('padding', '8px 12px')
+                .style('border-radius', '8px')
+                .style('font-size', '12px')
+                .style('line-height', '1.5')
+                .style('pointer-events', 'none')
+                .style('opacity', 0)
+                .style('z-index', '100')
+                .style('white-space', 'nowrap')
+                .style('box-shadow', '0 4px 12px rgba(0,0,0,0.3)')
+                .style('border', '1px solid rgba(255,255,255,0.1)');
+
+            edgeDots
+                .on('mouseenter', function(event, d) {
+                    const e = d.edge;
+                    const isSwap = e.type === 'swap_in' || e.type === 'swap_out';
+                    d3.select(this).select('circle').transition().duration(150).attr('r', isSwap ? 16 : 12);
+                    const typeLabel = e.type === 'swap_out' ? 'Buy' : e.type === 'swap_in' ? 'Sell' : e.type.replace(/_/g, ' ');
+                    const typeColor = e.type === 'swap_out' ? '#22c55e' : e.type === 'swap_in' ? '#ef4444' : '#9ca3af';
+                    tooltip.html(
+                        `<strong style="color:${d.tokenColor}">[${e.stepLabel}] ${formatNumber(e.amount)} ${e.token_symbol || 'SOL'}</strong><br>` +
+                        `<span style="color:${typeColor};font-weight:600">${typeLabel}</span>` +
+                        (e.dex ? `<br>DEX: ${e.dex}` : '') +
+                        (e.pool_label ? `<br>Pool: ${e.pool_label}` : '') +
+                        (e.tax_bps ? `<br><span style="color:#ef4444">Tax: ${(e.tax_bps / 100).toFixed(1)}% (${formatNumber(e.tax_amount)} ${e.token_symbol})</span>` : '') +
+                        `<br><span style="color:#6b7280">${getNodeLabel(e.source)} → ${getNodeLabel(e.target)}</span>`
+                    ).style('opacity', 1);
+                    const rect = svgContainer.getBoundingClientRect();
+                    tooltip.style('left', (event.clientX - rect.left + 16) + 'px')
+                           .style('top', (event.clientY - rect.top - 10) + 'px');
+                })
+                .on('mousemove', function(event) {
+                    const rect = svgContainer.getBoundingClientRect();
+                    tooltip.style('left', (event.clientX - rect.left + 16) + 'px')
+                           .style('top', (event.clientY - rect.top - 10) + 'px');
+                })
+                .on('mouseleave', function(event, d) {
+                    const isSwap = d.edge.type === 'swap_in' || d.edge.type === 'swap_out';
+                    d3.select(this).select('circle').transition().duration(150).attr('r', isSwap ? 12 : 8);
+                    tooltip.style('opacity', 0);
+                });
+
+            // Draw nodes (draggable)
+            const nodeGroup = gEl.append('g');
+            const nodeEls = nodeGroup.selectAll('g')
+                .data(graphNodes).join('g')
+                .style('cursor', 'grab')
+                .call(d3.drag()
+                    .on('start', (event, d) => {
+                        if (!event.active) forceSim.alphaTarget(0.3).restart();
+                        d.fx = d.x; d.fy = d.y;
+                    })
+                    .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
+                    .on('end', (event, d) => {
+                        if (!event.active) forceSim.alphaTarget(0);
+                        d.fx = null; d.fy = null;
+                    })
+                );
+
+            // Node background rect
+            nodeEls.append('rect')
+                .attr('x', d => -d.nodeW / 2).attr('y', -NODE_H / 2)
+                .attr('width', d => d.nodeW).attr('height', NODE_H)
+                .attr('rx', 10)
+                .attr('fill', d => d.isSigner ? '#f0fdf4' : '#fff')
+                .attr('stroke', d => d.isSigner ? '#22c55e' : '#e5e7eb')
+                .attr('stroke-width', d => d.isSigner ? 2 : 1)
+                .attr('filter', 'url(#node-shadow)');
+
+            // Signer badge
+            nodeEls.filter(d => d.isSigner).append('rect')
+                .attr('x', d => -d.nodeW / 2 + 6).attr('y', -NODE_H / 2 + 4)
+                .attr('width', 42).attr('height', 14).attr('rx', 3).attr('fill', '#dcfce7');
+            nodeEls.filter(d => d.isSigner).append('text')
+                .attr('x', d => -d.nodeW / 2 + 27).attr('y', -NODE_H / 2 + 11)
+                .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
+                .attr('fill', '#16a34a').attr('font-size', '8px').attr('font-weight', '600')
+                .text('Signer');
+
+            // Icon
+            nodeEls.append('text')
+                .attr('x', d => -d.nodeW / 2 + 14)
+                .attr('y', d => d.isSigner ? 6 : 0)
+                .attr('dominant-baseline', 'central')
+                .attr('font-size', '14px')
+                .text(d => d.icon.emoji);
+
+            // Label
+            nodeEls.append('text')
+                .attr('x', d => -d.nodeW / 2 + 30)
+                .attr('y', d => d.isSigner ? -1 : -6)
+                .attr('dominant-baseline', 'central')
+                .attr('fill', d => d.icon.color)
+                .attr('font-size', '11px').attr('font-weight', '500')
+                .text(d => d.label);
+
+            // Address
+            nodeEls.append('text')
+                .attr('x', d => -d.nodeW / 2 + 30)
+                .attr('y', d => d.isSigner ? 13 : 8)
+                .attr('dominant-baseline', 'central')
+                .attr('fill', '#9ca3af')
+                .attr('font-size', '9px').attr('font-family', 'monospace')
+                .text(d => d.shortAddr);
+
+            // Copy icon on nodes
+            nodeEls.append('text')
+                .attr('x', d => d.nodeW / 2 - 16)
+                .attr('y', d => d.isSigner ? 13 : 8)
+                .attr('dominant-baseline', 'central')
+                .attr('font-size', '10px')
+                .attr('fill', '#9ca3af')
+                .attr('cursor', 'pointer')
+                .text('\u{1F4CB}')
+                .on('click', (event, d) => {
+                    event.stopPropagation();
+                    copyAddr(d.id, null);
+                })
+                .on('mouseenter', function() { d3.select(this).attr('fill', '#3b82f6'); })
+                .on('mouseleave', function() { d3.select(this).attr('fill', '#9ca3af'); });
+
+            // Force simulation
+            const forceSim = d3.forceSimulation(graphNodes)
+                .force('link', d3.forceLink(graphLinks).id(d => d.id).distance(180).strength(0.8))
+                .force('charge', d3.forceManyBody().strength(-500))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => d.nodeW / 2 + 10))
+                .force('x', d3.forceX(d => d.isSigner ? width * 0.2 : width * 0.55).strength(0.05))
+                .on('tick', () => {
+                    graphLinks.forEach(d => {
+                        const ep = edgePath(d);
+                        d._mx = ep.mx; d._my = ep.my; d._path = ep.path;
+                    });
+                    links.attr('d', d => d._path);
+                    edgeDots.attr('transform', d => `translate(${d._mx},${d._my})`);
+                    nodeEls.attr('transform', d => `translate(${d.x},${d.y})`);
+                });
+        }
+
+        // Bubble Map Variables
+        let simulation = null;
+        let svg = null;
+        let g = null;
+        let zoom = null;
+        let showLabels = true;
+        let currentTransform = d3.zoomIdentity; // Preserve zoom state
+        let activeFunder = null; // Currently selected funder for filtering
+        let allNodes = null; // Store all nodes for filtering
+        let allEdges = null; // Store all edges for filtering
+        let signatureOnlyMode = false; // True when loaded by signature only (show all tokens)
+
+        function renderBubbleMap(nodes, edges) {
+            const container = document.getElementById('bubble-map');
+            if (!container) return;
+
+            // Clear previous
+            container.innerHTML = '';
+            d3.selectAll('.tooltip').remove(); // Remove old tooltips
+
+            if (!nodes || nodes.length === 0) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #aaa;">No nodes to display</div>';
+                return;
+            }
+
+            const width = container.clientWidth;
+            const height = 1000;
+
+            // Create node map for lookups
+            const nodeMap = new Map(nodes.map(n => [n.address, n]));
+
+            // Calculate balance range for sizing (use absolute value, treat 0/negative as minimum)
+            const balances = nodes.map(n => Math.max(0, n.balance || 0));
+            const maxBalance = Math.max(...balances, 1); // Ensure at least 1 to avoid domain issues
+            const minBalance = 0;
+
+            // Size scale (radius 8-50 based on balance)
+            const sizeScale = d3.scaleSqrt()
+                .domain([minBalance, maxBalance])
+                .range([8, 50]);
+
+            // Color based on balance percentile
+            const colorScale = d3.scaleQuantile()
+                .domain(balances)
+                .range(['#22c55e', '#3b82f6', '#e94560']);
+
+            // Prepare nodes for D3
+            const d3Nodes = nodes.map(n => {
+                const displayBalance = Math.max(0, n.balance || 0);
+                const isZeroBalance = (n.balance || 0) <= 0;
+                return {
+                    id: n.address,
+                    label: (n.address_type === 'mint' && n.token_name) ? n.token_name : (n.pool_label || n.label || 'wallet'),
+                    address_type: n.address_type,
+                    pool_label: n.pool_label,
+                    token_name: n.token_name,
+                    balance: n.balance || 0,
+                    displayBalance: displayBalance,
+                    isZeroBalance: isZeroBalance,
+                    sol_balance: n.sol_balance || 0,
+                    funded_by: n.funded_by,
+                    interactions: n.interactions || { pools: [], programs: [], dexes: [] },
+                    radius: sizeScale(displayBalance),
+                    color: isZeroBalance ? '#666' : colorScale(displayBalance) // Gray for zero balance
+                };
+            });
+
+            // Track nodes with close_ata events (self-edges where ATA was closed)
+            const closeAtaInfo = new Map(); // address -> { amount, sol returned }
+            (edges || []).forEach(e => {
+                if (e.type === 'close_ata' && e.source === e.target) {
+                    closeAtaInfo.set(e.source, {
+                        amount: e.amount,
+                        ins_index: e.ins_index
+                    });
+                }
+            });
+
+            // Add close_ata info to d3Nodes
+            d3Nodes.forEach(n => {
+                if (closeAtaInfo.has(n.id)) {
+                    n.closeAta = closeAtaInfo.get(n.id);
+                }
+            });
+
+            // Prepare edges for D3 - only include edges where both nodes exist
+            // Filter out self-edges (like close_ata) since they can't be rendered as lines
+            const d3Edges = (edges || [])
+                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target) && e.source !== e.target)
+                .map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    amount: e.amount,
+                    type: e.type,
+                    token_symbol: e.token_symbol,
+                    tax_bps: e.tax_bps,
+                    tax_amount: e.tax_amount,
+                    signature: e.signature,
+                    block_time_utc: e.block_time_utc,
+                    dex: e.dex,
+                    ins_index: e.ins_index,
+                    source_label: e.source_label,
+                    target_label: e.target_label,
+                    pool_label: e.pool_label
+                }));
+
+            // Token tax: read pre-computed values from database
+            d3Edges.forEach(d => {
+                if (d.tax_bps && d.tax_bps >= 100) {
+                    const direction = d.type === 'swap_out' ? 'buy' :
+                                      (d.type === 'swap_in' ? 'sell' : 'transfer');
+                    d.tokenTax = {
+                        amount: d.tax_amount,
+                        percent: d.tax_bps / 100,
+                        received: d.amount - d.tax_amount,
+                        direction: direction
+                    };
+                }
+            });
+
+            // Add funded_by edges
+            nodes.forEach(n => {
+                if (n.funded_by && nodeMap.has(n.funded_by)) {
+                    d3Edges.push({
+                        source: n.funded_by,
+                        target: n.address,
+                        amount: 0,
+                        type: 'funded_by'
+                    });
+                }
+            });
+
+            // Create SVG
+            svg = d3.select(container)
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            // Add zoom
+            zoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => {
+                    currentTransform = event.transform; // Save transform
+                    g.attr('transform', event.transform);
+                });
+
+            svg.call(zoom);
+
+            // Main group for zoom/pan
+            g = svg.append('g');
+
+            // Restore previous zoom level
+            if (currentTransform !== d3.zoomIdentity) {
+                svg.call(zoom.transform, currentTransform);
+            }
+
+            // Create tooltip
+            const tooltip = d3.select('body').append('div')
+                .attr('class', 'tooltip')
+                .style('opacity', 0);
+
+            // Edge type colors by category
+            const edgeColors = {
+                // Swap - green/red
+                'swap_in': '#22c55e', 'swap_out': '#ef4444',
+                // Transfer - blue/purple
+                'spl_transfer': '#3b82f6', 'sol_transfer': '#60a5fa', 'wallet_funded': '#a855f7', 'funded_by': '#a855f7',
+                // Account - cyan
+                'create_ata': '#06b6d4', 'close_ata': '#0891b2',
+                // Fee - gray
+                'fee': '#6b7280', 'priority_fee': '#4b5563', 'protocol_fee': '#9ca3af',
+                // Lending - orange
+                'lend_deposit': '#f97316', 'lend_withdraw': '#ea580c', 'borrow': '#fb923c', 'repay': '#fdba74', 'liquidation': '#c2410c',
+                // Staking - amber
+                'stake': '#f59e0b', 'unstake': '#d97706', 'stake_reward': '#fbbf24',
+                // Liquidity - teal
+                'add_liquidity': '#14b8a6', 'remove_liquidity': '#0d9488', 'farm_deposit': '#2dd4bf', 'farm_withdraw': '#5eead4', 'lp_reward': '#99f6e4',
+                // Bridge - indigo
+                'bridge_in': '#6366f1', 'bridge_out': '#818cf8',
+                // Perp - rose
+                'perp_open': '#f43f5e', 'perp_close': '#fb7185', 'perp_deposit': '#e11d48', 'perp_withdraw': '#be123c',
+                'margin_deposit': '#fda4af', 'margin_withdraw': '#fecdd3', 'margin_call': '#9f1239', 'perp_liquidation': '#881337',
+                'funding_payment': '#fecaca', 'pnl_settlement': '#fca5a5',
+                // NFT - pink
+                'nft_mint': '#ec4899', 'nft_sale': '#f472b6', 'nft_transfer': '#f9a8d4',
+                // Other
+                'mint': '#22d3ee', 'burn': '#ff6b6b', 'airdrop': '#a78bfa', 'unknown': '#475569'
+            };
+
+            // Create edges
+            const link = g.append('g')
+                .selectAll('line')
+                .data(d3Edges)
+                .join('line')
+                .attr('class', 'edge-line')
+                .attr('stroke', d => edgeColors[d.type] || '#666')
+                .attr('stroke-width', d => ['funded_by', 'fee', 'priority_fee', 'protocol_fee'].includes(d.type) ? 1 : 3)
+                .attr('stroke-dasharray', d => ['funded_by', 'create_ata', 'close_ata'].includes(d.type) ? '4,4' : null)
+                .style('cursor', d => d.signature ? 'pointer' : 'default')
+                .on('mouseover', (event, d) => {
+                    if (!d.signature) return;
+                    d3.select(event.target).attr('stroke-width', 5);
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    const tokenSymbol = d.token_symbol || 'Unknown';
+                    const sourceLabel = d.source_label && !['unknown', 'wallet'].includes(d.source_label) ? d.source_label : null;
+                    const targetLabel = d.target_label && !['unknown', 'wallet'].includes(d.target_label) ? d.target_label : null;
+                    const poolLabel = d.pool_label || null;
+                    tooltip.html(`
+                        <div style="margin-bottom: 8px;">
+                            <span class="edge-type ${d.type}" style="display: inline-block; margin-bottom: 5px;">${d.type}</span>
+                            ${d.dex ? `<span style="color: #fbbf24; font-size: 11px; margin-left: 8px;">${d.dex}</span>` : ''}
+                        </div>
+                        ${sourceLabel || targetLabel ? `
+                        <div style="margin-bottom: 8px; font-size: 11px;">
+                            ${sourceLabel ? `<div>From: <span style="color: #a855f7;">${sourceLabel}</span></div>` : ''}
+                            ${targetLabel ? `<div>To: <span style="color: #22c55e;">${targetLabel}</span></div>` : ''}
+                        </div>
+                        ` : ''}
+                        <div class="stats">
+                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
+                            ${d.tokenTax ? `Tax: <span style="color: #ef4444; font-weight: bold;">${d.tokenTax.percent.toFixed(1)}%</span> (${d.tokenTax.direction})<br>` : ''}
+                            Time: ${d.block_time_utc || 'N/A'}
+                            ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
+                        </div>
+                        ${poolLabel ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 10px;">
+                            <div style="color: #fbbf24;">${poolLabel}</div>
+                        </div>
+                        ` : ''}
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
+                            <div style="color: #aaa; font-size: 10px; margin-bottom: 3px;">Click to navigate:</div>
+                            <div class="address" style="font-size: 10px;">${d.signature}</div>
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', (event, d) => {
+                    d3.select(event.target).attr('stroke-width', d.type === 'funded_by' ? 1 : 3);
+                    tooltip.transition().duration(500).style('opacity', 0);
+                })
+                .on('click', (event, d) => {
+                    if (d.signature) {
+                        tooltip.style('opacity', 0);
+                        navigateTo(d.signature);
+                    }
+                });
+
+            // Create nodes
+            const node = g.append('g')
+                .selectAll('circle')
+                .data(d3Nodes)
+                .join('circle')
+                .attr('class', 'node-circle')
+                .attr('r', d => d.radius)
+                .attr('fill', d => d.color)
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1.5)
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended))
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    const displayName = d.pool_label || d.token_name || null;
+                    const ix = d.interactions || {};
+                    tooltip.html(`
+                        <div class="address">${d.id}</div>
+                        ${displayName ? `<div style="color: #fbbf24; font-weight: bold; margin-bottom: 8px;">${displayName}</div>` : ''}
+                        <div class="stats">
+                            Type: <span style="color: #a855f7;">${d.address_type || d.label}</span><br>
+                            Balance: <span>${formatNumber(d.balance)}</span><br>
+                            SOL: <span>${d.sol_balance.toFixed(4)}</span>
+                            ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
+                            ${d.closeAta ? `<br><span style="color: #0891b2;">ATA Closed: +${d.closeAta.amount.toFixed(6)} SOL</span>` : ''}
+                        </div>
+                        ${ix.dexes?.length || ix.pools?.length ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 11px;">
+                            ${ix.dexes?.length ? `<div>DEXes: <span style="color: #fbbf24;">${ix.dexes.join(', ')}</span></div>` : ''}
+                            ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
+                        </div>` : ''}
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
+                            Click to copy address &bull; Double-click to fetch txns
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                })
+                .on('click', (event, d) => {
+                    event.stopPropagation();
+                    copyAddr(d.id, null);
+                })
+                .on('dblclick', (event, d) => {
+                    event.stopPropagation();
+                    tooltip.style('opacity', 0);
+                    fetchWalletTransactions(d.id);
+                });
+
+            // Create Tax Man badges for edges with token tax 🕴️
+            const taxEdges = d3Edges.filter(d => d.tokenTax);
+            const taxMan = g.append('g')
+                .selectAll('g')
+                .data(taxEdges)
+                .join('g')
+                .attr('class', 'tax-man-badge')
+                .style('cursor', 'pointer')
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    tooltip.html(`
+                        <div style="margin-bottom: 8px;">
+                            <span style="font-size: 20px;">🕴️</span>
+                            <span style="color: #f97316; font-weight: bold; font-size: 14px; margin-left: 5px;">The Tax Man</span>
+                            <span style="color: #888; font-size: 11px; margin-left: 8px;">(${d.tokenTax.direction === 'sell' ? 'on sell' : 'on buy'})</span>
+                        </div>
+                        <div class="stats">
+                            <div style="margin-bottom: 5px;">
+                                Tax Rate: <span style="color: #ef4444; font-weight: bold;">${d.tokenTax.percent.toFixed(1)}%</span>
+                            </div>
+                            <div style="margin-bottom: 5px;">
+                                Tax Taken: <span style="color: #ef4444;">${formatNumber(d.tokenTax.amount)} ${d.token_symbol}</span>
+                            </div>
+                            <div style="margin-bottom: 5px;">
+                                ${d.tokenTax.direction === 'sell' ? 'Sent' : 'Expected'}: <span style="color: #22c55e;">${formatNumber(d.amount)} ${d.token_symbol}</span>
+                            </div>
+                            <div>
+                                ${d.tokenTax.direction === 'sell' ? 'Pool Received' : 'Wallet Received'}: <span style="color: #fbbf24;">${formatNumber(d.tokenTax.received)} ${d.token_symbol}</span>
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
+                            Token has built-in transfer tax
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                });
+
+            // Tax Man icon (levitating suit emoji)
+            taxMan.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'central')
+                .attr('font-size', '18px')
+                .text('🕴️');
+
+            // Tax percentage label
+            taxMan.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'hanging')
+                .attr('y', 12)
+                .attr('fill', '#ef4444')
+                .attr('font-size', '10px')
+                .attr('font-weight', 'bold')
+                .attr('stroke', '#1a1a2e')
+                .attr('stroke-width', 2)
+                .attr('paint-order', 'stroke')
+                .text(d => `-${d.tokenTax.percent.toFixed(0)}%`);
+
+            // Step numbers: show instruction order on Single TX views
+            const isSingleTx = document.getElementById('tx_limit').value === '1';
+            let stepBadges;
+            if (isSingleTx) {
+                const steppedEdges = d3Edges
+                    .filter(e => e.ins_index !== null && e.ins_index !== undefined && e.type !== 'funded_by')
+                    .sort((a, b) => a.ins_index - b.ins_index);
+                assignStepLabels(steppedEdges);
+                steppedEdges.forEach((e, i) => { e.stepNum = i + 1; });
+
+                stepBadges = g.append('g')
+                    .selectAll('g')
+                    .data(steppedEdges)
+                    .join('g')
+                    .attr('class', 'step-badge');
+
+                stepBadges.append('rect')
+                    .attr('x', d => d.stepLabel.length > 2 ? -13 : -9)
+                    .attr('y', -9)
+                    .attr('width', d => d.stepLabel.length > 2 ? 26 : 18)
+                    .attr('height', 18)
+                    .attr('rx', 9)
+                    .attr('fill', '#1a1a2e')
+                    .attr('stroke', '#60a5fa')
+                    .attr('stroke-width', 1.5);
+
+                stepBadges.append('text')
+                    .attr('text-anchor', 'middle')
+                    .attr('dominant-baseline', 'central')
+                    .attr('fill', '#60a5fa')
+                    .attr('font-size', '9px')
+                    .attr('font-weight', 'bold')
+                    .text(d => d.stepLabel);
+            }
+
+            // Create labels
+            const label = g.append('g')
+                .selectAll('text')
+                .data(d3Nodes)
+                .join('text')
+                .attr('class', 'node-label')
+                .text(d => d.id.slice(0, 6) + '...')
+                .attr('dy', d => d.radius + 12)
+                .style('display', showLabels ? 'block' : 'none');
+
+            // Force simulation
+            simulation = d3.forceSimulation(d3Nodes)
+                .force('link', d3.forceLink(d3Edges).id(d => d.id).distance(100))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => d.radius + 5))
+                .on('tick', () => {
+                    link
+                        .attr('x1', d => d.source.x)
+                        .attr('y1', d => d.source.y)
+                        .attr('x2', d => d.target.x)
+                        .attr('y2', d => d.target.y);
+
+                    node
+                        .attr('cx', d => d.x)
+                        .attr('cy', d => d.y);
+
+                    // Position Tax Man at edge midpoint
+                    taxMan
+                        .attr('transform', d => {
+                            const midX = (d.source.x + d.target.x) / 2;
+                            const midY = (d.source.y + d.target.y) / 2;
+                            return `translate(${midX}, ${midY - 5})`;
+                        });
+
+                    // Position step badges at 30% along edge (source side)
+                    if (stepBadges) {
+                        stepBadges.attr('transform', d => {
+                            const x = d.source.x + (d.target.x - d.source.x) * 0.3;
+                            const y = d.source.y + (d.target.y - d.source.y) * 0.3;
+                            return `translate(${x}, ${y})`;
+                        });
+                    }
+
+                    label
+                        .attr('x', d => d.x)
+                        .attr('y', d => d.y);
+                });
+
+            // Drag functions
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+        }
+
+        function resetZoom() {
+            if (svg && zoom) {
+                svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+            }
+        }
+
+        function toggleLabels() {
+            showLabels = !showLabels;
+            d3.selectAll('.node-label').style('display', showLabels ? 'block' : 'none');
+        }
+
+        // Extract and render distinct funders
+        function renderFunderList(nodes) {
+            const funderList = document.getElementById('funder-list');
+            if (!funderList || !nodes) return;
+
+            // Count funded wallets per funder
+            const funderCounts = new Map();
+            nodes.forEach(n => {
+                if (n.funded_by) {
+                    funderCounts.set(n.funded_by, (funderCounts.get(n.funded_by) || 0) + 1);
+                }
+            });
+
+            if (funderCounts.size === 0) {
+                funderList.innerHTML = '<div class="funder-empty">No funding relationships found</div>';
+                return;
+            }
+
+            // Sort by count descending
+            const sortedFunders = [...funderCounts.entries()].sort((a, b) => b[1] - a[1]);
+
+            let html = '';
+            sortedFunders.forEach(([funder, count]) => {
+                const isActive = activeFunder === funder;
+                html += `
+                    <div class="funder-item ${isActive ? 'active' : ''}" 
+                         onclick="filterByFunder('${funder}')"
+                         title="${funder}">
+                        <div class="funder-dot"></div>
+                        <div class="funder-address">${funder.slice(0, 8)}...${funder.slice(-6)}</div>
+                        <button class="copy-addr" onclick="event.stopPropagation(); copyAddr('${funder}', this)" title="Copy address">\u{1F4CB}</button>
+                        <div class="funder-count">${count}</div>
+                    </div>
+                `;
+            });
+
+            funderList.innerHTML = html;
+        }
+
+        // Filter map by selected funder
+        function filterByFunder(funderAddress) {
+            if (activeFunder === funderAddress) {
+                // Toggle off if already selected
+                clearFunderFilter();
+                return;
+            }
+
+            activeFunder = funderAddress;
+
+            // Get nodes funded by this address (and the funder itself if present)
+            const fundedNodes = allNodes.filter(n => 
+                n.funded_by === funderAddress || n.address === funderAddress
+            );
+
+            // Get addresses of filtered nodes
+            const filteredAddresses = new Set(fundedNodes.map(n => n.address));
+
+            // Get edges involving these nodes
+            const filteredEdges = allEdges.filter(e => 
+                filteredAddresses.has(e.source) || filteredAddresses.has(e.target)
+            );
+
+            // Re-render with filtered data
+            if (document.getElementById('tx_limit').value === 'flow') {
+                renderTxFlow(fundedNodes, filteredEdges);
+            } else {
+                renderBubbleMap(fundedNodes, filteredEdges);
+            }
+            renderFunderList(allNodes); // Update UI to show active state
+
+            // Show filter badge and clear button
+            document.getElementById('filter-badge').style.display = 'inline';
+            document.getElementById('funder-clear-btn').classList.remove('hidden');
+        }
+
+        // Clear funder filter
+        function clearFunderFilter() {
+            activeFunder = null;
+            applyEdgeFilters(); // Re-apply edge filters with all nodes
+            renderFunderList(allNodes);
+
+            // Hide filter badge and clear button
+            document.getElementById('filter-badge').style.display = 'none';
+            document.getElementById('funder-clear-btn').classList.add('hidden');
+        }
+
+        // Token filter state
+        let activeTokenFilters = {}; // { 'ROOKIE': true, 'USDC': true, ... }
+        let allTokenSymbols = []; // List of unique token symbols in current view
+
+        // Extract and render token filter list
+        function renderTokenFilterList(edges) {
+            const tokenList = document.getElementById('token-filter-list');
+            if (!tokenList || !edges) return;
+
+            // Count edges per token
+            const tokenCounts = new Map();
+            edges.forEach(e => {
+                const symbol = e.token_symbol || 'Unknown';
+                tokenCounts.set(symbol, (tokenCounts.get(symbol) || 0) + 1);
+            });
+
+            if (tokenCounts.size === 0) {
+                tokenList.innerHTML = '<div class="funder-empty">No tokens found</div>';
+                return;
+            }
+
+            // Store all tokens and initialize filters (all enabled by default)
+            allTokenSymbols = [...tokenCounts.keys()].sort();
+            allTokenSymbols.forEach(symbol => {
+                if (activeTokenFilters[symbol] === undefined) {
+                    activeTokenFilters[symbol] = true;
+                }
+            });
+
+            // Sort by count descending
+            const sortedTokens = [...tokenCounts.entries()].sort((a, b) => b[1] - a[1]);
+
+            let html = '';
+            sortedTokens.forEach(([symbol, count]) => {
+                const isActive = activeTokenFilters[symbol] !== false;
+                const color = symbol === 'Unknown' ? '#666' :
+                              symbol === 'SOL' || symbol === 'WSOL' ? '#a855f7' :
+                              symbol === 'USDC' || symbol === 'USDT' ? '#22c55e' : '#e94560';
+                html += `
+                    <div class="funder-item ${isActive ? 'active' : ''}"
+                         onclick="toggleTokenFilter('${symbol}')"
+                         title="${symbol}">
+                        <div class="funder-dot" style="background: ${color};"></div>
+                        <div class="funder-address" style="color: ${color};">${symbol}</div>
+                        <div class="funder-count">${count}</div>
+                    </div>
+                `;
+            });
+
+            tokenList.innerHTML = html;
+
+            // Show/hide clear button
+            const anyOff = Object.values(activeTokenFilters).some(v => v === false);
+            document.getElementById('token-clear-btn')?.classList.toggle('hidden', !anyOff);
+        }
+
+        // Toggle individual token filter
+        function toggleTokenFilter(symbol) {
+            activeTokenFilters[symbol] = !activeTokenFilters[symbol];
+            applyAllFilters();
+            renderTokenFilterList(allEdges); // Update UI
+        }
+
+        // Clear token filters (enable all)
+        function clearTokenFilter() {
+            Object.keys(activeTokenFilters).forEach(k => activeTokenFilters[k] = true);
+            applyAllFilters();
+            renderTokenFilterList(allEdges);
+        }
+
+        // Edge category filter state (filter by category, not individual types)
+        let activeCategoryFilters = {
+            swap: true,      // swap_in, swap_out
+            transfer: true,  // spl_transfer, sol_transfer, wallet_funded
+            account: true,   // create_ata, close_ata
+            fee: true,       // fee, priority_fee, protocol_fee
+            lending: true,   // lend_deposit, lend_withdraw, borrow, repay, liquidation
+            staking: true,   // stake, unstake, stake_reward
+            liquidity: true, // add_liquidity, remove_liquidity, farm_deposit, farm_withdraw, lp_reward
+            bridge: true,    // bridge_in, bridge_out
+            perp: true,      // perp_*, margin_*, funding_payment, pnl_settlement
+            nft: true,       // nft_mint, nft_sale, nft_transfer
+            other: true      // mint, burn, airdrop, unknown
+        };
+        let showFundedBy = true; // Separate toggle for funded_by pseudo-edges
+
+        // Apply all filters (edge types + tokens + funders)
+        function applyAllFilters() {
+            applyEdgeFilters();
+        }
+
+        // Category to edge type mapping
+        const categoryMap = {
+            'swap': ['swap_in', 'swap_out'],
+            'transfer': ['spl_transfer', 'sol_transfer', 'wallet_funded'],
+            'account': ['create_ata', 'close_ata'],
+            'fee': ['fee', 'priority_fee', 'protocol_fee'],
+            'lending': ['lend_deposit', 'lend_withdraw', 'borrow', 'repay', 'liquidation'],
+            'staking': ['stake', 'unstake', 'stake_reward'],
+            'liquidity': ['add_liquidity', 'remove_liquidity', 'farm_deposit', 'farm_withdraw', 'lp_reward'],
+            'bridge': ['bridge_in', 'bridge_out'],
+            'perp': ['perp_open', 'perp_close', 'perp_deposit', 'perp_withdraw', 'margin_deposit', 'margin_withdraw', 'margin_call', 'perp_liquidation', 'funding_payment', 'pnl_settlement'],
+            'nft': ['nft_mint', 'nft_sale', 'nft_transfer'],
+            'other': ['mint', 'burn', 'airdrop', 'unknown']
+        };
+
+        // Reverse lookup: edge type -> category
+        const typeToCategory = {};
+        for (const [cat, types] of Object.entries(categoryMap)) {
+            for (const t of types) { typeToCategory[t] = cat; }
+        }
+
+        // Apply edge type filters
+        function applyEdgeFilters() {
+            // Read category checkbox states
+            for (const cat of Object.keys(activeCategoryFilters)) {
+                const el = document.getElementById(`filter-cat-${cat}`);
+                if (el) activeCategoryFilters[cat] = el.checked;
+            }
+            showFundedBy = document.getElementById('filter-funded_by')?.checked ?? true;
+
+            // Determine which nodes/edges to use (respect funder filter if active)
+            let nodesToUse = allNodes;
+            let edgesToUse = allEdges;
+
+            if (activeFunder) {
+                // Get nodes funded by this address (and the funder itself if present)
+                nodesToUse = allNodes.filter(n =>
+                    n.funded_by === activeFunder || n.address === activeFunder
+                );
+                const filteredAddresses = new Set(nodesToUse.map(n => n.address));
+                edgesToUse = allEdges.filter(e =>
+                    filteredAddresses.has(e.source) || filteredAddresses.has(e.target)
+                );
+            }
+
+            // Filter edges by category
+            let filteredEdges = edgesToUse.filter(e => {
+                const edgeType = e.type || 'unknown';
+                const category = e.category || typeToCategory[edgeType] || 'other';
+                return activeCategoryFilters[category] !== false;
+            });
+
+            // Filter edges by token symbol
+            filteredEdges = filteredEdges.filter(e => {
+                const symbol = e.token_symbol || 'Unknown';
+                return activeTokenFilters[symbol] !== false;
+            });
+
+            // Check if any filter is off (to show badge)
+            const anyCategoryFilterOff = Object.values(activeCategoryFilters).some(v => v === false);
+            const anyTokenFilterOff = Object.values(activeTokenFilters).some(v => v === false);
+            const badge = document.getElementById('filter-badge');
+            if (badge) {
+                badge.style.display = (anyCategoryFilterOff || anyTokenFilterOff || !showFundedBy || activeFunder) ? 'inline' : 'none';
+            }
+
+            // Re-render with filtered edges
+            if (document.getElementById('tx_limit').value === 'flow') {
+                renderTxFlow(nodesToUse, filteredEdges);
+            } else {
+                renderBubbleMapFiltered(nodesToUse, filteredEdges);
+            }
+        }
+
+        // Render bubble map with edge type filtering support
+        function renderBubbleMapFiltered(nodes, edges) {
+            const container = document.getElementById('bubble-map');
+            if (!container) return;
+
+            // Clear previous
+            container.innerHTML = '';
+            d3.selectAll('.tooltip').remove();
+
+            if (!nodes || nodes.length === 0) {
+                container.innerHTML = '<div style="padding: 40px; text-align: center; color: #aaa;">No nodes to display</div>';
+                return;
+            }
+
+            const width = container.clientWidth;
+            const height = 1000;
+
+            // Create node map for lookups
+            const nodeMap = new Map(nodes.map(n => [n.address, n]));
+
+            // Calculate balance range for sizing
+            const balances = nodes.map(n => Math.max(0, n.balance || 0));
+            const maxBalance = Math.max(...balances, 1);
+            const minBalance = 0;
+
+            const sizeScale = d3.scaleSqrt()
+                .domain([minBalance, maxBalance])
+                .range([8, 50]);
+
+            const colorScale = d3.scaleQuantile()
+                .domain(balances)
+                .range(['#22c55e', '#3b82f6', '#e94560']);
+
+            // Prepare nodes for D3
+            const d3Nodes = nodes.map(n => {
+                const displayBalance = Math.max(0, n.balance || 0);
+                const isZeroBalance = (n.balance || 0) <= 0;
+                return {
+                    id: n.address,
+                    label: (n.address_type === 'mint' && n.token_name) ? n.token_name : (n.pool_label || n.label || 'wallet'),
+                    address_type: n.address_type,
+                    pool_label: n.pool_label,
+                    token_name: n.token_name,
+                    balance: n.balance || 0,
+                    displayBalance: displayBalance,
+                    isZeroBalance: isZeroBalance,
+                    sol_balance: n.sol_balance || 0,
+                    funded_by: n.funded_by,
+                    interactions: n.interactions || { pools: [], programs: [], dexes: [] },
+                    radius: sizeScale(displayBalance),
+                    color: isZeroBalance ? '#666' : colorScale(displayBalance)
+                };
+            });
+
+            // Track nodes with close_ata events (self-edges where ATA was closed)
+            const closeAtaInfo = new Map(); // address -> { amount, sol returned }
+            (edges || []).forEach(e => {
+                if (e.type === 'close_ata' && e.source === e.target) {
+                    closeAtaInfo.set(e.source, {
+                        amount: e.amount,
+                        ins_index: e.ins_index
+                    });
+                }
+            });
+
+            // Add close_ata info to d3Nodes
+            d3Nodes.forEach(n => {
+                if (closeAtaInfo.has(n.id)) {
+                    n.closeAta = closeAtaInfo.get(n.id);
+                }
+            });
+
+            // Prepare edges for D3 - only include edges where both nodes exist
+            // Filter out self-edges (like close_ata) since they can't be rendered as lines
+            const d3Edges = (edges || [])
+                .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target) && e.source !== e.target)
+                .map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    amount: e.amount,
+                    type: e.type,
+                    token_symbol: e.token_symbol,
+                    tax_bps: e.tax_bps,
+                    tax_amount: e.tax_amount,
+                    signature: e.signature,
+                    block_time_utc: e.block_time_utc,
+                    dex: e.dex,
+                    ins_index: e.ins_index,
+                    source_label: e.source_label,
+                    target_label: e.target_label,
+                    pool_label: e.pool_label
+                }));
+
+            // Token tax: read pre-computed values from database
+            d3Edges.forEach(d => {
+                if (d.tax_bps && d.tax_bps >= 100) {
+                    const direction = d.type === 'swap_out' ? 'buy' :
+                                      (d.type === 'swap_in' ? 'sell' : 'transfer');
+                    d.tokenTax = {
+                        amount: d.tax_amount,
+                        percent: d.tax_bps / 100,
+                        received: d.amount - d.tax_amount,
+                        direction: direction
+                    };
+                }
+            });
+
+            // Add funded_by edges only if filter is enabled
+            if (showFundedBy) {
+                nodes.forEach(n => {
+                    if (n.funded_by && nodeMap.has(n.funded_by)) {
+                        d3Edges.push({
+                            source: n.funded_by,
+                            target: n.address,
+                            amount: 0,
+                            type: 'funded_by'
+                        });
+                    }
+                });
+            }
+
+            // Create SVG
+            svg = d3.select(container)
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            zoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => {
+                    currentTransform = event.transform;
+                    g.attr('transform', event.transform);
+                });
+
+            svg.call(zoom);
+            g = svg.append('g');
+
+            if (currentTransform !== d3.zoomIdentity) {
+                svg.call(zoom.transform, currentTransform);
+            }
+
+            // Create tooltip
+            const tooltip = d3.select('body').append('div')
+                .attr('class', 'tooltip')
+                .style('opacity', 0);
+
+            // Edge type colors by category
+            const edgeColors = {
+                // Swap - green/red
+                'swap_in': '#22c55e', 'swap_out': '#ef4444',
+                // Transfer - blue/purple
+                'spl_transfer': '#3b82f6', 'sol_transfer': '#60a5fa', 'wallet_funded': '#a855f7', 'funded_by': '#a855f7',
+                // Account - cyan
+                'create_ata': '#06b6d4', 'close_ata': '#0891b2',
+                // Fee - gray
+                'fee': '#6b7280', 'priority_fee': '#4b5563', 'protocol_fee': '#9ca3af',
+                // Lending - orange
+                'lend_deposit': '#f97316', 'lend_withdraw': '#ea580c', 'borrow': '#fb923c', 'repay': '#fdba74', 'liquidation': '#c2410c',
+                // Staking - amber
+                'stake': '#f59e0b', 'unstake': '#d97706', 'stake_reward': '#fbbf24',
+                // Liquidity - teal
+                'add_liquidity': '#14b8a6', 'remove_liquidity': '#0d9488', 'farm_deposit': '#2dd4bf', 'farm_withdraw': '#5eead4', 'lp_reward': '#99f6e4',
+                // Bridge - indigo
+                'bridge_in': '#6366f1', 'bridge_out': '#818cf8',
+                // Perp - rose
+                'perp_open': '#f43f5e', 'perp_close': '#fb7185', 'perp_deposit': '#e11d48', 'perp_withdraw': '#be123c',
+                'margin_deposit': '#fda4af', 'margin_withdraw': '#fecdd3', 'margin_call': '#9f1239', 'perp_liquidation': '#881337',
+                'funding_payment': '#fecaca', 'pnl_settlement': '#fca5a5',
+                // NFT - pink
+                'nft_mint': '#ec4899', 'nft_sale': '#f472b6', 'nft_transfer': '#f9a8d4',
+                // Other
+                'mint': '#22d3ee', 'burn': '#ff6b6b', 'airdrop': '#a78bfa', 'unknown': '#475569'
+            };
+
+            // Create edges
+            const link = g.append('g')
+                .selectAll('line')
+                .data(d3Edges)
+                .join('line')
+                .attr('class', 'edge-line')
+                .attr('stroke', d => edgeColors[d.type] || '#666')
+                .attr('stroke-width', d => ['funded_by', 'fee', 'priority_fee', 'protocol_fee'].includes(d.type) ? 1 : 3)
+                .attr('stroke-dasharray', d => ['funded_by', 'create_ata', 'close_ata'].includes(d.type) ? '4,4' : null)
+                .style('cursor', d => d.signature ? 'pointer' : 'default')
+                .on('mouseover', (event, d) => {
+                    if (!d.signature) return;
+                    d3.select(event.target).attr('stroke-width', 5);
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    const tokenSymbol = d.token_symbol || 'Unknown';
+                    const sourceLabel = d.source_label && !['unknown', 'wallet'].includes(d.source_label) ? d.source_label : null;
+                    const targetLabel = d.target_label && !['unknown', 'wallet'].includes(d.target_label) ? d.target_label : null;
+                    const poolLabel = d.pool_label || null;
+                    tooltip.html(`
+                        <div style="margin-bottom: 8px;">
+                            <span class="edge-type ${d.type}" style="display: inline-block; margin-bottom: 5px;">${d.type}</span>
+                            ${d.dex ? `<span style="color: #fbbf24; font-size: 11px; margin-left: 8px;">${d.dex}</span>` : ''}
+                        </div>
+                        ${sourceLabel || targetLabel ? `
+                        <div style="margin-bottom: 8px; font-size: 11px;">
+                            ${sourceLabel ? `<div>From: <span style="color: #a855f7;">${sourceLabel}</span></div>` : ''}
+                            ${targetLabel ? `<div>To: <span style="color: #22c55e;">${targetLabel}</span></div>` : ''}
+                        </div>
+                        ` : ''}
+                        <div class="stats">
+                            Amount: <span style="color: #22c55e; font-weight: bold;">${formatNumber(d.amount)} ${tokenSymbol}</span><br>
+                            ${d.tokenTax ? `Tax: <span style="color: #ef4444; font-weight: bold;">${d.tokenTax.percent.toFixed(1)}%</span> (${d.tokenTax.direction})<br>` : ''}
+                            Time: ${d.block_time_utc || 'N/A'}
+                            ${d.ins_index !== null && d.ins_index !== undefined ? `<br>Instruction: <span>#${d.ins_index}</span>` : ''}
+                        </div>
+                        ${poolLabel ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 10px;">
+                            <div style="color: #fbbf24;">${poolLabel}</div>
+                        </div>
+                        ` : ''}
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
+                            <div style="color: #aaa; font-size: 10px; margin-bottom: 3px;">Click to navigate:</div>
+                            <div class="address" style="font-size: 10px;">${d.signature}</div>
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', (event, d) => {
+                    d3.select(event.target).attr('stroke-width', d.type === 'funded_by' ? 1 : 3);
+                    tooltip.transition().duration(500).style('opacity', 0);
+                })
+                .on('click', (event, d) => {
+                    if (d.signature) {
+                        tooltip.style('opacity', 0);
+                        navigateTo(d.signature);
+                    }
+                });
+
+            // Create nodes
+            const node = g.append('g')
+                .selectAll('circle')
+                .data(d3Nodes)
+                .join('circle')
+                .attr('class', 'node-circle')
+                .attr('r', d => d.radius)
+                .attr('fill', d => d.color)
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1.5)
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended))
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    const displayName = d.pool_label || d.token_name || null;
+                    const ix = d.interactions || {};
+                    tooltip.html(`
+                        <div class="address">${d.id}</div>
+                        ${displayName ? `<div style="color: #fbbf24; font-weight: bold; margin-bottom: 8px;">${displayName}</div>` : ''}
+                        <div class="stats">
+                            Type: <span style="color: #a855f7;">${d.address_type || d.label}</span><br>
+                            Balance: <span>${formatNumber(d.balance)}</span><br>
+                            SOL: <span>${d.sol_balance.toFixed(4)}</span>
+                            ${d.funded_by ? '<br>Funded by: ' + d.funded_by.slice(0, 20) + '...' : ''}
+                            ${d.closeAta ? `<br><span style="color: #0891b2;">ATA Closed: +${d.closeAta.amount.toFixed(6)} SOL</span>` : ''}
+                        </div>
+                        ${ix.dexes?.length || ix.pools?.length ? `
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 11px;">
+                            ${ix.dexes?.length ? `<div>DEXes: <span style="color: #fbbf24;">${ix.dexes.join(', ')}</span></div>` : ''}
+                            ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
+                        </div>` : ''}
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
+                            Click to copy address &bull; Double-click to fetch txns
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                })
+                .on('click', (event, d) => {
+                    event.stopPropagation();
+                    copyAddr(d.id, null);
+                })
+                .on('dblclick', (event, d) => {
+                    event.stopPropagation();
+                    tooltip.style('opacity', 0);
+                    fetchWalletTransactions(d.id);
+                });
+
+            // Create Tax Man badges for edges with token tax 🕴️
+            const taxEdges = d3Edges.filter(d => d.tokenTax);
+            const taxMan = g.append('g')
+                .selectAll('g')
+                .data(taxEdges)
+                .join('g')
+                .attr('class', 'tax-man-badge')
+                .style('cursor', 'pointer')
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style('opacity', 1);
+                    tooltip.html(`
+                        <div style="margin-bottom: 8px;">
+                            <span style="font-size: 20px;">🕴️</span>
+                            <span style="color: #f97316; font-weight: bold; font-size: 14px; margin-left: 5px;">The Tax Man</span>
+                            <span style="color: #888; font-size: 11px; margin-left: 8px;">(${d.tokenTax.direction === 'sell' ? 'on sell' : 'on buy'})</span>
+                        </div>
+                        <div class="stats">
+                            <div style="margin-bottom: 5px;">
+                                Tax Rate: <span style="color: #ef4444; font-weight: bold;">${d.tokenTax.percent.toFixed(1)}%</span>
+                            </div>
+                            <div style="margin-bottom: 5px;">
+                                Tax Taken: <span style="color: #ef4444;">${formatNumber(d.tokenTax.amount)} ${d.token_symbol}</span>
+                            </div>
+                            <div style="margin-bottom: 5px;">
+                                ${d.tokenTax.direction === 'sell' ? 'Sent' : 'Expected'}: <span style="color: #22c55e;">${formatNumber(d.amount)} ${d.token_symbol}</span>
+                            </div>
+                            <div>
+                                ${d.tokenTax.direction === 'sell' ? 'Pool Received' : 'Wallet Received'}: <span style="color: #fbbf24;">${formatNumber(d.tokenTax.received)} ${d.token_symbol}</span>
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
+                            Token has built-in transfer tax
+                        </div>
+                    `)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px');
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style('opacity', 0);
+                });
+
+            // Tax Man icon (levitating suit emoji)
+            taxMan.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'central')
+                .attr('font-size', '18px')
+                .text('🕴️');
+
+            // Tax percentage label
+            taxMan.append('text')
+                .attr('text-anchor', 'middle')
+                .attr('dominant-baseline', 'hanging')
+                .attr('y', 12)
+                .attr('fill', '#ef4444')
+                .attr('font-size', '10px')
+                .attr('font-weight', 'bold')
+                .attr('stroke', '#1a1a2e')
+                .attr('stroke-width', 2)
+                .attr('paint-order', 'stroke')
+                .text(d => `-${d.tokenTax.percent.toFixed(0)}%`);
+
+            // Step numbers: show instruction order on Single TX views
+            const isSingleTx = document.getElementById('tx_limit').value === '1';
+            let stepBadges;
+            if (isSingleTx) {
+                const steppedEdges = d3Edges
+                    .filter(e => e.ins_index !== null && e.ins_index !== undefined && e.type !== 'funded_by')
+                    .sort((a, b) => a.ins_index - b.ins_index);
+                assignStepLabels(steppedEdges);
+                steppedEdges.forEach((e, i) => { e.stepNum = i + 1; });
+
+                stepBadges = g.append('g')
+                    .selectAll('g')
+                    .data(steppedEdges)
+                    .join('g')
+                    .attr('class', 'step-badge');
+
+                stepBadges.append('rect')
+                    .attr('x', d => d.stepLabel.length > 2 ? -13 : -9)
+                    .attr('y', -9)
+                    .attr('width', d => d.stepLabel.length > 2 ? 26 : 18)
+                    .attr('height', 18)
+                    .attr('rx', 9)
+                    .attr('fill', '#1a1a2e')
+                    .attr('stroke', '#60a5fa')
+                    .attr('stroke-width', 1.5);
+
+                stepBadges.append('text')
+                    .attr('text-anchor', 'middle')
+                    .attr('dominant-baseline', 'central')
+                    .attr('fill', '#60a5fa')
+                    .attr('font-size', '9px')
+                    .attr('font-weight', 'bold')
+                    .text(d => d.stepLabel);
+            }
+
+            // Create labels
+            const label = g.append('g')
+                .selectAll('text')
+                .data(d3Nodes)
+                .join('text')
+                .attr('class', 'node-label')
+                .text(d => d.id.slice(0, 6) + '...')
+                .attr('dy', d => d.radius + 12)
+                .style('display', showLabels ? 'block' : 'none');
+
+            // Force simulation
+            simulation = d3.forceSimulation(d3Nodes)
+                .force('link', d3.forceLink(d3Edges).id(d => d.id).distance(100))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => d.radius + 5))
+                .on('tick', () => {
+                    link
+                        .attr('x1', d => d.source.x)
+                        .attr('y1', d => d.source.y)
+                        .attr('x2', d => d.target.x)
+                        .attr('y2', d => d.target.y);
+
+                    node
+                        .attr('cx', d => d.x)
+                        .attr('cy', d => d.y);
+
+                    // Position Tax Man at edge midpoint
+                    taxMan
+                        .attr('transform', d => {
+                            const midX = (d.source.x + d.target.x) / 2;
+                            const midY = (d.source.y + d.target.y) / 2;
+                            return `translate(${midX}, ${midY - 5})`;
+                        });
+
+                    // Position step badges at 30% along edge (source side)
+                    if (stepBadges) {
+                        stepBadges.attr('transform', d => {
+                            const x = d.source.x + (d.target.x - d.source.x) * 0.3;
+                            const y = d.source.y + (d.target.y - d.source.y) * 0.3;
+                            return `translate(${x}, ${y})`;
+                        });
+                    }
+
+                    label
+                        .attr('x', d => d.x)
+                        .attr('y', d => d.y);
+                });
+
+            // Drag functions
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+        }
+
+        // Fetch wallet transactions via guide-producer
+        async function fetchWalletTransactions(address) {
+            showToast(`Fetching transactions for ${address.slice(0,8)}...`, 'pending');
+            
+            try {
+                const response = await fetch('/api/fetch-wallet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast(`Queued ${result.message || 'wallet fetch'}`, 'success');
+                } else {
+                    showToast(`Error: ${result.error || 'Unknown error'}`, 'error');
+                }
+            } catch (error) {
+                showToast(`Error: ${error.message}`, 'error');
+            }
+        }
+        
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('fetch-toast');
+            toast.textContent = message;
+            toast.className = 'fetch-toast show ' + type;
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 4000);
+        }
+
+        function copyAddr(addr, btn) {
+            navigator.clipboard.writeText(addr).then(() => {
+                if (btn) { btn.classList.add('copied'); btn.textContent = '\u2713'; setTimeout(() => { btn.classList.remove('copied'); btn.textContent = '\u{1F4CB}'; }, 1200); }
+                showToast(`Copied ${addr.slice(0,8)}...${addr.slice(-4)}`, 'success');
+            }).catch(() => {});
+        }
+
+        function assignStepLabels(edges) {
+            // Count edges per ins_index
+            const counts = {};
+            edges.forEach(e => { counts[e.ins_index] = (counts[e.ins_index] || 0) + 1; });
+            // Assign sub-indexes: "2" for solo, "2.1", "2.2" for shared ins_index
+            const seen = {};
+            edges.forEach(e => {
+                seen[e.ins_index] = (seen[e.ins_index] || 0) + 1;
+                e.stepLabel = counts[e.ins_index] > 1
+                    ? `${e.ins_index}.${seen[e.ins_index]}`
+                    : `${e.ins_index}`;
+            });
+            return edges;
+        }
+
+        function tokenTypeBadge(tokenType, small) {
+            const cls = small ? 'token-type-badge sm' : 'token-type-badge';
+            if (tokenType === 'fungible') return `<span class="${cls} ft">FT</span>`;
+            if (tokenType === 'semi_fungible') return `<span class="${cls} sft">SFT</span>`;
+            if (tokenType === 'nft') return `<span class="${cls} nft">NFT</span>`;
+            if (tokenType === 'unknown') return `<span class="${cls} unknown">?</span>`;
+            return '';
+        }
+
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
+            if (num >= 1) return num.toFixed(2);
+            if (num >= 0.01) return num.toFixed(4);
+            if (num >= 0.0001) return num.toFixed(6);
+            if (num > 0) return num.toFixed(9);
+            return '0';
+        }
+
+        // Timeline Variables
+        let timelineData = {
+            minTime: 0,
+            maxTime: 0,
+            currentTime: 0,
+            txCount: 0
+        };
+        let sliderDebounce = null;
+
+        async function initTimeline(token) {
+            if (!token?.mint && !token?.symbol) return;
+
+            try {
+                const params = token.mint
+                    ? `mint_address=${token.mint}`
+                    : `token_symbol=${token.symbol}`;
+
+                const response = await fetch(`/api/timerange?${params}`);
+                const data = await response.json();
+
+                if (data.min_time && data.max_time) {
+                    timelineData.minTime = data.min_time;
+                    timelineData.maxTime = data.max_time;
+                    timelineData.txCount = data.tx_count;
+
+                    // Show timeline section
+                    const section = document.getElementById('timeline-section');
+                    if (section) section.style.display = 'block';
+
+                    // Update labels
+                    document.getElementById('timeline-min-label').textContent =
+                        formatTimestamp(data.min_time);
+                    document.getElementById('timeline-max-label').textContent =
+                        formatTimestamp(data.max_time);
+                    document.getElementById('timeline-tx-count').textContent =
+                        data.tx_count.toLocaleString();
+
+                    // Setup slider
+                    const slider = document.getElementById('timeline-slider');
+                    slider.min = data.min_time;
+                    slider.max = data.max_time;
+
+                    // Set current position
+                    updateTimelinePosition(currentData?.result?.txs?.block_time || data.max_time);
+
+                    // Add event listener
+                    slider.removeEventListener('input', onSliderInput);
+                    slider.addEventListener('input', onSliderInput);
+                }
+            } catch (e) {
+                console.error('Failed to load timeline:', e);
+            }
+        }
+
+        function onSliderInput(e) {
+            const blockTime = parseInt(e.target.value);
+            timelineData.currentTime = blockTime;
+            document.getElementById('timeline-current-time').textContent =
+                formatTimestamp(blockTime);
+
+            // Debounce the API call
+            clearTimeout(sliderDebounce);
+            sliderDebounce = setTimeout(() => {
+                navigateToTime(blockTime);
+            }, 300);
+        }
+
+        function restoreTimelineUI() {
+            // Restore timeline labels and slider range from stored data
+            const minLabel = document.getElementById('timeline-min-label');
+            const maxLabel = document.getElementById('timeline-max-label');
+            const txCount = document.getElementById('timeline-tx-count');
+            const slider = document.getElementById('timeline-slider');
+
+            if (minLabel) minLabel.textContent = formatTimestamp(timelineData.minTime);
+            if (maxLabel) maxLabel.textContent = formatTimestamp(timelineData.maxTime);
+            if (txCount) txCount.textContent = timelineData.txCount.toLocaleString();
+
+            if (slider) {
+                slider.min = timelineData.minTime;
+                slider.max = timelineData.maxTime;
+                slider.removeEventListener('input', onSliderInput);
+                slider.addEventListener('input', onSliderInput);
+            }
+        }
+
+        function updateTimelinePosition(blockTime) {
+            if (!blockTime) return;
+            timelineData.currentTime = blockTime;
+            const slider = document.getElementById('timeline-slider');
+            if (slider) {
+                slider.value = blockTime;
+            }
+            const timeLabel = document.getElementById('timeline-current-time');
+            if (timeLabel) {
+                timeLabel.textContent = formatTimestamp(blockTime);
+            }
+        }
+
+        function navigateToTime(blockTime) {
+            // Use form values for token identification (not currentData)
+            const mintFromForm = document.getElementById('mint_address').value;
+            const symbolFromForm = document.getElementById('token_symbol').value;
+
+            if (mintFromForm) {
+                fetchData({
+                    mint_address: mintFromForm,
+                    block_time: blockTime
+                });
+            } else if (symbolFromForm) {
+                fetchData({
+                    token_symbol: symbolFromForm,
+                    block_time: blockTime
+                });
+            } else {
+                // Fallback to currentData mint (shouldn't normally happen)
+                const mint = currentData?.result?.token?.mint;
+                if (mint) {
+                    fetchData({
+                        mint_address: mint,
+                        block_time: blockTime
+                    });
+                }
+            }
+        }
+
+        function timelineJump(position) {
+            if (position === 'start') {
+                navigateToTime(timelineData.minTime);
+            } else if (position === 'end') {
+                navigateToTime(timelineData.maxTime);
+            }
+        }
+
+        function timelineStep(direction) {
+            const txs = currentData?.result?.txs;
+            if (!txs) return;
+
+            if (direction === -1 && txs.prev && txs.prev.length > 0) {
+                // Go to first previous tx
+                navigateTo(txs.prev[0].signature);
+            } else if (direction === 1 && txs.next && txs.next.length > 0) {
+                // Go to first next tx
+                navigateTo(txs.next[0].signature);
+            }
+        }
+
+        function formatTimestamp(unixTime) {
+            if (!unixTime) return '--';
+            const date = new Date(unixTime * 1000);
+            return date.toLocaleString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        // AI Explanation functionality
+        async function fetchExplanation(signature) {
+            const container = document.getElementById('explanation-container');
+            if (!container) return;
+
+            // Show loading state
+            container.innerHTML = `
+                <div class="explanation-panel">
+                    <div class="explanation-header">
+                        <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
+                    </div>
+                    <div class="explanation-loading">Analyzing transaction</div>
+                </div>
+            `;
+
+            try {
+                const params = new URLSearchParams({ signature });
+                const response = await fetch(`/api/bmap/explain?${params}`);
+                const data = await response.json();
+
+                if (data.error) {
+                    container.innerHTML = `
+                        <div class="explanation-panel">
+                            <div class="explanation-header">
+                                <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
+                            </div>
+                            <div class="explanation-error">${data.error}</div>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Convert markdown to structured HTML with section headings + indented bodies
+                const explanationHtml = data.explanation
+                    .split('\n\n')
+                    .filter(p => p.trim())
+                    .map(p => {
+                        const trimmed = p.trim();
+                        // Detect **Heading:** pattern (section headers)
+                        const headingMatch = trimmed.match(/^\*\*(.+?)\*\*\s*(.*)/s);
+                        if (headingMatch) {
+                            const heading = headingMatch[1];
+                            const body = headingMatch[2]?.trim();
+                            let html = `<div class="section-heading">${heading}</div>`;
+                            if (body) html += `<div class="section-body">${body.replace(/\n/g, '<br>')}</div>`;
+                            return html;
+                        }
+                        return `<div class="section-body">${trimmed.replace(/\n/g, '<br>')}</div>`;
+                    })
+                    .join('');
+
+                const usage = data.usage || {};
+                const costLine = usage.input_tokens ? `
+                    <div class="explanation-cost">
+                        <span>In: <span class="cost-value">${usage.input_tokens.toLocaleString()}</span> tokens</span>
+                        <span>Out: <span class="cost-value">${usage.output_tokens.toLocaleString()}</span> tokens</span>
+                        <span>Cost: <span class="cost-usd">$${usage.cost_usd.toFixed(4)}</span></span>
+                    </div>
+                ` : '';
+
+                container.innerHTML = `
+                    <div class="explanation-panel">
+                        <div class="explanation-header">
+                            <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
+                            <span class="model-badge">${data.model || 'claude'}</span>
+                        </div>
+                        ${costLine}
+                        <div class="explanation-content">${explanationHtml}</div>
+                    </div>
+                `;
+            } catch (error) {
+                container.innerHTML = `
+                    <div class="explanation-panel">
+                        <div class="explanation-header">
+                            <h3><span style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px;">AI</span> Transaction Explanation</h3>
+                        </div>
+                        <div class="explanation-error">Failed to fetch explanation: ${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+
+        function toggleCollapsible(header) {
+            header.classList.toggle('collapsed');
+            const content = header.nextElementSibling;
+            content.classList.toggle('collapsed');
+        }
+
+        // Load with default on page load if URL has params
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('token_symbol')) {
+            document.getElementById('token_symbol').value = urlParams.get('token_symbol');
+            fetchData();
+        }
+    </script>
+</body>
+</html>
