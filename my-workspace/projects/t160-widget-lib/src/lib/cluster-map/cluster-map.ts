@@ -20,7 +20,9 @@ import {
   BubbleMapEdge,
   BubbleMapQueryParams,
   D3Node,
-  D3Link
+  D3Link,
+  WalletTokenTx,
+  NodeEdgeRow
 } from './cluster-map.models';
 
 @Component({
@@ -79,6 +81,13 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   queryPanelExpanded = true;
   tokenInfoPanelExpanded = true;
   txNavPanelExpanded = true;
+
+  // Transaction history below the map
+  nodeEdgeRows: NodeEdgeRow[] = [];
+  walletTxs: WalletTokenTx[] = [];
+  walletTxsLoading = false;
+  walletTxsError = '';
+  txHistoryTab: 'edges' | 'history' = 'history';
 
   // D3 elements
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
@@ -730,12 +739,89 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   private onNodeClick(event: MouseEvent, d: D3Node): void {
     event.stopPropagation();
     this.selectedNode = d;
+    this.txHistoryTab = d.isProgram ? 'edges' : 'history';
+    this.buildNodeEdgeRows(d.id);
     this.nodeSelected.emit(d);
+
+    // Load wallet tx history for any non-program node
+    if (!d.isProgram && this.currentData?.result?.token?.mint) {
+      this.loadWalletTxs(d.id, this.currentData.result.token.mint);
+    } else {
+      this.walletTxs = [];
+      this.walletTxsLoading = false;
+      this.walletTxsError = '';
+    }
   }
 
   closeDetailsPanel(): void {
     this.selectedNode = null;
+    this.nodeEdgeRows = [];
+    this.walletTxs = [];
+    this.walletTxsLoading = false;
+    this.walletTxsError = '';
     this.nodeSelected.emit(null);
+  }
+
+  private buildNodeEdgeRows(nodeAddress: string): void {
+    if (!this.currentData?.result?.edges) {
+      this.nodeEdgeRows = [];
+      return;
+    }
+
+    const nodeMap = new Map(
+      (this.currentData.result.nodes || []).map(n => [n.address, n])
+    );
+
+    this.nodeEdgeRows = this.currentData.result.edges
+      .filter(e => e.source === nodeAddress || e.target === nodeAddress)
+      .map(e => {
+        const isSource = e.source === nodeAddress;
+        const counterpartyAddr = isSource ? e.target : e.source;
+        const counterpartyNode = nodeMap.get(counterpartyAddr);
+        const counterpartyLabel = isSource
+          ? (e.target_label || counterpartyNode?.pool_label || counterpartyNode?.token_name || counterpartyNode?.label || '')
+          : (e.source_label || counterpartyNode?.pool_label || counterpartyNode?.token_name || counterpartyNode?.label || '');
+
+        return {
+          block_time_utc: e.block_time_utc || '',
+          block_time: e.block_time || 0,
+          type: e.type || e.edge_type || 'unknown',
+          direction: isSource ? 'out' : 'in',
+          amount: e.amount || 0,
+          amount_usd: e.amount_usd || 0,
+          counterparty: counterpartyAddr,
+          counterparty_label: counterpartyLabel,
+          dex_pool: e.pool_label || e.dex || '',
+          signature: e.signature || (e.signatures?.length ? e.signatures[0] : '')
+        } as NodeEdgeRow;
+      })
+      .sort((a, b) => b.block_time - a.block_time);
+  }
+
+  private loadWalletTxs(address: string, mintAddress: string): void {
+    this.walletTxsLoading = true;
+    this.walletTxsError = '';
+    this.walletTxs = [];
+
+    this.clusterMapService.getWalletTokenTxs(address, mintAddress).subscribe({
+      next: (data) => {
+        this.walletTxsLoading = false;
+        if (data.error) {
+          this.walletTxsError = data.error;
+        } else {
+          this.walletTxs = data.transactions;
+        }
+      },
+      error: (err) => {
+        this.walletTxsLoading = false;
+        this.walletTxsError = err.message || 'Failed to load transactions';
+      }
+    });
+  }
+
+  formatAddress(address: string): string {
+    if (!address || address.length < 8) return address || '';
+    return `${address.slice(0, 4)}...${address.slice(-4)}`;
   }
 
   toggleQueryPanel(): void {

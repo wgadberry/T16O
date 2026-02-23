@@ -6,7 +6,7 @@ import { providePrimeNG } from 'primeng/config';
 import Aura from '@primeng/themes/aura';
 
 import { routes } from './app.routes';
-import { CLUSTER_MAP_API_URL } from 't160-widget-lib';
+import { CLUSTER_MAP_API_URL, CLUSTER_MAP_API_KEY } from 't160-widget-lib';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -24,7 +24,8 @@ export const appConfig: ApplicationConfig = {
         }
       }
     }),
-    // Configure the API URL for the cluster map service
-    { provide: CLUSTER_MAP_API_URL, useValue: 'https://localhost:7261/api/BubbleMap' }
+    // Configure the API URL and key for the cluster map service
+    { provide: CLUSTER_MAP_API_URL, useValue: 'https://svcs.the16oracles.io/api/bmap/get' },
+    { provide: CLUSTER_MAP_API_KEY, useValue: 'BMFer' }
   ]
 };

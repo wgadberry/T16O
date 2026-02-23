@@ -514,6 +514,235 @@
   color: #ef4444;
 }
 
+/* Transaction History Section */
+.tx-history-section {
+  margin-top: 1rem;
+  background: var(--surface-card, #1e1e2e);
+  border: 1px solid var(--surface-border, #3f3f46);
+  border-radius: var(--border-radius, 6px);
+  overflow: hidden;
+}
+
+.tx-history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--surface-border, #3f3f46);
+  background: var(--surface-ground, #18181b);
+}
+
+.tx-history-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-color, #e0e0e0);
+}
+
+.tx-history-name {
+  font-weight: 600;
+}
+
+.tx-history-address {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--text-color-secondary, #a1a1aa);
+  font-weight: 400;
+}
+
+.tx-history-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tx-tab-bar {
+  display: flex;
+  gap: 2px;
+  background: var(--surface-ground, #18181b);
+  border: 1px solid var(--surface-border, #3f3f46);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.tx-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  border: none;
+  background: transparent;
+  color: var(--text-color-secondary, #a1a1aa);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.tx-tab:hover {
+  color: var(--text-color, #e0e0e0);
+  background: var(--surface-hover, #27272a);
+}
+
+.tx-tab.active {
+  color: var(--primary-color, #3b82f6);
+  background: var(--surface-card, #1e1e2e);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.tab-count {
+  font-size: 0.65rem;
+  background: var(--primary-color, #3b82f6);
+  color: #fff;
+  padding: 0.1rem 0.4rem;
+  border-radius: 10px;
+  font-weight: 600;
+  min-width: 18px;
+  text-align: center;
+}
+
+.tx-history-body {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.tx-history-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  color: var(--text-color-secondary, #a1a1aa);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.tx-history-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  justify-content: center;
+  color: var(--text-color-secondary, #a1a1aa);
+}
+
+.tx-table-wrapper {
+  overflow-x: auto;
+}
+
+.tx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.tx-table th {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-color-secondary, #a1a1aa);
+  border-bottom: 1px solid var(--surface-border, #3f3f46);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--surface-card, #1e1e2e);
+  z-index: 1;
+}
+
+.tx-table th.text-right {
+  text-align: right;
+}
+
+.tx-row td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--surface-border, #3f3f46);
+  vertical-align: middle;
+}
+
+.tx-row:hover {
+  background: var(--surface-hover, #27272a);
+}
+
+.tx-row:last-child td {
+  border-bottom: none;
+}
+
+.tx-time-cell {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--text-color-secondary, #a1a1aa);
+  white-space: nowrap;
+}
+
+.tx-direction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.tx-direction.in {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.tx-direction.out {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.amount-cell {
+  font-family: monospace;
+  font-weight: 500;
+}
+
+.post-balance-cell {
+  font-family: monospace;
+  color: var(--text-color-secondary, #a1a1aa);
+}
+
+.text-right {
+  text-align: right;
+}
+
+.counterparty-cell {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dex-cell {
+  color: var(--text-color-secondary, #a1a1aa);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.sig-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.sig-link {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--primary-color, #3b82f6);
+  cursor: pointer;
+}
+
+.sig-link:hover {
+  text-decoration: underline;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .node-details-panel {

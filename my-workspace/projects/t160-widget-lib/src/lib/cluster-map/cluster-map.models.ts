@@ -88,6 +88,40 @@ export interface BubbleMapQueryParams {
   tx_limit?: number;
 }
 
+export interface WalletTokenTx {
+  signature: string;
+  block_time: number;
+  block_time_utc: string;
+  type: string;
+  direction: string;
+  amount: number;
+  counterparty?: string;
+  counterparty_label?: string;
+  post_balance?: number;
+  dex?: string;
+  pool_label?: string;
+}
+
+export interface WalletTokenTxResponse {
+  address: string;
+  token_symbol?: string;
+  transactions: WalletTokenTx[];
+  error?: string;
+}
+
+export interface NodeEdgeRow {
+  block_time_utc: string;
+  block_time: number;
+  type: string;
+  direction: string;
+  amount: number;
+  amount_usd: number;
+  counterparty: string;
+  counterparty_label: string;
+  dex_pool: string;
+  signature: string;
+}
+
 // D3 simulation node interface (extends d3.SimulationNodeDatum)
 export interface D3Node {
   id: string;

@@ -196,4 +196,139 @@
     </div>
 
   </p-card>
+
+  <!-- Transaction History (shown below the map when a bubble is clicked) -->
+  <div class="tx-history-section" *ngIf="selectedNode">
+    <div class="tx-history-header">
+      <div class="tx-history-title">
+        <i class="pi pi-history"></i>
+        <span>Transaction History</span>
+        <span class="tx-history-name" [style.color]="selectedNode.color">{{ selectedNode.name }}</span>
+        <span class="tx-history-address">({{ formatAddress(selectedNode.id) }})</span>
+      </div>
+      <div class="tx-history-controls">
+        <div class="tx-tab-bar">
+          <button class="tx-tab" [class.active]="txHistoryTab === 'edges'" (click)="txHistoryTab = 'edges'">
+            Map Edges
+            <span class="tab-count" *ngIf="nodeEdgeRows.length > 0">{{ nodeEdgeRows.length }}</span>
+          </button>
+          <button class="tx-tab" [class.active]="txHistoryTab === 'history'" (click)="txHistoryTab = 'history'">
+            Token History
+            <span class="tab-count" *ngIf="walletTxs.length > 0">{{ walletTxs.length }}</span>
+          </button>
+        </div>
+        <button pButton icon="pi pi-times" class="p-button-text p-button-rounded p-button-sm" (click)="closeDetailsPanel()"></button>
+      </div>
+    </div>
+
+    <!-- Map Edges Tab -->
+    <div class="tx-history-body" *ngIf="txHistoryTab === 'edges'">
+      <div *ngIf="nodeEdgeRows.length === 0" class="tx-history-empty">
+        No map edges for this node
+      </div>
+      <div *ngIf="nodeEdgeRows.length > 0" class="tx-table-wrapper">
+        <table class="tx-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Dir</th>
+              <th class="text-right">Amount</th>
+              <th>Counterparty</th>
+              <th>DEX / Pool</th>
+              <th>Signature</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of nodeEdgeRows" class="tx-row">
+              <td class="tx-time-cell">{{ row.block_time_utc }}</td>
+              <td>
+                <span class="edge-type" [ngClass]="row.type">{{ row.type }}</span>
+              </td>
+              <td>
+                <span class="tx-direction" [ngClass]="row.direction">
+                  <i class="pi" [ngClass]="row.direction === 'in' ? 'pi-arrow-down-left' : 'pi-arrow-up-right'"></i>
+                  {{ row.direction }}
+                </span>
+              </td>
+              <td class="text-right amount-cell">{{ row.amount | number:'1.0-4' }}</td>
+              <td class="counterparty-cell">
+                <span [title]="row.counterparty">{{ row.counterparty_label || formatAddress(row.counterparty) || '-' }}</span>
+                <button *ngIf="row.counterparty" pButton icon="pi pi-copy" class="p-button-text p-button-sm copy-btn" (click)="copyToClipboard(row.counterparty)" pTooltip="Copy address"></button>
+              </td>
+              <td class="dex-cell">{{ row.dex_pool || '-' }}</td>
+              <td class="sig-cell">
+                <ng-container *ngIf="row.signature">
+                  <span class="sig-link" (click)="navigateToTransaction(row.signature)" [title]="row.signature">
+                    {{ row.signature.slice(0, 8) }}...
+                  </span>
+                  <button pButton icon="pi pi-copy" class="p-button-text p-button-sm copy-btn" (click)="copyToClipboard(row.signature)" pTooltip="Copy signature"></button>
+                </ng-container>
+                <span *ngIf="!row.signature">-</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Token History Tab -->
+    <div class="tx-history-body" *ngIf="txHistoryTab === 'history'">
+      <div *ngIf="walletTxsLoading" class="tx-history-loading">
+        <p-progressSpinner [style]="{ width: '30px', height: '30px' }"></p-progressSpinner>
+        <span>Loading transaction history...</span>
+      </div>
+
+      <p-message *ngIf="walletTxsError" severity="error" [text]="walletTxsError" styleClass="w-full"></p-message>
+
+      <div *ngIf="!walletTxsLoading && !walletTxsError && walletTxs.length === 0" class="tx-history-empty">
+        <span *ngIf="selectedNode.isProgram">Transaction history not available for program accounts</span>
+        <span *ngIf="!selectedNode.isProgram">No token transactions found</span>
+      </div>
+
+      <div *ngIf="walletTxs.length > 0" class="tx-table-wrapper">
+        <table class="tx-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Dir</th>
+              <th class="text-right">Amount</th>
+              <th class="text-right">Post Balance</th>
+              <th>Counterparty</th>
+              <th>DEX / Pool</th>
+              <th>Signature</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let tx of walletTxs" class="tx-row">
+              <td class="tx-time-cell">{{ tx.block_time_utc }}</td>
+              <td>
+                <span class="edge-type" [ngClass]="tx.type">{{ tx.type }}</span>
+              </td>
+              <td>
+                <span class="tx-direction" [ngClass]="tx.direction">
+                  <i class="pi" [ngClass]="tx.direction === 'in' ? 'pi-arrow-down-left' : 'pi-arrow-up-right'"></i>
+                  {{ tx.direction }}
+                </span>
+              </td>
+              <td class="text-right amount-cell">{{ tx.amount | number:'1.0-4' }}</td>
+              <td class="text-right post-balance-cell">{{ tx.post_balance !== null && tx.post_balance !== undefined ? (tx.post_balance | number:'1.0-2') : '-' }}</td>
+              <td class="counterparty-cell">
+                <span [title]="tx.counterparty || ''">{{ tx.counterparty_label || (tx.counterparty ? formatAddress(tx.counterparty) : '-') }}</span>
+                <button *ngIf="tx.counterparty" pButton icon="pi pi-copy" class="p-button-text p-button-sm copy-btn" (click)="copyToClipboard(tx.counterparty)" pTooltip="Copy address"></button>
+              </td>
+              <td class="dex-cell">{{ tx.pool_label || tx.dex || '-' }}</td>
+              <td class="sig-cell">
+                <span class="sig-link" (click)="navigateToTransaction(tx.signature)" [title]="tx.signature">
+                  {{ tx.signature.slice(0, 8) }}...
+                </span>
+                <button pButton icon="pi pi-copy" class="p-button-text p-button-sm copy-btn" (click)="copyToClipboard(tx.signature)" pTooltip="Copy signature"></button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
