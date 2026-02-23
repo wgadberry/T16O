@@ -15,9 +15,9 @@ BEGIN
     SET p_tx_count = 0, p_edge_count = 0, p_address_count = 0,
         p_transfer_count = 0, p_swap_count = 0, p_activity_count = 0;
 
-    -- =========================================================================
-    -- 1. STAGE: Transactions
-    -- =========================================================================
+    
+    
+    
     DROP TEMPORARY TABLE IF EXISTS tmp_tx_stage;
     CREATE TEMPORARY TABLE tmp_tx_stage (
         tx_hash VARCHAR(90) PRIMARY KEY,
@@ -27,8 +27,8 @@ BEGIN
     INSERT INTO tmp_tx_stage (tx_hash)
     SELECT jt.tx_hash FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (tx_hash VARCHAR(90) PATH '$.tx_hash')) AS jt;
 
-    -- tx_state bits: 1=SHREDDED, 2=DECODED, 4=GUIDE_EDGES, 8=ADDRESSES_QUEUED, 16=SWAPS_PARSED, 32=TRANSFERS_PARSED
-    -- SHREDDER_COMPLETE = 63 (all 6 bits for shredder phases)
+    
+    
     INSERT INTO tx (signature, block_id, block_time, block_time_utc, fee, priority_fee, tx_state)
     SELECT jt.tx_hash, jt.block_id, jt.block_time, FROM_UNIXTIME(jt.block_time), jt.fee, jt.p_fee, 63
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
@@ -42,12 +42,12 @@ BEGIN
     UPDATE tmp_tx_stage ts JOIN tx t ON t.signature = ts.tx_hash SET ts.tx_id = t.id;
     SELECT COUNT(*) INTO p_tx_count FROM tmp_tx_stage;
 
-    -- =========================================================================
-    -- 2. STAGE: Unified Address Extraction (transfers + activities)
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_address (address, address_type)
     SELECT addr, a_type FROM (
-        -- Transfer addresses
+        
         SELECT source_owner AS addr, 'wallet' AS a_type FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (source_owner VARCHAR(44) PATH '$.source_owner')) AS j1
         UNION DISTINCT SELECT destination_owner, 'wallet' FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (destination_owner VARCHAR(44) PATH '$.destination_owner')) AS j2
         UNION DISTINCT SELECT source, 'ata' FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (source VARCHAR(44) PATH '$.source')) AS j3
@@ -55,9 +55,9 @@ BEGIN
         UNION DISTINCT SELECT token_address, 'mint' FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (token_address VARCHAR(44) PATH '$.token_address')) AS j5
         UNION DISTINCT SELECT program_id, 'program' FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (program_id VARCHAR(44) PATH '$.program_id')) AS j6
         UNION DISTINCT SELECT outer_program_id, 'program' FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (outer_program_id VARCHAR(44) PATH '$.outer_program_id')) AS j7
-        -- Activity addresses
+        
         UNION DISTINCT SELECT acc_addr, 'wallet' FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (acc_addr VARCHAR(44) PATH '$.data.account')) AS j8
-        UNION DISTINCT SELECT amm_id, 'pool' FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (amm_id VARCHAR(44) PATH '$.data.amm_id')) AS j9
+      --  UNION DISTINCT SELECT amm_id, 'pool' FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (amm_id VARCHAR(44) PATH '$.data.amm_id')) AS j9
         UNION DISTINCT SELECT program_id, 'program' FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (program_id VARCHAR(44) PATH '$.program_id')) AS j10
         UNION DISTINCT SELECT outer_program_id, 'program' FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (outer_program_id VARCHAR(44) PATH '$.outer_program_id')) AS j11
         UNION DISTINCT SELECT token_1, 'mint' FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (token_1 VARCHAR(44) PATH '$.data.token_1')) AS j12
@@ -66,10 +66,10 @@ BEGIN
 
     SELECT COUNT(*) INTO p_address_count FROM (SELECT 1 FROM tx_address LIMIT 1) t;
 
-    -- =========================================================================
-    -- 2b. FIX: Update address_type to 'pool' for amm_id addresses
-    -- (INSERT IGNORE may have set them as 'wallet' if they appeared in account field first)
-    -- =========================================================================
+    
+    
+    
+    
     UPDATE tx_address a
     JOIN (
         SELECT DISTINCT amm_addr FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
@@ -79,11 +79,11 @@ BEGIN
     ) pools ON a.address = pools.amm_addr
     SET a.address_type = 'pool';
 
-    -- =========================================================================
-    -- 3. ENSURE: Programs, Pools, Tokens exist
-    -- =========================================================================
+    
+    
     INSERT IGNORE INTO tx_program (program_address_id)
     SELECT DISTINCT id FROM tx_address WHERE address_type = 'program';
+
 
     INSERT IGNORE INTO tx_pool (pool_address_id)
     SELECT DISTINCT a.id FROM tx_address a
@@ -96,7 +96,7 @@ BEGIN
     )) AS jt JOIN tx_address a ON a.address = jt.t_addr WHERE jt.t_addr IS NOT NULL
     ON DUPLICATE KEY UPDATE decimals = COALESCE(VALUES(decimals), decimals);
 
-    -- Also ensure tokens from activities exist
+    
     INSERT INTO tx_token (mint_address_id)
     SELECT DISTINCT a.id FROM JSON_TABLE(p_json, '$.data[*].activities[*]' COLUMNS (
         token_1 VARCHAR(44) PATH '$.data.token_1'
@@ -109,9 +109,9 @@ BEGIN
     )) AS jt JOIN tx_address a ON a.address = jt.token_2 WHERE jt.token_2 IS NOT NULL
     ON DUPLICATE KEY UPDATE mint_address_id = VALUES(mint_address_id);
 
-    -- =========================================================================
-    -- 4. INSERT: ALL activities[] → tx_activity
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_activity (tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, account_address_id)
     SELECT ts.tx_id, jt.idx, jt.o_idx, jt.name, jt.a_type, prg.id, oprg.id, a_acc.id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
@@ -136,9 +136,9 @@ BEGIN
 
     SET p_activity_count = ROW_COUNT();
 
-    -- =========================================================================
-    -- 5. INSERT: transfers[] → tx_activity (with derived name from tx_program)
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_activity (tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, account_address_id)
     SELECT ts.tx_id, jt.idx, jt.o_idx, prg.name, jt.t_type, prg.id, oprg.id, s_own.id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
@@ -162,10 +162,10 @@ BEGIN
 
     SET p_activity_count = p_activity_count + ROW_COUNT();
 
-    -- =========================================================================
-    -- 5b. UPDATE: Propagate parent activity name to nested activities
-    -- Nested activities (outer_ins_index >= 0) inherit name from parent
-    -- =========================================================================
+    
+    
+    
+    
     UPDATE tx_activity child
     JOIN tx_activity parent ON parent.tx_id = child.tx_id
                             AND parent.ins_index = child.outer_ins_index
@@ -176,9 +176,9 @@ BEGIN
     WHERE child.outer_ins_index >= 0
       AND child.name IS NULL;
 
-    -- =========================================================================
-    -- 6. INSERT: tx_swap (with activity_id lookup)
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_swap (activity_id, tx_id, ins_index, outer_ins_index, name, activity_type, program_id, outer_program_id, amm_id, account_address_id, token_1_id, token_2_id, amount_1, amount_2)
     SELECT act.id, ts.tx_id, jt.idx, jt.o_idx, jt.name, jt.a_type, prg.id, oprg.id, pol.id, a_acc.id, tk1.id, tk2.id, jt.a1, jt.a2
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
@@ -210,9 +210,9 @@ BEGIN
 
     SET p_swap_count = ROW_COUNT();
 
-    -- =========================================================================
-    -- 7. INSERT: tx_transfer (with activity_id lookup)
-    -- =========================================================================
+    
+    
+    
     INSERT IGNORE INTO tx_transfer (activity_id, tx_id, ins_index, outer_ins_index, transfer_type, program_id, outer_program_id, token_id, decimals, amount, source_address_id, source_owner_address_id, destination_address_id, destination_owner_address_id)
     SELECT act.id, ts.tx_id, jt.idx, jt.o_idx, jt.t_type, prg.id, oprg.id, tk.id, jt.decimal_val, jt.amt, s_ata.id, s_own.id, d_ata.id, d_own.id
     FROM JSON_TABLE(p_json, '$.data[*]' COLUMNS (
@@ -245,10 +245,8 @@ BEGIN
 
     SET p_transfer_count = ROW_COUNT();
 
-    -- =========================================================================
-    -- CLEANUP
-    -- =========================================================================
+    
+    
+    
     DROP TEMPORARY TABLE IF EXISTS tmp_tx_stage;
-END;;
-
-DELIMITER ;
+END

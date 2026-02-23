@@ -3,7 +3,7 @@
 -- ============================================================================
 --
 -- Checks data flow from source tables (tx_activity, tx_swap, tx_transfer)
--- into derived tables (tx_guide, tx_funding_edge, tx_token_participant)
+-- into derived tables (tx_guide, tx_token_participant)
 --
 -- Usage:
 --   mysql -h localhost -P 3396 -u root -p t16o_db < sp_tx_data_integrity_check.sql
@@ -20,7 +20,6 @@ SELECT 'tx_activity' as tbl, COUNT(*) as cnt FROM tx_activity
 UNION ALL SELECT 'tx_swap', COUNT(*) FROM tx_swap
 UNION ALL SELECT 'tx_transfer', COUNT(*) FROM tx_transfer
 UNION ALL SELECT 'tx_guide', COUNT(*) FROM tx_guide
-UNION ALL SELECT 'tx_funding_edge', COUNT(*) FROM tx_funding_edge
 UNION ALL SELECT 'tx_token_participant', COUNT(*) FROM tx_token_participant;
 
 
@@ -255,22 +254,7 @@ SELECT 'tx_token_participant total', COUNT(*) FROM tx_token_participant;
 
 
 -- ============================================================================
--- 12. tx_funding_edge STATS
--- ============================================================================
-SELECT '=== 12. tx_funding_edge STATS ===' as section;
-
-SELECT
-    'tx_funding_edge total' as metric, COUNT(*) as cnt FROM tx_funding_edge
-UNION ALL
-SELECT 'Addresses with funded_by set', COUNT(*)
-FROM tx_address WHERE funded_by_address_id IS NOT NULL
-UNION ALL
-SELECT 'Addresses with init_tx_fetched=1', COUNT(*)
-FROM tx_address WHERE init_tx_fetched = 1;
-
-
--- ============================================================================
--- 13. INDEXES CHECK
+-- 12. INDEXES CHECK
 -- ============================================================================
 SELECT '=== 13. KEY INDEXES ===' as section;
 

@@ -44,6 +44,8 @@ API Endpoints:
 
 import argparse
 import json
+import os
+import sys
 import uuid
 import hashlib
 import threading
@@ -74,26 +76,24 @@ except ImportError:
     HAS_MYSQL = False
 
 # =============================================================================
-# Configuration
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-# Database
-DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 3396,
-    'user': 'root',
-    'password': 'rootpassword',
-    'database': 't16o_db',
-    'autocommit': True,  # Prevent table locks when idle
-}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_queue_names,
+)
 
-# RabbitMQ
+_rmq = get_rabbitmq_config()
+_queues = get_queue_names('gateway')
+
+DB_CONFIG = get_db_config()
 RABBITMQ_CONFIG = {
-    'host': 'localhost',
-    'port': 5692,
-    'user': 'admin',
-    'password': 'admin123',
-    'vhost': 't16o_mq'
+    'host':     _rmq['host'],
+    'port':     _rmq['port'],
+    'user':     _rmq['user'],
+    'password': _rmq['password'],
+    'vhost':    _rmq['vhost'],
 }
 
 # Gateway
@@ -101,8 +101,9 @@ GATEWAY_PORT = 5100
 GATEWAY_HOST = '0.0.0.0'
 
 # Queue names
-GATEWAY_REQUEST_QUEUE = 'mq.guide.gateway.request'
-GATEWAY_RESPONSE_QUEUE = 'mq.guide.gateway.response'
+GATEWAY_REQUEST_QUEUE = _queues['request']
+GATEWAY_RESPONSE_QUEUE = _queues['response']
+GATEWAY_DLQ = _queues['dlq']
 
 # Correlation tracking for pipeline completion detection
 # Structure: {correlation_id: {
@@ -249,58 +250,25 @@ def mark_producer_done(correlation_id: str, total_batches: int) -> Optional[Dict
         print(f"[TRACK] {correlation_id[:8]}: expecting {total_batches} batches, received so far: {received_counts}")
         return None
 
-# Worker registry with queue mappings
-WORKER_REGISTRY = {
-    'producer': {
-        'request_queue': 'mq.guide.producer.request',
-        'response_queue': 'mq.guide.producer.response',
-        'dlq': 'mq.guide.producer.dlq',
-        'description': 'Fetches transaction signatures from RPC',
-        'cascade_to': []  # Producer handles cascade to decoder/detailer directly
-    },
-    'decoder': {
-        'request_queue': 'mq.guide.decoder.request',
-        'response_queue': 'mq.guide.decoder.response',
-        'dlq': 'mq.guide.decoder.dlq',
-        'description': 'Fetches decoded transaction actions from Solscan',
-        'cascade_to': []  # Shredder polls staging table
-    },
-    'detailer': {
-        'request_queue': 'mq.guide.detailer.request',
-        'response_queue': 'mq.guide.detailer.response',
-        'dlq': 'mq.guide.detailer.dlq',
-        'description': 'Enriches transactions with balance change details',
-        'cascade_to': []
-    },
-    'funder': {
-        'request_queue': 'mq.guide.funder.request',
-        'response_queue': 'mq.guide.funder.response',
-        'dlq': 'mq.guide.funder.dlq',
-        'description': 'Discovers funding relationships for addresses',
-        'cascade_to': []
-    },
-    'aggregator': {
-        'request_queue': 'mq.guide.aggregator.request',
-        'response_queue': 'mq.guide.aggregator.response',
-        'dlq': 'mq.guide.aggregator.dlq',
-        'description': 'Syncs funding edges and guide data',
-        'cascade_to': ['enricher']
-    },
-    'enricher': {
-        'request_queue': 'mq.guide.enricher.request',
-        'response_queue': 'mq.guide.enricher.response',
-        'dlq': 'mq.guide.enricher.dlq',
-        'description': 'Enriches token and pool metadata',
-        'cascade_to': []
-    },
-    'shredder': {
-        'request_queue': 'mq.guide.shredder.request',  # Not used - shredder polls staging
-        'response_queue': 'mq.guide.shredder.response',
-        'dlq': 'mq.guide.shredder.dlq',
-        'description': 'Processes staged data into tx tables',
-        'cascade_to': []
+# Worker registry with queue mappings (derived from common.config)
+def _build_worker_registry():
+    workers = {
+        'producer':   {'description': 'Fetches transaction signatures from RPC',     'cascade_to': []},
+        'decoder':    {'description': 'Fetches decoded transaction actions from Solscan', 'cascade_to': []},
+        'detailer':   {'description': 'Enriches transactions with balance change details', 'cascade_to': []},
+        'funder':     {'description': 'Discovers funding relationships for addresses', 'cascade_to': []},
+        'aggregator': {'description': 'Syncs funding edges and guide data',          'cascade_to': ['enricher']},
+        'enricher':   {'description': 'Enriches token and pool metadata',            'cascade_to': []},
+        'shredder':   {'description': 'Processes staged data into tx tables',        'cascade_to': []},
     }
-}
+    for name, info in workers.items():
+        q = get_queue_names(name)
+        info['request_queue']  = q['request']
+        info['response_queue'] = q['response']
+        info['dlq']            = q['dlq']
+    return workers
+
+WORKER_REGISTRY = _build_worker_registry()
 
 # =============================================================================
 # Database Functions
@@ -328,7 +296,7 @@ RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1-minute sliding window
 
 # Default priority for REST API calls (higher than CLI default of 5)
-REST_API_DEFAULT_PRIORITY = 8
+REST_API_DEFAULT_PRIORITY = 5
 
 
 def check_rate_limit(api_key_id: int, rate_limit: int) -> Tuple[bool, Optional[int]]:
@@ -508,7 +476,7 @@ def log_request(
             payload_hash = hashlib.sha256(payload_str.encode()).hexdigest()
             # Extract summary fields
             payload_summary = {
-                'batch_size': payload.get('batch', {}).get('size'),
+                'address_sig_cnt': payload.get('batch', {}).get('address_sig_cnt'),
                 'filters': payload.get('batch', {}).get('filters'),
                 'action': action
             }
@@ -621,11 +589,11 @@ def get_request_status(request_id: str) -> Optional[Dict]:
         # Get all records for this request_id
         cursor.execute("""
             SELECT request_id, correlation_id, source, target_worker, action, priority,
-                   status, error_message, created_at, started_at, completed_at,
+                   status, error_message, created_utc, started_at, completed_at,
                    duration_ms, result, payload_summary
             FROM tx_request_log
             WHERE request_id = %s
-            ORDER BY created_at ASC
+            ORDER BY created_utc ASC
         """, (request_id,))
         rows = cursor.fetchall()
         cursor.close()
@@ -645,7 +613,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
             worker = row['target_worker']
 
             # Convert datetime objects
-            for key in ['created_at', 'started_at', 'completed_at']:
+            for key in ['created_utc', 'started_at', 'completed_at']:
                 if row.get(key):
                     row[key] = row[key].isoformat()
 
@@ -677,7 +645,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
             workers[worker]['records'].append({
                 'status': row['status'],
                 'batch_num': batch_num,
-                'created_at': row['created_at'],
+                'created_utc': row['created_utc'],
                 'completed_at': row['completed_at'],
                 'duration_ms': row['duration_ms'],
                 'error_message': row.get('error_message'),
@@ -713,7 +681,7 @@ def get_request_status(request_id: str) -> Optional[Dict]:
             'correlation_id': first_row['correlation_id'],
             'priority': first_row['priority'],
             'overall_status': overall_status,
-            'created_at': first_row['created_at'] if isinstance(first_row['created_at'], str) else first_row['created_at'].isoformat() if first_row['created_at'] else None,
+            'created_utc': first_row['created_utc'] if isinstance(first_row['created_utc'], str) else first_row['created_utc'].isoformat() if first_row['created_utc'] else None,
             'workers': workers
         }
     except Exception as e:
@@ -748,7 +716,7 @@ def get_correlation_status(correlation_id: str) -> Optional[Dict]:
                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
                    SUM(CASE WHEN status IN ('queued', 'processing') THEN 1 ELSE 0 END) as pending,
-                   MIN(created_at) as started_at,
+                   MIN(created_utc) as started_at,
                    MAX(completed_at) as last_completed_at
             FROM tx_request_log
             WHERE correlation_id = %s
@@ -821,27 +789,48 @@ def get_rabbitmq_connection():
 
 
 def ensure_queues_exist(channel):
-    """Ensure all gateway and worker queues exist"""
-    # Gateway queues
-    for queue in [GATEWAY_REQUEST_QUEUE, GATEWAY_RESPONSE_QUEUE]:
-        channel.queue_declare(
-            queue=queue,
-            durable=True,
-            arguments={'x-max-priority': 10}
-        )
+    """Ensure all gateway and worker queues exist with dead-letter routing"""
+    # Gateway DLQ (must exist before request queue references it)
+    channel.queue_declare(
+        queue=GATEWAY_DLQ, durable=True,
+        arguments={'x-max-priority': 10, 'x-message-ttl': 86400000}
+    )
+
+    # Gateway queues — request queue routes rejected messages to DLQ
+    channel.queue_declare(
+        queue=GATEWAY_REQUEST_QUEUE, durable=True,
+        arguments={
+            'x-max-priority': 10,
+            'x-dead-letter-exchange': '',
+            'x-dead-letter-routing-key': GATEWAY_DLQ,
+        }
+    )
+    channel.queue_declare(
+        queue=GATEWAY_RESPONSE_QUEUE, durable=True,
+        arguments={'x-max-priority': 10}
+    )
 
     # Worker queues
     for worker, config in WORKER_REGISTRY.items():
-        for queue_type in ['request_queue', 'response_queue', 'dlq']:
-            queue_name = config[queue_type]
-            args = {'x-max-priority': 10}
-            if queue_type == 'dlq':
-                args['x-message-ttl'] = 86400000  # 24 hours for DLQ
-            channel.queue_declare(
-                queue=queue_name,
-                durable=True,
-                arguments=args
-            )
+        # DLQ first (must exist before request queue references it)
+        channel.queue_declare(
+            queue=config['dlq'], durable=True,
+            arguments={'x-max-priority': 10, 'x-message-ttl': 86400000}
+        )
+        # Request queue with dead-letter routing to DLQ
+        channel.queue_declare(
+            queue=config['request_queue'], durable=True,
+            arguments={
+                'x-max-priority': 10,
+                'x-dead-letter-exchange': '',
+                'x-dead-letter-routing-key': config['dlq'],
+            }
+        )
+        # Response queue (no DLQ — responses are informational)
+        channel.queue_declare(
+            queue=config['response_queue'], durable=True,
+            arguments={'x-max-priority': 10}
+        )
 
 
 def publish_to_worker(worker: str, message: Dict, priority: int = 5) -> bool:
@@ -1087,6 +1076,39 @@ def create_app():
     def options_handler(path=''):
         return '', 204
 
+    # ---- API Documentation ----
+
+    @app.route('/', methods=['GET'])
+    def index():
+        """Redirect root to API docs"""
+        from flask import redirect
+        return redirect('/docs')
+
+    @app.route('/docs', methods=['GET'])
+    def docs():
+        """Serve API documentation page"""
+        docs_path = os.path.join(os.path.dirname(__file__), 'api-docs.html')
+        try:
+            with open(docs_path, 'r', encoding='utf-8') as f:
+                return f.read(), 200, {'Content-Type': 'text/html'}
+        except FileNotFoundError:
+            return 'API docs not found', 404
+
+    @app.route('/api/openapi.json', methods=['GET'])
+    @app.route('/api', methods=['GET'])
+    def openapi_spec():
+        """Serve the raw OpenAPI JSON spec (for .NET service references, Swagger, etc.)"""
+        docs_path = os.path.join(os.path.dirname(__file__), 'api-docs.html')
+        try:
+            with open(docs_path, 'r', encoding='utf-8') as f:
+                html = f.read()
+            # Extract JSON between <script id="api-reference" ...> and </script>
+            start = html.index('{', html.index('id="api-reference"'))
+            end = html.rindex('}', 0, html.index('</script>')) + 1
+            return html[start:end], 200, {'Content-Type': 'application/json'}
+        except Exception as e:
+            return jsonify({'error': f'Failed to extract OpenAPI spec: {e}'}), 500
+
     @app.route('/api/health', methods=['GET'])
     def health():
         """Health check endpoint"""
@@ -1120,6 +1142,157 @@ def create_app():
             'checks': checks,
             'timestamp': datetime.now().isoformat() + 'Z'
         }), 200 if healthy else 503
+
+    @app.route('/api/bmap/get', methods=['GET'])
+    def bmap_get():
+        """Get bmap data for a token/signature via sp_tx_bmap_get.
+        Auto-fetches from chain if no data exists."""
+
+        # --- Auth ---
+        api_key = request.headers.get('X-API-Key')
+        if not api_key:
+            return jsonify({'error': 'Missing X-API-Key header'}), 401
+        key_info = validate_api_key(api_key)
+        if not key_info:
+            return jsonify({'error': 'Invalid or inactive API key'}), 401
+
+        request_id = request.headers.get('X-Request-Id') or str(uuid.uuid4())
+        correlation_id = request.headers.get('X-Correlation-Id') or request_id
+
+        # Rate limit
+        rate_limit = key_info.get('rate_limit', 0)
+        allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
+        if not allowed:
+            resp = jsonify({'error': 'Rate limit exceeded', 'retry_after_seconds': retry_after})
+            resp.headers['Retry-After'] = str(retry_after)
+            return resp, 429
+
+        # --- Query params ---
+        token_name   = request.args.get('token_name')
+        token_symbol = request.args.get('token_symbol')
+        mint_address = request.args.get('mint')
+        signature    = request.args.get('signature')
+        block_time   = request.args.get('block_time', type=int)
+        tx_limit     = request.args.get('limit', default=10, type=int)
+
+        # --- Call stored procedure ---
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.callproc('sp_tx_bmap_get', [
+                token_name, token_symbol, mint_address,
+                signature, block_time, tx_limit
+            ])
+            data = None
+            for result_set in cursor.stored_results():
+                row = result_set.fetchone()
+                if row:
+                    data = json.loads(row[0])
+                    break
+            cursor.close()
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if conn:
+                conn.close()
+
+        if not data:
+            return jsonify({'error': 'No result from procedure'}), 500
+
+        # --- Success: data exists ---
+        if 'error' not in data.get('result', {}):
+            return jsonify(data), 200
+
+        # --- Auto-fetch: no data, trigger producer ---
+        error_result = data.get('result', {})
+        error_msg = error_result.get('error', '')
+
+        # Resolve mint address: SP error response > request param > DB lookup
+        mint = error_result.get('mint') or mint_address
+        if not mint and token_symbol:
+            try:
+                resolve_conn = get_db_connection()
+                resolve_cursor = resolve_conn.cursor()
+                resolve_cursor.execute("""
+                    SELECT a.address FROM tx_token t
+                    JOIN tx_address a ON a.id = t.mint_address_id
+                    WHERE t.token_symbol = %s LIMIT 1
+                """, (token_symbol,))
+                row = resolve_cursor.fetchone()
+                if row:
+                    mint = row[0]
+                resolve_cursor.close()
+                resolve_conn.close()
+            except Exception:
+                pass
+
+        if not mint:
+            # If token_symbol was provided but we can't resolve it, tell the user
+            if token_symbol:
+                return jsonify({
+                    'result': {
+                        'error': f'Token symbol not found: {token_symbol}. Submit mint address for token.',
+                        'token_symbol': token_symbol
+                    }
+                }), 404
+            return jsonify(data), 404  # Can't auto-fetch without a mint
+
+        # Build producer payload
+        batch_filters = {'addresses': [mint]}
+        if 'Signature not found' in error_msg:
+            sig = error_result.get('signature') or signature
+            if sig:
+                batch_filters['signature'] = sig
+
+        priority = request.headers.get('X-Priority', type=int) or REST_API_DEFAULT_PRIORITY
+        features = key_info.get('feature_mask') or 0
+        payload = {
+            'priority': priority,
+            'request_id': request_id,
+            'correlation_id': correlation_id,
+            'features': features,
+            'batch': {'filters': batch_filters, 'address_sig_cnt': 5}
+        }
+
+        # Log gateway billing record
+        request_log_id = log_request(
+            request_id=request_id,
+            api_key_id=key_info.get('id'),
+            source='rest',
+            target_worker='gateway',
+            action='bmap-auto-fetch',
+            priority=priority,
+            payload=payload,
+            correlation_id=correlation_id,
+            status='queued',
+            features=features
+        )
+
+        if not request_log_id or request_log_id < 0:
+            return jsonify(data), 404  # Fall back to original error if logging fails
+
+        # Trigger producer
+        result = process_request(
+            worker='producer',
+            action='process',
+            payload=payload,
+            api_key=api_key,
+            source='rest',
+            correlation_id=correlation_id,
+            request_id=request_id,
+            request_log_id=request_log_id,
+            features=features
+        )
+
+        return jsonify({
+            'result': {
+                'status': 'processing',
+                'message': 'Data not found — fetching from chain. Try again shortly.',
+                'mint': mint,
+                'producer': result
+            }
+        }), 202
 
     @app.route('/api/workers', methods=['GET'])
     def list_workers():
@@ -1163,36 +1336,24 @@ def create_app():
                 'error': 'Invalid or inactive API key'
             }), 401
 
-        # Get correlation ID from header (required for request tracing)
-        correlation_id = request.headers.get('X-Correlation-Id')
-        if not correlation_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing X-Correlation-Id header'
-            }), 400
-
-        # Get request ID from header (required for request tracking)
-        request_id = request.headers.get('X-Request-Id')
-        if not request_id:
-            return jsonify({
-                'success': False,
-                'error': 'Missing X-Request-Id header'
-            }), 400
+        # Get request ID and correlation ID from headers (auto-generate if not provided)
+        request_id = request.headers.get('X-Request-Id') or str(uuid.uuid4())
+        correlation_id = request.headers.get('X-Correlation-Id') or request_id
 
         # Check rate limit
         rate_limit = key_info.get('rate_limit', 0)
         allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
         if not allowed:
-            # Log rate-limited request (use caller's request_id)
-            payload = request.get_json() or {}
+            # Log rate-limited request
+            rl_priority = request.headers.get('X-Priority', type=int) or REST_API_DEFAULT_PRIORITY
             log_request(
                 request_id=request_id,
                 api_key_id=key_info.get('id'),
                 source='rest',
                 target_worker=worker,
-                action=payload.get('action', 'process'),
-                priority=payload.get('priority', REST_API_DEFAULT_PRIORITY),
-                payload=payload,
+                action='process',
+                priority=rl_priority,
+                payload={},
                 status='rejected',
                 error=f'Rate limit exceeded ({rate_limit}/min)',
                 correlation_id=correlation_id
@@ -1215,9 +1376,11 @@ def create_app():
         payload = request.get_json() or {}
         action = payload.get('action', 'process')
 
-        # Set priority: use payload value if provided, otherwise REST API default (8)
-        priority = payload.get('priority', REST_API_DEFAULT_PRIORITY)
+        # Priority from header (default 5), injected into payload for RabbitMQ message body
+        priority = request.headers.get('X-Priority', type=int) or REST_API_DEFAULT_PRIORITY
         payload['priority'] = priority
+        payload['request_id'] = request_id
+        payload['correlation_id'] = correlation_id
 
         # Get features from API key entitlement (no request parameter needed)
         features = key_info.get('feature_mask') or 0
@@ -1250,7 +1413,7 @@ def create_app():
         if not request_log_id:
             return jsonify({
                 'success': False,
-                'error': 'Failed to create request log',
+                'error': 'Request Already Exists',
                 'request_id': request_id,
                 'correlation_id': correlation_id
             }), 500
@@ -1455,11 +1618,17 @@ def run_queue_consumer(ready_event: threading.Event = None):
                         print(f"[REQUEST] {target_worker}/{action}: {result.get('request_id', 'unknown')}")
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
+                except MySQLError as e:
+                    print(f"[DB ERROR] {e} - requeuing for retry")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] Invalid JSON -> DLQ: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
                 except Exception as e:
-                    print(f"[ERROR] Failed to process message: {e}")
+                    print(f"[ERROR] Failed to process message -> DLQ: {e}")
                     import traceback
                     traceback.print_exc()
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
             channel.basic_consume(queue=GATEWAY_REQUEST_QUEUE, on_message_callback=callback)
             print(f"[OK] Queue consumer ready - consuming from {GATEWAY_REQUEST_QUEUE}")

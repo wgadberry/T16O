@@ -11,7 +11,7 @@ CREATE TABLE `tx_token_holder` (
   `amount` decimal(38,0) NOT NULL,
   `decimals` tinyint unsigned NOT NULL,
   `rank` int unsigned DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `updated_utc` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_token_owner` (`token_id`,`owner_id`),
   KEY `idx_owner` (`owner_id`),

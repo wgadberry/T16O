@@ -2,8 +2,8 @@
 -- Tracks all requests through the gateway for visibility and debugging
 --
 -- Usage:
---   SELECT * FROM tx_request_log WHERE target_worker = 'producer' ORDER BY created_at DESC LIMIT 100;
---   SELECT * FROM tx_request_log WHERE status = 'failed' AND created_at > NOW() - INTERVAL 1 HOUR;
+--   SELECT * FROM tx_request_log WHERE target_worker = 'producer' ORDER BY created_utc DESC LIMIT 100;
+--   SELECT * FROM tx_request_log WHERE status = 'failed' AND created_utc > NOW() - INTERVAL 1 HOUR;
 
 DROP TABLE IF EXISTS tx_request_log;
 
@@ -20,7 +20,7 @@ CREATE TABLE tx_request_log (
     payload_summary JSON,  -- Subset of payload for quick reference (batch size, filters, etc.)
     status          ENUM('queued', 'processing', 'completed', 'failed', 'timeout') DEFAULT 'queued',
     error_message   TEXT,
-    created_at      TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),
+    created_utc     TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),
     started_at      TIMESTAMP(3) NULL,
     completed_at    TIMESTAMP(3) NULL,
     duration_ms     INT UNSIGNED GENERATED ALWAYS AS (
@@ -37,7 +37,7 @@ CREATE TABLE tx_request_log (
     INDEX idx_correlation_id (correlation_id),
     INDEX idx_status (status),
     INDEX idx_target_worker (target_worker),
-    INDEX idx_created_at (created_at),
+    INDEX idx_created_utc (created_utc),
     INDEX idx_api_key_id (api_key_id),
     INDEX idx_source_status (source, status)
 ) ENGINE=InnoDB;
@@ -49,7 +49,7 @@ SELECT
     status,
     COUNT(*) as request_count,
     AVG(duration_ms) as avg_duration_ms,
-    MAX(created_at) as last_request_at
+    MAX(created_utc) as last_request_at
 FROM tx_request_log
-WHERE created_at > NOW() - INTERVAL 1 HOUR
+WHERE created_utc > NOW() - INTERVAL 1 HOUR
 GROUP BY target_worker, status;

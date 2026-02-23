@@ -121,12 +121,12 @@ BEGIN
 
     SET p_transfer_edges = ROW_COUNT();
 
-    -- BURN edges (wallet → BURN sink 742702)
+    -- BURN edges (wallet → BURN sink id=3)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742702,
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 3,
            t.source_address_id, NULL,
            t.token_id, t.amount, t.decimals, 39,  -- burn
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -138,12 +138,12 @@ BEGIN
 
     SET p_transfer_edges = p_transfer_edges + ROW_COUNT();
 
-    -- MINT edges (MINT source 742703 → wallet)
+    -- MINT edges (MINT source id=4 → wallet)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, 742703, t.destination_owner_address_id,
+    SELECT t.tx_id, b.block_time, 4, t.destination_owner_address_id,
            NULL, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 38,  -- mint
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -155,12 +155,12 @@ BEGIN
 
     SET p_transfer_edges = p_transfer_edges + ROW_COUNT();
 
-    -- CREATE_ACCOUNT edges (wallet → CREATE sink 742705)
+    -- CREATE_ACCOUNT edges (wallet → CREATE sink id=6)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742705,
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 6,
            t.source_address_id, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 8,  -- create_account
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -179,38 +179,54 @@ BEGIN
     -- swap_in: account sends token_1 to pool (edge_type=3)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index, fee, priority_fee)
+                          source_id, source_row_id, ins_index, fee, priority_fee,
+                          dex, pool_address_id, pool_label, swap_direction)
     SELECT s.tx_id, b.block_time, s.account_address_id, tk.mint_address_id,
            s.token_1_id, s.amount_1, tk.decimals, 3,  -- swap_in
-           2, s.id, s.ins_index, b.fee, b.priority_fee
+           2, s.id, s.ins_index, b.fee, b.priority_fee,
+           p.name, pool.pool_address_id, pool.pool_label, 'in'
     FROM tmp_tx_batch b
     JOIN tx_swap s ON s.tx_id = b.tx_id
     JOIN tx_token tk ON tk.id = s.token_1_id
+    LEFT JOIN tx_program p ON p.id = s.program_id
+    LEFT JOIN tx_pool pool ON pool.id = s.amm_id
     WHERE s.account_address_id IS NOT NULL
       AND s.token_1_id IS NOT NULL
     ON DUPLICATE KEY UPDATE
         amount = VALUES(amount),
         fee = VALUES(fee),
-        priority_fee = VALUES(priority_fee);
+        priority_fee = VALUES(priority_fee),
+        dex = COALESCE(VALUES(dex), dex),
+        pool_address_id = COALESCE(VALUES(pool_address_id), pool_address_id),
+        pool_label = COALESCE(VALUES(pool_label), pool_label),
+        swap_direction = COALESCE(VALUES(swap_direction), swap_direction);
 
     SET p_swap_edges = ROW_COUNT();
 
     -- swap_out: account receives token_2 from pool (edge_type=4)
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index, fee, priority_fee)
+                          source_id, source_row_id, ins_index, fee, priority_fee,
+                          dex, pool_address_id, pool_label, swap_direction)
     SELECT s.tx_id, b.block_time, tk.mint_address_id, s.account_address_id,
            s.token_2_id, s.amount_2, tk.decimals, 4,  -- swap_out
-           2, s.id, s.ins_index, b.fee, b.priority_fee
+           2, s.id, s.ins_index, b.fee, b.priority_fee,
+           p.name, pool.pool_address_id, pool.pool_label, 'out'
     FROM tmp_tx_batch b
     JOIN tx_swap s ON s.tx_id = b.tx_id
     JOIN tx_token tk ON tk.id = s.token_2_id
+    LEFT JOIN tx_program p ON p.id = s.program_id
+    LEFT JOIN tx_pool pool ON pool.id = s.amm_id
     WHERE s.account_address_id IS NOT NULL
       AND s.token_2_id IS NOT NULL
     ON DUPLICATE KEY UPDATE
         amount = VALUES(amount),
         fee = VALUES(fee),
-        priority_fee = VALUES(priority_fee);
+        priority_fee = VALUES(priority_fee),
+        dex = COALESCE(VALUES(dex), dex),
+        pool_address_id = COALESCE(VALUES(pool_address_id), pool_address_id),
+        pool_label = COALESCE(VALUES(pool_label), pool_label),
+        swap_direction = COALESCE(VALUES(swap_direction), swap_direction);
 
     SET p_swap_edges = p_swap_edges + ROW_COUNT();
 

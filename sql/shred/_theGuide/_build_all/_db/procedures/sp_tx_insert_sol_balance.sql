@@ -26,6 +26,7 @@ BEGIN
 
     INSERT IGNORE INTO tx_sol_balance_change (
         tx_id,
+        block_time,
         address_id,
         pre_balance,
         post_balance,
@@ -33,6 +34,7 @@ BEGIN
     )
     SELECT
         tx.id,
+        b.block_time,
         addr.id,
         CAST(b.pre_balance AS UNSIGNED),
         CAST(b.post_balance AS UNSIGNED),
@@ -41,6 +43,7 @@ BEGIN
         p_txs_json,
         '$.data[*]' COLUMNS (
             tx_hash VARCHAR(88) PATH '$.tx_hash',
+            block_time BIGINT PATH '$.block_time',
             NESTED PATH '$.sol_bal_change[*]' COLUMNS (
                 address VARCHAR(44) PATH '$.address',
                 pre_balance VARCHAR(30) PATH '$.pre_balance',

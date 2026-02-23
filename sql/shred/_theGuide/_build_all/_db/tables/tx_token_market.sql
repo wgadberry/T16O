@@ -17,7 +17,7 @@ CREATE TABLE `tx_token_market` (
   `total_trades_24h` int unsigned DEFAULT NULL,
   `total_trades_prev_24h` int unsigned DEFAULT NULL,
   `num_traders_24h` int unsigned DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `updated_utc` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_pool` (`pool_id`),
   KEY `idx_token1` (`token1_id`),

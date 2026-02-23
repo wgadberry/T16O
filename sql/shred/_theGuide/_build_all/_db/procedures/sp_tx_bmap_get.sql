@@ -44,11 +44,13 @@ BEGIN
     DECLARE v_token_id BIGINT;
     DECLARE v_mint_address VARCHAR(44);
     DECLARE v_token_symbol VARCHAR(128);
+    DECLARE v_token_type VARCHAR(20);
     DECLARE v_decimals TINYINT UNSIGNED;
 
     DECLARE v_signature VARCHAR(88);
     DECLARE v_block_time BIGINT UNSIGNED;
     DECLARE v_tx_id BIGINT;
+    DECLARE v_signer_address VARCHAR(44);
 
     DECLARE v_half_limit TINYINT UNSIGNED;
 
@@ -72,16 +74,16 @@ BEGIN
     -- STEP 1: Resolve token
     -- ==========================================================================
     IF p_mint_address IS NOT NULL THEN
-        SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
         WHERE mint.address = p_mint_address
         LIMIT 1;
     ELSEIF p_token_symbol IS NOT NULL THEN
         -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
-        SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
         LEFT JOIN (SELECT token_id, COUNT(*) AS cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
@@ -90,8 +92,8 @@ BEGIN
         LIMIT 1;
     ELSEIF p_token_name IS NOT NULL THEN
         -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
-        SELECT tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
         JOIN tx_address mint ON mint.id = tk.mint_address_id
         LEFT JOIN (SELECT token_id, COUNT(*) AS cnt FROM tx_guide GROUP BY token_id) g ON g.token_id = tk.id
@@ -104,8 +106,8 @@ BEGIN
 
         -- Derive primary token from signature's tx_guide activity (for display only)
         -- Prefer "interesting" tokens over base currencies (SOL, WSOL, stablecoins)
-        SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.decimals
-        INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_decimals
+        SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+        INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx t
         JOIN tx_guide g ON g.tx_id = t.id
         JOIN tx_token tk ON tk.id = g.token_id
@@ -121,8 +123,8 @@ BEGIN
 
         -- Fallback: if no interesting token found, take any token
         IF v_token_id IS NULL THEN
-            SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.decimals
-            INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_decimals
+            SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
+            INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
             FROM tx t
             JOIN tx_guide g ON g.tx_id = t.id
             JOIN tx_token tk ON tk.id = g.token_id
@@ -171,12 +173,13 @@ BEGIN
             END IF;
         ELSEIF p_block_time IS NOT NULL THEN
             -- Find nearest tx to provided block_time for this token
+            -- Uses idx_token_blocktime (token_id, block_time) for efficient seek
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
             JOIN tx t ON t.id = g.tx_id
             WHERE g.token_id = v_token_id
-            ORDER BY ABS(CAST(t.block_time AS SIGNED) - CAST(p_block_time AS SIGNED))
+            ORDER BY ABS(CAST(g.block_time AS SIGNED) - CAST(p_block_time AS SIGNED))
             LIMIT 1;
 
             IF v_tx_id IS NULL THEN
@@ -188,13 +191,13 @@ BEGIN
                 SET v_token_id = NULL;
             END IF;
         ELSE
-            -- Most recent tx for this token
+            -- Most recent tx for this token (uses idx_token_blocktime)
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
             JOIN tx t ON t.id = g.tx_id
             WHERE g.token_id = v_token_id
-            ORDER BY t.block_time DESC
+            ORDER BY g.block_time DESC
             LIMIT 1;
 
             IF v_tx_id IS NULL THEN
@@ -213,6 +216,12 @@ BEGIN
         -- The token_id is used for navigation (finding prev/next), but display is unfiltered
         SET v_signature_only_mode = 1;
 
+        -- Resolve signer from tx.signer_address_id
+        SELECT a.address INTO v_signer_address
+        FROM tx t
+        JOIN tx_address a ON a.id = t.signer_address_id
+        WHERE t.id = v_tx_id;
+
         -- ==========================================================================
         -- STEP 3: Build sliding window of tx_ids (prev N + current + next N)
         -- Always fetch 5 prev + 5 next for NAVIGATION, but filter nodes/edges by v_half_limit
@@ -230,42 +239,45 @@ BEGIN
         VALUES (v_tx_id, v_signature, v_block_time, 0);
 
         -- Previous 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
+        -- Inner query uses idx_token_cover (token_id, block_time, tx_id) as covering index
+        -- Outer join fetches signature from tx only for the 5 results
         SET @sql_prev = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
-            SELECT t.id, t.signature, t.block_time,
+            SELECT sub.tx_id, t.signature, sub.block_time,
                    -1 * (@prev_row := @prev_row + 1)
             FROM (SELECT @prev_row := 0) init,
                  (
-                    SELECT DISTINCT t.id, t.signature, t.block_time
+                    SELECT DISTINCT g.tx_id, g.block_time
                     FROM tx_guide g
-                    JOIN tx t ON t.id = g.tx_id
                     WHERE g.token_id = ', v_token_id, '
-                      AND t.block_time < ', v_block_time, '
-                    ORDER BY t.block_time DESC
+                      AND (g.block_time, g.tx_id) < (', v_block_time, ', ', v_tx_id, ')
+                    ORDER BY g.block_time DESC, g.tx_id DESC
                     LIMIT 5
-                 ) t
-            ORDER BY t.block_time DESC
+                 ) sub
+            JOIN tx t ON t.id = sub.tx_id
+            ORDER BY sub.block_time DESC, sub.tx_id DESC
         ');
         PREPARE stmt_prev FROM @sql_prev;
         EXECUTE stmt_prev;
         DEALLOCATE PREPARE stmt_prev;
 
         -- Next 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
+        -- Inner query uses idx_token_cover (token_id, block_time, tx_id) as covering index
         SET @sql_next = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
-            SELECT t.id, t.signature, t.block_time,
+            SELECT sub.tx_id, t.signature, sub.block_time,
                    @next_row := @next_row + 1
             FROM (SELECT @next_row := 0) init,
                  (
-                    SELECT DISTINCT t.id, t.signature, t.block_time
+                    SELECT DISTINCT g.tx_id, g.block_time
                     FROM tx_guide g
-                    JOIN tx t ON t.id = g.tx_id
                     WHERE g.token_id = ', v_token_id, '
-                      AND t.block_time > ', v_block_time, '
-                    ORDER BY t.block_time ASC
+                      AND (g.block_time, g.tx_id) > (', v_block_time, ', ', v_tx_id, ')
+                    ORDER BY g.block_time ASC, g.tx_id ASC
                     LIMIT 5
-                 ) t
-            ORDER BY t.block_time ASC
+                 ) sub
+            JOIN tx t ON t.id = sub.tx_id
+            ORDER BY sub.block_time ASC, sub.tx_id ASC
         ');
         PREPARE stmt_next FROM @sql_next;
         EXECUTE stmt_next;
@@ -307,7 +319,7 @@ BEGIN
             ) AS nav_data
             FROM tmp_window w
             WHERE w.window_pos < 0
-            ORDER BY w.block_time DESC
+            ORDER BY w.block_time DESC, w.tx_id DESC
         ) nav_outer;
 
         -- Next 5 with edge_types
@@ -330,7 +342,7 @@ BEGIN
             ) AS nav_data
             FROM tmp_window w
             WHERE w.window_pos > 0
-            ORDER BY w.block_time ASC
+            ORDER BY w.block_time ASC, w.tx_id ASC
         ) nav_outer;
 
         -- Current frame edge_types
@@ -408,14 +420,29 @@ BEGIN
         JOIN tx_address pa ON pa.id = g.pool_address_id
         WHERE g.pool_address_id IS NOT NULL;
 
-        -- Enrich pool nodes with pool_label from tx_guide
+        -- Remove vault nodes that have no visible edges in the bmap output.
+        -- Swap edges are routed through pool_address_id, so a vault's swap edges
+        -- render as pool→wallet — the vault never appears as source/target.
+        -- Keep vaults that have non-swap edges to/from non-vaults (e.g. fee transfers).
+        DELETE n FROM tmp_nodes n
+        WHERE n.address_type = 'vault'
+          AND NOT EXISTS (
+              SELECT 1 FROM tx_guide g
+              JOIN tmp_display_window w ON w.tx_id = g.tx_id
+              JOIN tx_address fa ON fa.id = g.from_address_id
+              JOIN tx_address ta ON ta.id = g.to_address_id
+              JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+              WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id OR g.token_id IS NULL)
+                AND gt.type_code NOT IN ('swap_in', 'swap_out')
+                AND NOT (fa.address_type = 'vault' AND ta.address_type = 'vault')
+                AND (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
+          );
+
+        -- Enrich pool nodes with pool_label from tx_pool (indexed on pool_address_id)
         UPDATE tmp_nodes n
-        SET n.pool_label = (
-            SELECT g.pool_label FROM tx_guide g
-            WHERE g.pool_address_id = n.address_id AND g.pool_label IS NOT NULL
-            LIMIT 1
-        )
-        WHERE n.pool_label IS NULL AND n.address_type = 'pool';
+        JOIN tx_pool p ON p.pool_address_id = n.address_id
+        SET n.pool_label = p.pool_label
+        WHERE n.pool_label IS NULL AND n.address_type = 'pool' AND p.pool_label IS NOT NULL;
 
         -- Enrich mint nodes with token_name
         UPDATE tmp_nodes n
@@ -424,8 +451,9 @@ BEGIN
         WHERE tk.token_name IS NOT NULL;
 
         -- ==========================================================================
-        -- STEP 5a: Token balances from tx_guide post-balance columns (temp table approach)
+        -- STEP 5a: Token balances from tx_guide post-balance columns
         -- Two queries (from-side + to-side) with ON DUPLICATE KEY to get latest balance
+        -- Uses idx_from_token_time / idx_to_token_time for efficient (address, token, time) seeks
         -- ==========================================================================
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
         CREATE TEMPORARY TABLE tmp_token_bal (
@@ -446,12 +474,9 @@ BEGIN
           AND g.block_time <= v_block_time
           AND g.from_token_post_balance IS NOT NULL
         ON DUPLICATE KEY UPDATE
-            balance = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(balance), tmp_token_bal.balance),
-            block_time = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(block_time), tmp_token_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(guide_id), tmp_token_bal.guide_id);
+            balance = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(balance), tmp_token_bal.balance),
+            block_time = GREATEST(VALUES(block_time), tmp_token_bal.block_time),
+            guide_id = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(guide_id), tmp_token_bal.guide_id);
 
         -- Get token balances from TO side (uses idx_to_token_time)
         INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
@@ -464,12 +489,9 @@ BEGIN
           AND g.block_time <= v_block_time
           AND g.to_token_post_balance IS NOT NULL
         ON DUPLICATE KEY UPDATE
-            balance = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(balance), tmp_token_bal.balance),
-            block_time = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(block_time), tmp_token_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_token_bal.block_time OR (VALUES(block_time) = tmp_token_bal.block_time AND VALUES(guide_id) > tmp_token_bal.guide_id),
-                        VALUES(guide_id), tmp_token_bal.guide_id);
+            balance = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(balance), tmp_token_bal.balance),
+            block_time = GREATEST(VALUES(block_time), tmp_token_bal.block_time),
+            guide_id = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(guide_id), tmp_token_bal.guide_id);
 
         -- Apply token balances to nodes
         UPDATE tmp_nodes n
@@ -565,9 +587,28 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_top_holders;
 
         -- ==========================================================================
-        -- STEP 5b: SOL balances from tx_guide post-balance columns (temp table approach)
-        -- Two queries (from-side + to-side) with ON DUPLICATE KEY to get latest balance
+        -- STEP 5b: SOL balances from tx_guide post-balance columns (two-step approach)
+        -- Step A: GROUP BY + MAX(block_time) per address to find latest SOL balance time
+        -- Step B: Fetch actual balance from that specific (address, block_time) row
+        -- This avoids inserting thousands of rows per address via ON DUPLICATE KEY
         -- ==========================================================================
+
+        -- Step A: Find max block_time with SOL balance per node (FROM side)
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
+        CREATE TEMPORARY TABLE tmp_sol_max (
+            address_id INT UNSIGNED PRIMARY KEY,
+            max_bt BIGINT UNSIGNED
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_sol_max (address_id, max_bt)
+        SELECT g.from_address_id, MAX(g.block_time)
+        FROM tx_guide g
+        WHERE g.from_address_id IN (SELECT address_id FROM tmp_nodes)
+          AND g.block_time <= v_block_time
+          AND g.from_sol_post_balance IS NOT NULL
+        GROUP BY g.from_address_id;
+
+        -- Step B: Fetch FROM-side balance at that block_time
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
         CREATE TEMPORARY TABLE tmp_sol_bal (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -576,39 +617,47 @@ BEGIN
             guide_id BIGINT UNSIGNED
         ) ENGINE=MEMORY;
 
-        -- Get SOL balances from FROM side (uses idx_from_time)
-        INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
-        SELECT g.from_address_id,
+        INSERT IGNORE INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
+        SELECT m.address_id,
                ROUND(g.from_sol_post_balance / 1e9, 9),
                g.block_time, g.id
-        FROM tx_guide g
-        WHERE g.from_address_id IN (SELECT address_id FROM tmp_nodes)
-          AND g.block_time <= v_block_time
-          AND g.from_sol_post_balance IS NOT NULL
-        ON DUPLICATE KEY UPDATE
-            sol_balance = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                            VALUES(sol_balance), tmp_sol_bal.sol_balance),
-            block_time = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(block_time), tmp_sol_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(guide_id), tmp_sol_bal.guide_id);
+        FROM tmp_sol_max m
+        JOIN tx_guide g ON g.from_address_id = m.address_id
+          AND g.block_time = m.max_bt
+          AND g.from_sol_post_balance IS NOT NULL;
 
-        -- Get SOL balances from TO side (uses idx_to_time)
-        INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
-        SELECT g.to_address_id,
-               ROUND(g.to_sol_post_balance / 1e9, 9),
-               g.block_time, g.id
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
+
+        -- Step A: Find max block_time with SOL balance per node (TO side)
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
+        CREATE TEMPORARY TABLE tmp_sol_max (
+            address_id INT UNSIGNED PRIMARY KEY,
+            max_bt BIGINT UNSIGNED
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_sol_max (address_id, max_bt)
+        SELECT g.to_address_id, MAX(g.block_time)
         FROM tx_guide g
         WHERE g.to_address_id IN (SELECT address_id FROM tmp_nodes)
           AND g.block_time <= v_block_time
           AND g.to_sol_post_balance IS NOT NULL
+        GROUP BY g.to_address_id;
+
+        -- Step B: Fetch TO-side balance, keep whichever side is more recent
+        INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
+        SELECT m.address_id,
+               ROUND(g.to_sol_post_balance / 1e9, 9),
+               g.block_time, g.id
+        FROM tmp_sol_max m
+        JOIN tx_guide g ON g.to_address_id = m.address_id
+          AND g.block_time = m.max_bt
+          AND g.to_sol_post_balance IS NOT NULL
         ON DUPLICATE KEY UPDATE
-            sol_balance = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                            VALUES(sol_balance), tmp_sol_bal.sol_balance),
-            block_time = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(block_time), tmp_sol_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_sol_bal.block_time OR (VALUES(block_time) = tmp_sol_bal.block_time AND VALUES(guide_id) > tmp_sol_bal.guide_id),
-                        VALUES(guide_id), tmp_sol_bal.guide_id);
+            sol_balance = IF(VALUES(block_time) >= tmp_sol_bal.block_time, VALUES(sol_balance), tmp_sol_bal.sol_balance),
+            block_time = GREATEST(VALUES(block_time), tmp_sol_bal.block_time),
+            guide_id = IF(VALUES(block_time) >= tmp_sol_bal.block_time, VALUES(guide_id), tmp_sol_bal.guide_id);
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
 
         -- Apply SOL balances to nodes
         UPDATE tmp_nodes n
@@ -788,6 +837,8 @@ BEGIN
             LEFT JOIN tx_token tk ON tk.id = g.token_id
             WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id OR g.token_id IS NULL)
               AND gt.type_code NOT IN ('swap_in', 'swap_out')
+              -- Filter out vault self-loops (vault activity is represented through pool routing)
+              AND NOT (fa.address_type = 'vault' AND ta.address_type = 'vault')
         ) edges;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
@@ -813,6 +864,7 @@ BEGIN
                 'mint', mint_addr.address,
                 'symbol', COALESCE(tk.token_symbol, 'Unknown'),
                 'name', tk.token_name,
+                'token_type', tk.token_type,
                 'swap_count', COUNT(DISTINCT g.tx_id),
                 'total_volume', ROUND(SUM(g.amount / POW(10, COALESCE(g.decimals, 9))), 6)
             ) AS related_data
@@ -824,7 +876,7 @@ BEGIN
             WHERE g.token_id IS NOT NULL
               AND g.token_id != v_token_id
               AND gt.type_code IN ('swap_in', 'swap_out')
-            GROUP BY tk.id, mint_addr.address, tk.token_symbol, tk.token_name
+            GROUP BY tk.id, mint_addr.address, tk.token_symbol, tk.token_name, tk.token_type
             ORDER BY COUNT(DISTINCT g.tx_id) DESC, SUM(g.amount) DESC
             LIMIT 20
         ) related_outer;
@@ -838,10 +890,12 @@ BEGIN
             'result', JSON_OBJECT(
                 'token', JSON_OBJECT(
                     'mint', v_mint_address,
-                    'symbol', v_token_symbol
+                    'symbol', v_token_symbol,
+                    'token_type', v_token_type
                 ),
                 'txs', JSON_OBJECT(
                     'signature', v_signature,
+                    'signer', v_signer_address,
                     'block_time', v_block_time,
                     'block_time_utc', FROM_UNIXTIME(v_block_time),
                     'edge_types', COALESCE(v_current_edge_types, JSON_ARRAY()),

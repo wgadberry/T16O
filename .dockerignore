@@ -1,0 +1,17 @@
+# Keep Docker build context small — only need docker/ and _build_all/_wrk + t16o_exchange
+.git
+node_modules
+**/node_modules
+Backups
+UI
+The-Games
+src
+Solnet
+T16O.Docs
+**/*.sln
+**/bin
+**/obj
+**/__pycache__
+**/logs
+**/*.log
+**/tmpclaude-*

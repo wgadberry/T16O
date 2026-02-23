@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import requests
 import time
 from typing import Optional, List, Generator, Dict, Any, Tuple
@@ -27,48 +28,40 @@ except ImportError:
 
 try:
     import mysql.connector
+    from mysql.connector import Error as MySQLError
     HAS_MYSQL = True
 except ImportError:
     HAS_MYSQL = False
+    MySQLError = Exception  # fallback so except clause doesn't NameError
 
 # =============================================================================
-# Configuration (from guide-config.json)
+# Static config (from common.config → guide-config.json)
 # =============================================================================
 
-def load_config():
-    config_path = os.path.join(os.path.dirname(__file__), 'guide-config.json')
-    try:
-        with open(config_path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from t16o_exchange.guide.common.config import (
+    get_db_config, get_rabbitmq_config, get_rpc_config, get_queue_names,
+)
 
-_cfg = load_config()
+_rmq                    = get_rabbitmq_config()
+_queues                 = get_queue_names('producer')
+_decoder_queues         = get_queue_names('decoder')
+_detailer_queues        = get_queue_names('detailer')
 
-CHAINSTACK_RPC_URL = _cfg.get('RPC_URL', "https://solana-mainnet.core.chainstack.com/d0eda0bf942f17f68a75b67030395ceb")
-
-RABBITMQ_HOST = _cfg.get('RABBITMQ_HOST', 'localhost')
-RABBITMQ_PORT = _cfg.get('RABBITMQ_PORT', 5692)
-RABBITMQ_USER = _cfg.get('RABBITMQ_USER', 'admin')
-RABBITMQ_PASS = _cfg.get('RABBITMQ_PASSWORD', 'admin123')
-RABBITMQ_VHOST = _cfg.get('RABBITMQ_VHOST', 't16o_mq')
-RABBITMQ_REQUEST_QUEUE = 'mq.guide.producer.request'
-RABBITMQ_RESPONSE_QUEUE = 'mq.guide.producer.response'
-DECODER_REQUEST_QUEUE = 'mq.guide.decoder.request'
-DETAILER_REQUEST_QUEUE = 'mq.guide.detailer.request'
-
-DB_CONFIG = {
-    'host': _cfg.get('DB_HOST', '127.0.0.1'),
-    'port': _cfg.get('DB_PORT', 3396),
-    'user': _cfg.get('DB_USER', 'root'),
-    'password': _cfg.get('DB_PASSWORD', 'rootpassword'),
-    'database': _cfg.get('DB_NAME', 't16o_db'),
-    'ssl_disabled': True,
-    'use_pure': True,
-    'ssl_verify_cert': False,
-    'ssl_verify_identity': False,
-    'autocommit': True,  # Prevent table locks when idle
-}
+CHAINSTACK_RPC_URL      = get_rpc_config()['url']
+RABBITMQ_HOST           = _rmq['host']
+RABBITMQ_PORT           = _rmq['port']
+RABBITMQ_USER           = _rmq['user']
+RABBITMQ_PASS           = _rmq['password']
+RABBITMQ_VHOST          = _rmq['vhost']
+RABBITMQ_HEARTBEAT      = _rmq['heartbeat']
+RABBITMQ_BLOCKED_TIMEOUT = _rmq['blocked_timeout']
+REQUEST_QUEUE           = _queues['request']
+RESPONSE_QUEUE          = _queues['response']
+DLQ_QUEUE               = _queues['dlq']
+DECODER_REQUEST_QUEUE   = _decoder_queues['request']
+DETAILER_REQUEST_QUEUE  = _detailer_queues['request']
+DB_CONFIG               = get_db_config()
 
 
 # =============================================================================
@@ -107,6 +100,33 @@ def fetch_signatures_rpc(
     response = session.post(rpc_url, json=payload)
     response.raise_for_status()
     return response.json()
+
+
+def fetch_tx_first_signer(session: requests.Session, signature: str, rpc_url: str) -> Optional[str]:
+    """Fetch a transaction from RPC and return the first signer (fee payer) address.
+    Used to find an address for getSignaturesForAddress context lookup."""
+    payload = {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "getTransaction",
+        "params": [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+    }
+    try:
+        response = session.post(rpc_url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        result = data.get('result')
+        if not result:
+            return None
+        # accountKeys[0] is always the fee payer / first signer
+        account_keys = result.get('transaction', {}).get('message', {}).get('accountKeys', [])
+        if account_keys:
+            # accountKeys can be strings or objects with 'pubkey'
+            key = account_keys[0]
+            return key.get('pubkey') if isinstance(key, dict) else key
+    except Exception as e:
+        print(f"  [!] getTransaction failed for {signature[:20]}...: {e}")
+    return None
 
 
 def fetch_all_signatures(
@@ -575,14 +595,20 @@ def setup_gateway_rabbitmq():
         port=RABBITMQ_PORT,
         virtual_host=RABBITMQ_VHOST,
         credentials=credentials,
-        heartbeat=600,
-        blocked_connection_timeout=300
+        heartbeat=RABBITMQ_HEARTBEAT,
+        blocked_connection_timeout=RABBITMQ_BLOCKED_TIMEOUT
     )
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
 
-    for queue in [RABBITMQ_REQUEST_QUEUE, RABBITMQ_RESPONSE_QUEUE]:
-        channel.queue_declare(queue=queue, durable=True, arguments={'x-max-priority': 10})
+    channel.queue_declare(queue=DLQ_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10, 'x-message-ttl': 86400000})
+    channel.queue_declare(queue=REQUEST_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10,
+                                     'x-dead-letter-exchange': '',
+                                     'x-dead-letter-routing-key': DLQ_QUEUE})
+    channel.queue_declare(queue=RESPONSE_QUEUE, durable=True,
+                          arguments={'x-max-priority': 10})
 
     return connection, channel
 
@@ -606,7 +632,7 @@ def publish_response(channel, request_id: str, correlation_id: str, status: str,
 
     channel.basic_publish(
         exchange='',
-        routing_key=RABBITMQ_RESPONSE_QUEUE,
+        routing_key=RESPONSE_QUEUE,
         body=json.dumps(response).encode('utf-8'),
         properties=pika.BasicProperties(delivery_mode=2, content_type='application/json', priority=priority)
     )
@@ -724,7 +750,7 @@ def process_multiple_addresses(
                     'before': request_before,
                     'until': request_until
                 },
-                'size': max_signatures
+                'address_sig_cnt': max_signatures
             }
         }
 
@@ -764,7 +790,7 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
 
     filters = batch.get('filters', {})
     address = filters.get('address') or filters.get('mint_address')
-    max_signatures = batch.get('size', 100)
+    max_signatures = batch.get('address_sig_cnt', batch.get('size', 10))
     request_before = filters.get('before')
     request_until = filters.get('until')
 
@@ -934,7 +960,108 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     priority = message.get('priority', 5)
 
     filters = batch.get('filters', {})
-    max_signatures = batch.get('size', 100)
+    max_signatures = batch.get('address_sig_cnt', batch.get('size', 10))
+
+    # --- Pass-through mode: signatures provided directly, skip RPC ---
+    direct_signatures = batch.get('signatures', [])
+    if direct_signatures:
+        if isinstance(direct_signatures, str):
+            direct_signatures = [direct_signatures]
+        print(f"[{request_id[:8]}] Pass-through mode: {len(direct_signatures)} signature(s) provided directly")
+
+        if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                      direct_signatures, 1, 1, priority,
+                                      request_log_id, api_key_id, features):
+            print(f"  [CASCADE] Batch 1 -> decoder+detailer ({len(direct_signatures)} sigs)")
+
+        return {
+            'processed': len(direct_signatures),
+            'batches': 1,
+            'skipped': 0,
+            'errors': 0,
+            'mode': 'pass-through',
+            'cascade_to': []
+        }
+
+    # --- Signature context: fetch surrounding signatures ---
+    sig_context_sigs = []
+    sig_context_skipped = 0
+    sig_context_mint = None
+    filter_signature = filters.get('signature')
+    if filter_signature:
+        context_size = filters.get('sig_adjacent_cnt', filters.get('context_size', 5))
+
+        # Look up mint address from DB
+        if db_cursor:
+            try:
+                db_cursor.execute("""
+                    SELECT a.address
+                    FROM tx t
+                    JOIN tx_guide g ON g.tx_id = t.id
+                    JOIN tx_token tk ON tk.id = g.token_id
+                    JOIN tx_address a ON a.id = tk.mint_address_id
+                    WHERE t.signature = %s
+                    LIMIT 1
+                """, (filter_signature,))
+                row = db_cursor.fetchone()
+                if row:
+                    sig_context_mint = row[0]
+            except Exception as e:
+                print(f"[{request_id[:8]}] DB lookup for signature failed: {e}")
+
+        # Also check if addresses were provided — use first as mint for context lookup
+        context_address = sig_context_mint
+        if not context_address:
+            addr_list = filters.get('addresses', [])
+            if not addr_list:
+                single = filters.get('mint_address') or filters.get('address')
+                if single:
+                    addr_list = [single]
+            if addr_list:
+                context_address = addr_list[0]
+
+        # Last resort: fetch the transaction from RPC to get the fee payer address
+        if not context_address:
+            print(f"[{request_id[:8]}] No address in DB/filters, fetching tx from RPC...")
+            context_address = fetch_tx_first_signer(rpc_session, filter_signature, CHAINSTACK_RPC_URL)
+            if context_address:
+                print(f"  Found fee payer: {context_address[:20]}...")
+
+        if context_address:
+            # We have a mint/address — fetch surrounding context from RPC
+            print(f"[{request_id[:8]}] Signature context: {filter_signature[:20]}... addr={context_address[:20]}...")
+
+            # Fetch older sigs (RPC returns newest-first, "before" = older than target)
+            older_result = fetch_signatures_rpc(rpc_session, context_address, CHAINSTACK_RPC_URL,
+                                                limit=context_size, before=filter_signature)
+            older_sigs = [s['signature'] for s in older_result.get('result', []) if s.get('signature')]
+
+            # Fetch newer sigs: get a window and find target's position
+            window_result = fetch_signatures_rpc(rpc_session, context_address, CHAINSTACK_RPC_URL,
+                                                 limit=context_size * 2 + 20)
+            window_sigs = [s['signature'] for s in window_result.get('result', []) if s.get('signature')]
+
+            newer_sigs = []
+            if filter_signature in window_sigs:
+                target_idx = window_sigs.index(filter_signature)
+                newer_sigs = window_sigs[max(0, target_idx - context_size):target_idx]
+            else:
+                until_result = fetch_signatures_rpc(rpc_session, context_address, CHAINSTACK_RPC_URL,
+                                                    limit=context_size + 1, until=filter_signature)
+                newer_sigs = [s['signature'] for s in until_result.get('result', [])
+                              if s.get('signature') and s['signature'] != filter_signature]
+                newer_sigs = newer_sigs[:context_size]
+
+            sig_context_sigs = newer_sigs + [filter_signature] + older_sigs
+            print(f"  Found {len(newer_sigs)} newer + 1 target + {len(older_sigs)} older = {len(sig_context_sigs)} total")
+        else:
+            # No mint address found — pass signature through directly
+            print(f"[{request_id[:8]}] Signature pass-through (no mint in DB): {filter_signature[:20]}...")
+            sig_context_sigs = [filter_signature]
+
+        # NOTE: No duplicate filtering for signature context mode —
+        # the caller explicitly requested this signature and its context,
+        # so we always cascade them to decoder+detailer regardless of DB state.
 
     # Support both legacy string format and new object format for before/until
     # New format: {"signature": "...", "block_id": 123, "block_time": "2025-01-15T10:00:00Z"}
@@ -950,16 +1077,61 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
         if single_addr:
             addresses = [single_addr]
 
+    # If we have signature context sigs but no addresses, cascade them and return
+    if not addresses and sig_context_sigs:
+        batches = 0
+        if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                      sig_context_sigs, 1, 1, priority,
+                                      request_log_id, api_key_id, features):
+            print(f"  [CASCADE] Batch 1 -> decoder+detailer ({len(sig_context_sigs)} sigs)")
+            batches = 1
+        return {
+            'processed': len(sig_context_sigs) + sig_context_skipped,
+            'batches': batches,
+            'skipped': sig_context_skipped,
+            'errors': 0,
+            'mode': 'signature-context',
+            'context_signature': filter_signature,
+            'mint_address': sig_context_mint,
+            'cascade_to': []
+        }
+
+    # If we have signature context sigs AND addresses, cascade the sig context first
+    if sig_context_sigs:
+        if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                      sig_context_sigs, 1, 1, priority,
+                                      request_log_id, api_key_id, features):
+            print(f"  [CASCADE] Sig context batch -> decoder+detailer ({len(sig_context_sigs)} sigs)")
+
     if not addresses:
-        return {'processed': 0, 'errors': 1, 'error': 'No address provided in batch.filters'}
+        if filter_signature and not sig_context_sigs:
+            # Signature was provided but all sigs already in DB
+            return {
+                'processed': sig_context_skipped,
+                'batches': 0,
+                'skipped': sig_context_skipped,
+                'errors': 0,
+                'mode': 'signature-context',
+                'context_signature': filter_signature,
+                'cascade_to': []
+            }
+        return {'processed': 0, 'errors': 1, 'error': 'No address or signature provided in batch.filters'}
 
     # Process multiple addresses if provided
     if len(addresses) > 1:
-        return process_multiple_addresses(
+        result = process_multiple_addresses(
             message, addresses, rpc_session, gateway_channel, db_cursor,
             request_id, correlation_id, priority, max_signatures, request_before, request_until,
             request_log_id, api_key_id, features
         )
+        # Merge signature context counts if both were used
+        if sig_context_sigs or sig_context_skipped:
+            result['processed'] = result.get('processed', 0) + len(sig_context_sigs)
+            result['batches'] = result.get('batches', 0) + (1 if sig_context_sigs else 0)
+            result['skipped'] = result.get('skipped', 0) + sig_context_skipped
+            result['context_signature'] = filter_signature
+            result['mint_address'] = sig_context_mint
+        return result
 
     # Single address processing - delegate to process_single_address
     address = addresses[0]
@@ -979,12 +1151,20 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
                 'before': request_before,
                 'until': request_until
             },
-            'size': max_signatures
+            'address_sig_cnt': max_signatures
         }
     }
 
     result = process_single_address(single_message, rpc_session, gateway_channel, db_cursor)
     result['cascade_to'] = []  # Add cascade_to for response compatibility
+
+    # Merge signature context counts if both were used
+    if sig_context_sigs or sig_context_skipped:
+        result['processed'] = result.get('processed', 0) + len(sig_context_sigs)
+        result['batches'] = result.get('batches', 0) + (1 if sig_context_sigs else 0)
+        result['skipped'] = result.get('skipped', 0) + sig_context_skipped
+        result['context_signature'] = filter_signature
+        result['mint_address'] = sig_context_mint
 
     skip_info = f", skipped {result.get('skipped', 0)} duplicates" if result.get('skipped', 0) > 0 else ""
     print(f"  Fetched {result.get('processed', 0)} signatures, cascaded {result.get('batches', 0)} batches{skip_info}")
@@ -997,7 +1177,7 @@ def run_queue_consumer(prefetch: int = 1):
     print(f"""
 +-----------------------------------------------------------+
 |         Guide Producer - Queue Consumer Mode              |
-|  vhost: {RABBITMQ_VHOST}  |  queue: {RABBITMQ_REQUEST_QUEUE}  |
+|  vhost: {RABBITMQ_VHOST}  |  queue: {REQUEST_QUEUE}  |
 +-----------------------------------------------------------+
 """)
 
@@ -1042,25 +1222,34 @@ def run_queue_consumer(prefetch: int = 1):
                     message = json.loads(body.decode('utf-8'))
                     request_id = message.get('request_id', 'unknown')
 
-                    # Validate message format - support both singular and plural address formats
+                    # Validate message format
                     batch = message.get('batch', {})
-                    filters = batch.get('filters', {})
 
-                    # Handle multiple formats: addresses (array), address (string), mint_address (string)
-                    addresses = filters.get('addresses', [])
-                    if not addresses:
-                        single_addr = filters.get('mint_address') or filters.get('address')
-                        if single_addr:
-                            addresses = [single_addr]
+                    # Pass-through mode: batch.signatures provided directly (skip RPC)
+                    direct_signatures = batch.get('signatures', [])
+                    if direct_signatures:
+                        # Valid pass-through request, skip address validation
+                        pass
+                    else:
+                        # Normal mode: require address in batch.filters
+                        filters = batch.get('filters', {})
 
-                    if not addresses:
-                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address in batch.filters)")
-                        print(f"  Keys received: {list(message.keys())}, filters: {list(filters.keys())}")
-                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
-                        return
+                        # Handle multiple formats: addresses (array), address (string), mint_address (string)
+                        addresses = filters.get('addresses', [])
+                        if not addresses:
+                            single_addr = filters.get('mint_address') or filters.get('address')
+                            if single_addr:
+                                addresses = [single_addr]
 
-                    # Store addresses in message for processing
-                    message['_addresses'] = addresses
+                        has_signature = bool(filters.get('signature'))
+                        if not addresses and not has_signature:
+                            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] INVALID message -> DLQ (no address or signature in batch.filters)")
+                            print(f"  Keys received: {list(message.keys())}, batch keys: {list(batch.keys())}")
+                            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
+                            return
+
+                        # Store addresses in message for processing
+                        message['_addresses'] = addresses
 
                     correlation_id = message.get('correlation_id', request_id)
                     request_log_id = message.get('request_log_id')  # For billing linkage
@@ -1078,11 +1267,14 @@ def run_queue_consumer(prefetch: int = 1):
                 except json.JSONDecodeError as e:
                     print(f"[ERROR] Invalid JSON -> DLQ: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
-                except Exception as e:
-                    print(f"[ERROR] Failed to process message: {e}")
+                except MySQLError as e:
+                    print(f"[DB ERROR] {e} - requeuing for retry")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to process message -> DLQ: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
 
-            gateway_channel.basic_consume(queue=RABBITMQ_REQUEST_QUEUE, on_message_callback=callback)
+            gateway_channel.basic_consume(queue=REQUEST_QUEUE, on_message_callback=callback)
             gateway_channel.start_consuming()
 
         except pika.exceptions.AMQPConnectionError as e:

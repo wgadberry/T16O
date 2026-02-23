@@ -14,8 +14,8 @@ from ..common.service_base import GuideServiceBase, run_service_command_line
 class ShredderService(GuideServiceBase):
     """Windows service wrapper for Guide Shredder"""
 
-    _svc_name_ = 'T16OExchange.Guide.Shredder'
-    _svc_display_name_ = 'T16O Exchange - Guide Shredder'
+    _svc_name_ = 'T16OExchange.Guide.Shredder.Queue'
+    _svc_display_name_ = 'T16O Exchange - Guide Shredder Queue'
     _svc_description_ = 'T16O Exchange Guide Shredder Service - Processes staging table records'
 
     worker_name = 'shredder'

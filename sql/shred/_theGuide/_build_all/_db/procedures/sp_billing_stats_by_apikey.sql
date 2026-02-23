@@ -45,8 +45,8 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS tx_count,
 
@@ -57,8 +57,8 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS address_count,
 
@@ -70,8 +70,8 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS sol_balance_change_count,
 
@@ -83,8 +83,8 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS token_balance_change_count,
 
@@ -96,8 +96,8 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS swap_count,
 
@@ -109,8 +109,8 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS transfer_count,
 
@@ -122,20 +122,20 @@ BEGIN
                 SELECT rl2.id FROM tx_request_log rl2
                 WHERE rl2.api_key_id = ak.id
                   AND rl2.source != 'daemon'
-                  AND (p_start_date IS NULL OR rl2.created_at >= p_start_date)
-                  AND (p_end_date IS NULL OR rl2.created_at <= p_end_date)
+                  AND (p_start_date IS NULL OR rl2.created_utc >= p_start_date)
+                  AND (p_end_date IS NULL OR rl2.created_utc <= p_end_date)
             )
         ) AS activity_count,
 
         -- Time range info
-        MIN(rl.created_at) AS first_request_at,
-        MAX(rl.created_at) AS last_request_at
+        MIN(rl.created_utc) AS first_request_at,
+        MAX(rl.created_utc) AS last_request_at
 
     FROM tx_api_key ak
     LEFT JOIN tx_request_log rl ON rl.api_key_id = ak.id
         AND rl.source != 'daemon'
-        AND (p_start_date IS NULL OR rl.created_at >= p_start_date)
-        AND (p_end_date IS NULL OR rl.created_at <= p_end_date)
+        AND (p_start_date IS NULL OR rl.created_utc >= p_start_date)
+        AND (p_end_date IS NULL OR rl.created_utc <= p_end_date)
     WHERE (p_api_key_id IS NULL OR ak.id = p_api_key_id)
     GROUP BY ak.id, ak.name
     HAVING request_count > 0

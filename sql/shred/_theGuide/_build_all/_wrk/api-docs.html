@@ -23,6 +23,10 @@
   },
   "servers": [
     {
+      "url": "https://svcs.the16oracles.io",
+      "description": "Production"
+    },
+    {
       "url": "http://localhost:5100",
       "description": "Local Development"
     }
@@ -41,27 +45,30 @@
         "description": "API key for authentication"
       }
     },
+    "parameters": {
+      "X-Request-Id": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "description": "Unique request identifier (auto-generated UUID if not provided)",
+        "schema": { "type": "string", "example": "my-request-001" }
+      },
+      "X-Correlation-Id": {
+        "name": "X-Correlation-Id",
+        "in": "header",
+        "description": "Correlation ID for tracking related requests (defaults to X-Request-Id)",
+        "schema": { "type": "string", "example": "my-session-001" }
+      },
+      "X-Priority": {
+        "name": "X-Priority",
+        "in": "header",
+        "description": "Request priority 1-10 (1=lowest, 10=highest, default: 5)",
+        "schema": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 }
+      }
+    },
     "schemas": {
       "TriggerRequest": {
         "type": "object",
         "properties": {
-          "request_id": {
-            "type": "string",
-            "description": "Unique request identifier (auto-generated if not provided)",
-            "example": "my-request-001"
-          },
-          "correlation_id": {
-            "type": "string",
-            "description": "Session/correlation identifier for tracking related requests",
-            "example": "my-session-001"
-          },
-          "priority": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 10,
-            "default": 5,
-            "description": "Request priority (1=lowest, 10=highest)"
-          },
           "action": {
             "type": "string",
             "default": "process",
@@ -98,6 +105,16 @@
           "filters": {
             "type": "object",
             "properties": {
+              "signature": {
+                "type": "string",
+                "description": "Transaction signature to fetch context around. Returns the target plus surrounding signatures (default 5 on each side). Cannot be combined with addresses.",
+                "example": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
+              },
+              "sig_adjacent_cnt": {
+                "type": "integer",
+                "default": 5,
+                "description": "Number of signatures to fetch on each side of the target (only used with signature filter)"
+              },
               "addresses": {
                 "type": "array",
                 "items": { "type": "string" },
@@ -120,7 +137,7 @@
               }
             }
           },
-          "size": {
+          "address_sig_cnt": {
             "type": "integer",
             "default": 10,
             "description": "Number of signatures to fetch per address"
@@ -174,7 +191,7 @@
           "correlation_id": { "type": "string" },
           "target_worker": { "type": "string" },
           "status": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" },
+          "created_utc": { "type": "string", "format": "date-time" },
           "completed_at": { "type": "string", "format": "date-time" },
           "result": { "type": "object" }
         }
@@ -202,6 +219,58 @@
             }
           },
           "timestamp": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProducerTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "batch": { "$ref": "#/components/schemas/ProducerBatch" }
+        }
+      },
+      "DecoderTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "batch": { "$ref": "#/components/schemas/DecoderBatch" }
+        }
+      },
+      "FunderTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "batch": { "$ref": "#/components/schemas/FunderBatch" }
+        }
+      },
+      "BmapResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "$ref": "#/components/schemas/BmapResult" }
+        }
+      },
+      "BmapResult": {
+        "type": "object",
+        "properties": {
+          "token": { "type": "object" },
+          "txs": { "type": "object" },
+          "nodes": { "type": "array", "items": { "type": "object" } },
+          "edges": { "type": "array", "items": { "type": "object" } },
+          "related_tokens": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "BmapAutoFetchResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "$ref": "#/components/schemas/BmapAutoFetchResult" }
+        }
+      },
+      "BmapAutoFetchResult": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "processing" },
+          "message": { "type": "string" },
+          "mint": { "type": "string" },
+          "producer": { "$ref": "#/components/schemas/TriggerResponse" }
         }
       },
       "Error": {
@@ -264,87 +333,183 @@
         }
       }
     },
+    "/api/bmap/get": {
+      "get": {
+        "operationId": "bmapGet",
+        "summary": "Get Bmap Data",
+        "description": "Get transaction cluster map (bmap) data for a token. Returns nodes, edges, and transaction navigation for visualization.\n\nProvide at least one of: `mint`, `token_symbol`, `token_name`, or `signature`.\n\nPriority for token resolution: `mint` > `token_symbol` > `token_name` > derived from `signature`.\n\n**Auto-fetch:** If no data exists for the requested token, the gateway automatically triggers the producer to fetch the 5 most recent transactions from chain. Returns HTTP 202 with a processing status — poll again after a few seconds to get the data.",
+        "tags": ["Bmap"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" },
+          {
+            "name": "mint",
+            "in": "query",
+            "description": "Token mint address (44 chars)",
+            "schema": { "type": "string", "maxLength": 44 }
+          },
+          {
+            "name": "token_symbol",
+            "in": "query",
+            "description": "Token symbol (e.g., BONK, SOL)",
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "token_name",
+            "in": "query",
+            "description": "Token name",
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "signature",
+            "in": "query",
+            "description": "Jump to a specific transaction signature (88 chars)",
+            "schema": { "type": "string", "maxLength": 88 }
+          },
+          {
+            "name": "block_time",
+            "in": "query",
+            "description": "Unix timestamp — finds the nearest transaction",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Transaction window size (1, 10, 20, 50, or 100). Default: 10",
+            "schema": { "type": "integer", "default": 10, "enum": [1, 10, 20, 50, 100] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bmap data with nodes, edges, and transaction navigation",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BmapResponse" }
+              }
+            }
+          },
+          "202": {
+            "description": "Data not found — auto-fetch triggered. Poll again shortly.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BmapAutoFetchResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Token not found and mint address could not be resolved for auto-fetch"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "description": "Database error"
+          }
+        }
+      }
+    },
     "/api/trigger/producer": {
       "post": {
         "operationId": "triggerProducer",
         "summary": "Trigger Producer",
         "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing\n\n## Boundary Options\nUse `before` and `until` to control the range of signatures fetched:\n- **signature**: Direct transaction signature\n- **block_id**: Slot number (resolved to nearest signature)\n- **block_time**: ISO 8601 datetime (resolved to nearest signature)\n\nYou can mix boundary types (e.g., before=signature, until=block_time).",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/TriggerRequest" },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "batch": { "$ref": "#/components/schemas/ProducerBatch" }
+              "schema": { "$ref": "#/components/schemas/ProducerTriggerRequest" },
+              "examples": {
+                "default": {
+                  "summary": "Fetch by signature and/or address",
+                  "value": {
+                    "batch": {
+                      "filters": {
+                        "signature": "",
+                        "sig_adjacent_cnt": 5,
+                        "addresses": [],
+                        "before": {},
+                        "until": {}
+                      },
+                      "address_sig_cnt": 10
                     }
                   }
-                ]
-              },
-              "examples": {
-                "fetchByAddress": {
-                  "summary": "Fetch signatures for a token mint",
+                },
+                "fetchBySignature": {
+                  "summary": "Signature context only (5 before + target + 5 after)",
                   "value": {
-                    "request_id": "prod-001",
-                    "correlation_id": "session-001",
-                    "priority": 10,
+                    "batch": {
+                      "filters": {
+                        "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
+                      }
+                    }
+                  }
+                },
+                "fetchByAddress": {
+                  "summary": "Address signatures only",
+                  "value": {
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
                       },
-                      "size": 10
+                      "address_sig_cnt": 10
+                    }
+                  }
+                },
+                "fetchBoth": {
+                  "summary": "Signature context + address signatures combined",
+                  "value": {
+                    "batch": {
+                      "filters": {
+                        "signature": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2",
+                        "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
+                      },
+                      "address_sig_cnt": 10
                     }
                   }
                 },
                 "fetchByTimeRange": {
                   "summary": "Fetch signatures within a time range",
                   "value": {
-                    "request_id": "prod-002",
-                    "correlation_id": "session-001",
-                    "priority": 5,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
                         "before": { "block_time": "2025-01-20T00:00:00Z" },
                         "until": { "block_time": "2025-01-01T00:00:00Z" }
                       },
-                      "size": 100000
+                      "address_sig_cnt": 100000
                     }
                   }
                 },
                 "fetchBySlotRange": {
                   "summary": "Fetch signatures within a slot range",
                   "value": {
-                    "request_id": "prod-003",
-                    "correlation_id": "session-001",
-                    "priority": 5,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
                         "before": { "block_id": 285000000 },
                         "until": { "block_id": 280000000 }
                       },
-                      "size": 100000
+                      "address_sig_cnt": 100000
                     }
                   }
                 },
                 "fetchMixedBoundaries": {
                   "summary": "Mix boundary types (signature + time)",
                   "value": {
-                    "request_id": "prod-004",
-                    "correlation_id": "session-001",
-                    "priority": 5,
                     "batch": {
                       "filters": {
                         "addresses": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"],
                         "before": { "signature": "5abc123..." },
                         "until": { "block_time": "2025-01-01T00:00:00Z" }
                       },
-                      "size": 100000
+                      "address_sig_cnt": 100000
                     }
                   }
                 }
@@ -373,21 +538,16 @@
         "summary": "Trigger Decoder",
         "description": "Decode raw transaction data via Shyft API.\n\nTypically triggered automatically by producer cascade.",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/TriggerRequest" },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "batch": { "$ref": "#/components/schemas/DecoderBatch" }
-                    }
-                  }
-                ]
-              }
+              "schema": { "$ref": "#/components/schemas/DecoderTriggerRequest" }
             }
           }
         },
@@ -409,6 +569,11 @@
         "summary": "Trigger Detailer",
         "description": "Enrich decoded transactions with additional metadata.\n\nTypically triggered automatically by decoder cascade.",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -435,28 +600,20 @@
         "summary": "Trigger Funder",
         "description": "Discover funding wallets for addresses.\n\nFor each address, queries Solscan API to find the first SOL inflow and identifies the funding wallet.",
         "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "allOf": [
-                  { "$ref": "#/components/schemas/TriggerRequest" },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "batch": { "$ref": "#/components/schemas/FunderBatch" }
-                    }
-                  }
-                ]
-              },
+              "schema": { "$ref": "#/components/schemas/FunderTriggerRequest" },
               "examples": {
                 "findFunder": {
                   "summary": "Find funder for a wallet",
                   "value": {
-                    "request_id": "funder-001",
-                    "correlation_id": "session-001",
-                    "priority": 10,
                     "batch": {
                       "addresses": ["5amFbzL4b2MHP8m1BSj5CFdoo7zJefw3qWtqw9jqj2h7"]
                     }

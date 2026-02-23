@@ -31,7 +31,7 @@ BEGIN
             updated_by = p_updated_by
         WHERE config_type = p_config_type AND config_key = p_config_key;
 
-        SELECT config_type, config_key, config_value, version, updated_at
+        SELECT config_type, config_key, config_value, version, updated_utc
         FROM config
         WHERE config_type = p_config_type AND config_key = p_config_key;
     END IF;

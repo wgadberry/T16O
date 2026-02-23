@@ -17,11 +17,11 @@ CREATE TABLE `config` (
   `is_runtime_editable` tinyint NOT NULL DEFAULT '1' COMMENT 'If true, can be changed without restart',
   `requires_restart` tinyint NOT NULL DEFAULT '0' COMMENT 'If true, requires service restart to take effect',
   `version` int NOT NULL DEFAULT '1' COMMENT 'Increments on each update for change detection',
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `created_utc` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_utc` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `updated_by` varchar(64) DEFAULT NULL COMMENT 'User/service that made the last update',
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_config_type_key` (`config_type`,`config_key`),
   KEY `idx_config_type` (`config_type`),
-  KEY `idx_updated_at` (`updated_at`)
+  KEY `idx_updated_utc` (`updated_utc`)
 ) ENGINE=InnoDB AUTO_INCREMENT=166 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Runtime configuration storage for T16O services';

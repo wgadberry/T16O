@@ -30,13 +30,11 @@ BEGIN
     SET p_skipped_count = 0;
 
     SET v_shredded_state = CAST(fn_get_config('tx_state', 'shredded') AS UNSIGNED);
-
-    -- Get the staging JSON and request_log_id
+    
     SELECT txs, request_log_id INTO v_txs_json, v_request_log_id
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
-
-    -- Get features and searched addresses from tx_request_log (if linked)
+    
     IF v_request_log_id IS NOT NULL THEN
         SELECT
             COALESCE(features, 0),
@@ -54,12 +52,8 @@ BEGIN
 
     IF v_total_txs IS NULL OR v_total_txs = 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No transactions in staging row';
-    END IF;
-
-    -- =========================================================================
-    -- PHASE 1: Count existing transactions and calculate skipped
-    -- Note: Addresses should already exist from decode phase processing
-    -- =========================================================================
+    END IF;    
+    
     SELECT COUNT(*) INTO p_tx_count
     FROM JSON_TABLE(
         v_txs_json,
@@ -69,22 +63,10 @@ BEGIN
     ) AS j
     JOIN tx ON tx.signature = j.tx_hash;
 
-    SET p_skipped_count = v_total_txs - p_tx_count;
-
-    -- =========================================================================
-    -- PHASE 2: Batch insert all balance changes (NO LOOP!)
-    -- Features control whether ALL balances or only searched addresses are collected
-    -- =========================================================================
-
-    -- Insert SOL balance changes (filtered by feature flag)
-    CALL sp_tx_insert_sol_balance(v_txs_json, v_features, v_searched_addresses, p_sol_balance_count);
-
-    -- Insert token balance changes (filtered by feature flag)
-    CALL sp_tx_insert_token_balance(v_txs_json, v_features, v_searched_addresses, p_token_balance_count);
-
-    -- =========================================================================
-    -- PHASE 3: Batch update tx_state for processed transactions
-    -- =========================================================================
+    SET p_skipped_count = v_total_txs - p_tx_count;    
+    CALL sp_tx_insert_sol_balance(v_txs_json, v_features, v_searched_addresses, p_sol_balance_count);    
+    CALL sp_tx_insert_token_balance(v_txs_json, v_features, v_searched_addresses, p_token_balance_count);    
+    
     UPDATE tx SET tx_state = tx_state | 20
     WHERE signature IN (
         SELECT j.tx_hash
@@ -96,7 +78,7 @@ BEGIN
         ) AS j
     );
 
-    -- Mark staging row as processed
+    
     UPDATE t16o_db_staging.txs
     SET tx_state = v_shredded_state
     WHERE id = p_staging_id;

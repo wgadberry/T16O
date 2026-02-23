@@ -236,10 +236,10 @@ TX_STATE_PHASES = {
 
 # Synthetic addresses that must exist for special edge types
 SYNTHETIC_ADDRESSES = {
-    "BURN111111111111111111111111111111111111111": {"id": 742702, "type": "sink", "purpose": "burn"},
-    "MINT111111111111111111111111111111111111111": {"id": 742703, "type": "source", "purpose": "mint"},
-    "CLOSE11111111111111111111111111111111111111": {"id": 742704, "type": "sink", "purpose": "close"},
-    "CREATE1111111111111111111111111111111111111": {"id": 742705, "type": "source", "purpose": "create"},
+    "BURN111111111111111111111111111111111111111": {"id": 3, "type": "sink", "purpose": "burn"},
+    "MINT111111111111111111111111111111111111111": {"id": 4, "type": "source", "purpose": "mint"},
+    "CLOSE11111111111111111111111111111111111111": {"id": 5, "type": "sink", "purpose": "close"},
+    "CREATE1111111111111111111111111111111111111": {"id": 6, "type": "source", "purpose": "create"},
 }
 
 # Default workers launched by interactive mode
@@ -1073,8 +1073,8 @@ def main():
                 print(f"    Status: {status.get('status', 'unknown')}")
                 print(f"    Worker: {status.get('target_worker', 'unknown')}")
                 print(f"    Action: {status.get('action', 'unknown')}")
-                if status.get('created_at'):
-                    print(f"    Created: {status['created_at']}")
+                if status.get('created_utc'):
+                    print(f"    Created: {status['created_utc']}")
                 if status.get('completed_at'):
                     print(f"    Completed: {status['completed_at']}")
                 if status.get('duration_ms'):

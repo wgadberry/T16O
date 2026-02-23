@@ -23,6 +23,28 @@ except ImportError:
     HAS_ANTHROPIC = False
     print("[bmap-api] Warning: anthropic package not installed. /api/bmap/explain will be disabled.")
 
+# Load Anthropic API key from file (fallback to env var)
+_ANTHROPIC_API_KEY_FILE = os.path.join(os.path.dirname(__file__), '..', '..', '_theGuide', '_build_all', '_wrk', 'files', 'anthropic-api-key-bmap-viewer.txt')
+def _load_api_key():
+    """Load API key from file, falling back to ANTHROPIC_API_KEY env var."""
+    if os.environ.get('ANTHROPIC_API_KEY'):
+        return os.environ['ANTHROPIC_API_KEY']
+    try:
+        with open(_ANTHROPIC_API_KEY_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('sk-ant-'):
+                    return line
+                if '="sk-ant-' in line:
+                    return line.split('="', 1)[1].rstrip('"')
+    except FileNotFoundError:
+        pass
+    return None
+
+_ANTHROPIC_API_KEY = _load_api_key()
+if _ANTHROPIC_API_KEY:
+    os.environ['ANTHROPIC_API_KEY'] = _ANTHROPIC_API_KEY
+
 # Deadlock retry config
 MAX_RETRIES = 3
 BASE_BACKOFF = 0.3  # seconds
@@ -409,14 +431,18 @@ def explain_bmap():
         'tax_summary': detected_taxes if detected_taxes else None
     }
 
-    # Identify user wallet (first wallet-type node, including Token Creator)
-    user_wallet = None
+    # Identify user wallet from proc-provided signer, fallback to first wallet node
+    user_wallet = result.get('txs', {}).get('signer')
     user_label = None
-    for n in current_nodes:
-        if n.get('address_type') == 'wallet' or n.get('label') in ['wallet', 'Token Creator']:
-            user_wallet = n.get('address', '')
-            user_label = n.get('label') or 'wallet'
-            break
+    if user_wallet:
+        signer_node = next((n for n in current_nodes if n.get('address') == user_wallet), None)
+        user_label = (signer_node.get('label') or 'wallet') if signer_node else 'wallet'
+    else:
+        for n in current_nodes:
+            if n.get('address_type') == 'wallet' or n.get('label') in ['wallet', 'Token Creator']:
+                user_wallet = n.get('address', '')
+                user_label = n.get('label') or 'wallet'
+                break
 
     # Build prompt
     wallet_display = f"{user_wallet[:8]}...{user_wallet[-6:]}" if user_wallet and len(user_wallet) > 14 else user_wallet or 'unknown'
@@ -496,6 +522,7 @@ if __name__ == '__main__':
     print("BMap Viewer API")
     print("=" * 60)
     print(f"Open http://localhost:5050 in your browser")
-    print(f"LLM Explain: {'Enabled' if HAS_ANTHROPIC else 'Disabled (pip install anthropic)'}")
+    llm_status = 'Disabled (pip install anthropic)' if not HAS_ANTHROPIC else ('Enabled (key loaded)' if _ANTHROPIC_API_KEY else 'Disabled (no API key)')
+    print(f"LLM Explain: {llm_status}")
     print("=" * 60)
     app.run(host='0.0.0.0', port=5050, debug=True)

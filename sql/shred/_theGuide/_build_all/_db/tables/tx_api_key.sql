@@ -15,7 +15,7 @@ CREATE TABLE tx_api_key (
     permissions     JSON,  -- {"workers": ["producer", "shredder"], "actions": ["process", "status"]}
     rate_limit      INT UNSIGNED DEFAULT 100,  -- requests per minute
     active          TINYINT(1) DEFAULT 1,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_utc     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used_at    TIMESTAMP NULL,
     INDEX idx_api_key (api_key),
     INDEX idx_active (active)

@@ -99,7 +99,7 @@ BEGIN
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742702,  -- BURN sink
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 3,  -- BURN sink
            t.source_address_id, NULL,
            t.token_id, t.amount, t.decimals, 39,  -- burn edge_type
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -118,7 +118,7 @@ BEGIN
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, 742703, t.destination_owner_address_id,  -- MINT source
+    SELECT t.tx_id, b.block_time, 4, t.destination_owner_address_id,  -- MINT source
            NULL, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 38,  -- mint edge_type
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -137,7 +137,7 @@ BEGIN
                           from_token_account_id, to_token_account_id,
                           token_id, amount, decimals, edge_type_id,
                           source_id, source_row_id, ins_index, fee, priority_fee)
-    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 742705,  -- CREATE sink
+    SELECT t.tx_id, b.block_time, t.source_owner_address_id, 6,  -- CREATE sink
            t.source_address_id, t.destination_address_id,
            t.token_id, t.amount, t.decimals, 8,  -- create_account edge_type
            1, t.id, t.ins_index, b.fee, b.priority_fee
@@ -149,26 +149,7 @@ BEGIN
     ON DUPLICATE KEY UPDATE amount = VALUES(amount), fee = VALUES(fee), priority_fee = VALUES(priority_fee);
     SET p_guide_count = p_guide_count + ROW_COUNT();
 
-    -- 4. FUNDING EDGES
-    INSERT INTO tx_funding_edge (from_address_id, to_address_id, total_sol, transfer_count,
-                                  first_transfer_time, last_transfer_time)
-    SELECT t.source_owner_address_id, t.destination_owner_address_id,
-           SUM(t.amount) / 1e9, COUNT(*), MIN(b.block_time), MAX(b.block_time)
-    FROM tmp_batch b
-    JOIN tx_transfer t ON t.activity_id = b.activity_id
-    JOIN tx_address a ON a.id = t.destination_owner_address_id
-    WHERE t.token_id = v_sol_token_id
-      AND a.funded_by_address_id = t.source_owner_address_id
-      AND t.source_owner_address_id IS NOT NULL
-      AND t.destination_owner_address_id IS NOT NULL
-    GROUP BY t.source_owner_address_id, t.destination_owner_address_id
-    ON DUPLICATE KEY UPDATE
-        total_sol = total_sol + VALUES(total_sol),
-        transfer_count = transfer_count + VALUES(transfer_count),
-        last_transfer_time = GREATEST(last_transfer_time, VALUES(last_transfer_time));
-    SET p_funding_count = ROW_COUNT();
-
-    -- 5. TOKEN PARTICIPANTS
+    -- 4. TOKEN PARTICIPANTS
     -- To avoid "Can't reopen table", we use a second temporary table
     -- to flatten the data before the final aggregation.
     DROP TEMPORARY TABLE IF EXISTS tmp_part_stage;
@@ -214,7 +195,7 @@ BEGIN
         net_position = net_position + VALUES(net_position);
     SET p_participant_count = ROW_COUNT();
 
-    -- 6. FINALIZE
+    -- 5. FINALIZE
     UPDATE tx_activity a JOIN tmp_batch b ON b.activity_id = a.id SET a.guide_loaded = 1;
     
     DROP TEMPORARY TABLE IF EXISTS tmp_batch;
@@ -283,36 +264,52 @@ BEGIN
     -- swap_in: account sends token_1 into swap
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index,
+                          dex, pool_address_id, pool_label, swap_direction)
     SELECT s.tx_id, b.block_time, s.account_address_id, tk1.mint_address_id,
            s.token_1_id, s.amount_1, tk1.decimals, 3,  -- swap_in
-           2, s.id, s.ins_index
+           2, s.id, s.ins_index,
+           p.name, pool.pool_address_id, pool.pool_label, 'in'
     FROM tmp_batch b
     JOIN tx_swap s ON s.activity_id = b.activity_id
     JOIN tx_token tk1 ON tk1.id = s.token_1_id
+    LEFT JOIN tx_program p ON p.id = s.program_id
+    LEFT JOIN tx_pool pool ON pool.id = s.amm_id
     WHERE b.edge_direction IN ('both', 'out')
       AND b.creates_edge = 1
       AND s.token_1_id IS NOT NULL
       AND s.account_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount),
+      dex = COALESCE(VALUES(dex), dex),
+      pool_address_id = COALESCE(VALUES(pool_address_id), pool_address_id),
+      pool_label = COALESCE(VALUES(pool_label), pool_label),
+      swap_direction = COALESCE(VALUES(swap_direction), swap_direction);
 
     SET p_guide_count = ROW_COUNT();
 
     -- swap_out: account receives token_2 from swap
     INSERT INTO tx_guide (tx_id, block_time, from_address_id, to_address_id,
                           token_id, amount, decimals, edge_type_id,
-                          source_id, source_row_id, ins_index)
+                          source_id, source_row_id, ins_index,
+                          dex, pool_address_id, pool_label, swap_direction)
     SELECT s.tx_id, b.block_time, tk2.mint_address_id, s.account_address_id,
            s.token_2_id, s.amount_2, tk2.decimals, 4,  -- swap_out
-           2, s.id, s.ins_index
+           2, s.id, s.ins_index,
+           p.name, pool.pool_address_id, pool.pool_label, 'out'
     FROM tmp_batch b
     JOIN tx_swap s ON s.activity_id = b.activity_id
     JOIN tx_token tk2 ON tk2.id = s.token_2_id
+    LEFT JOIN tx_program p ON p.id = s.program_id
+    LEFT JOIN tx_pool pool ON pool.id = s.amm_id
     WHERE b.edge_direction IN ('both', 'in')
       AND b.creates_edge = 1
       AND s.token_2_id IS NOT NULL
       AND s.account_address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount),
+      dex = COALESCE(VALUES(dex), dex),
+      pool_address_id = COALESCE(VALUES(pool_address_id), pool_address_id),
+      pool_label = COALESCE(VALUES(pool_label), pool_label),
+      swap_direction = COALESCE(VALUES(swap_direction), swap_direction);
 
     SET p_guide_count = p_guide_count + ROW_COUNT();
 

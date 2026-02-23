@@ -5,7 +5,7 @@ DELIMITER ;;
 
 DROP FUNCTION IF EXISTS `fn_get_guide_by_wallet`;;
 
-CREATE DEFINER=`root`@`%` FUNCTION `fn_get_guide_by_wallet`(p_wallet_address VARCHAR(44), p_type_state BIGINT UNSIGNED) RETURNS json
+CREATE DEFINER=`root`@`%` FUNCTION `fn_get_guide_by_wallet`(p_wallet_address VARCHAR(44), p_min_tx_state BIGINT UNSIGNED) RETURNS json
     READS SQL DATA
     DETERMINISTIC
 BEGIN
@@ -33,8 +33,8 @@ BEGIN
         JOIN tx_address fa ON fa.id = g.from_address_id
         JOIN tx_address ta ON ta.id = g.to_address_id
         WHERE (fa.address = p_wallet_address OR ta.address = p_wallet_address)
-          AND (p_type_state = 0 OR t.type_state >= p_type_state)
-          AND (p_type_state = 0 OR t.type_state & p_type_state != 0)
+          AND (p_min_tx_state = 0 OR CAST(t.tx_state AS UNSIGNED) >= p_min_tx_state)
+          AND (p_min_tx_state = 0 OR CAST(t.tx_state AS UNSIGNED) & p_min_tx_state != 0)
     );
 END;;
 

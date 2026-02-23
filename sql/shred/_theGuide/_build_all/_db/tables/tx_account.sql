@@ -12,7 +12,7 @@ CREATE TABLE `tx_account` (
   `executable` tinyint(1) DEFAULT '0',
   `rent_epoch` bigint unsigned DEFAULT NULL,
   `is_oncurve` tinyint(1) DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `updated_utc` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_address` (`address_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

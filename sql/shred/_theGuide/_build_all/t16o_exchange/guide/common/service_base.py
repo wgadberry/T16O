@@ -250,6 +250,10 @@ class GuideServiceBase(win32serviceutil.ServiceFramework):
 
         args = list(self.worker_args)
 
+        # Skip auto-args for workers that manage their own CLI (supervisor pattern)
+        if not worker_info.get('auto_args', True):
+            return args
+
         # Add default args based on worker type
         if worker_info.get('has_queue', True):
             if '--queue-consumer' not in args:

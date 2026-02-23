@@ -1,0 +1,23 @@
+FROM amazonlinux:2023
+
+# Install Python 3.9 (AL2023 default) + pip + build deps
+RUN dnf install -y python3 python3-pip gcc python3-devel && \
+    dnf clean all
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY docker/requirements.docker.txt /app/requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy application code
+# _wrk/ contains the worker scripts
+# t16o_exchange/ contains the common config module
+COPY sql/shred/_theGuide/_build_all/_wrk/ /app/_wrk/
+COPY sql/shred/_theGuide/_build_all/t16o_exchange/ /app/t16o_exchange/
+
+# Workers do sys.path.insert(0, '..') to import t16o_exchange
+WORKDIR /app/_wrk
+
+# Default: run as module (overridden by docker-compose command)
+CMD ["python3", "--version"]
