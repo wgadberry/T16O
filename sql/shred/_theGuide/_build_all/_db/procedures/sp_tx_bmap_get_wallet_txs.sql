@@ -1,4 +1,4 @@
--- sp_tx_wallet_txs: Wallet transaction history for a specific token
+-- sp_tx_bmap_get_wallet_txs: Wallet transaction history for a specific token
 -- Returns flat result set of transactions involving a wallet+token pair
 -- Optimized with UNION instead of OR for index utilization
 --
@@ -8,13 +8,13 @@
 --   p_limit:          Max rows to return (default 50, max 200)
 --
 -- Usage:
---   CALL sp_tx_wallet_txs('BAoVYrCEjFk7bgP2fRp2ahLcH6ktYUVSgXWHT88jYymy', 'eFua55nxgpaMqdP65qKweyN8PqPqHqWFzdNuC6ppump', 50);
+--   CALL sp_tx_bmap_get_wallet_txs('BAoVYrCEjFk7bgP2fRp2ahLcH6ktYUVSgXWHT88jYymy', 'eFua55nxgpaMqdP65qKweyN8PqPqHqWFzdNuC6ppump', 50);
 
 DELIMITER //
 
-DROP PROCEDURE IF EXISTS sp_tx_wallet_txs//
+DROP PROCEDURE IF EXISTS sp_tx_bmap_get_wallet_txs//
 
-CREATE PROCEDURE sp_tx_wallet_txs(
+CREATE PROCEDURE sp_tx_bmap_get_wallet_txs(
     IN p_wallet_address VARCHAR(44),
     IN p_mint_address VARCHAR(44),
     IN p_limit SMALLINT UNSIGNED

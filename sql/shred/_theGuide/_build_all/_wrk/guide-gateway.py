@@ -1298,7 +1298,7 @@ def create_app():
 
     @app.route('/api/bmap/get-wallet-txs', methods=['GET'])
     def bmap_get_wallet_txs():
-        """Get a wallet's transaction history with a specific token via sp_tx_wallet_txs."""
+        """Get a wallet's transaction history with a specific token via sp_tx_bmap_get_wallet_txs."""
 
         # --- Auth ---
         api_key = request.headers.get('X-API-Key')
@@ -1329,7 +1329,7 @@ def create_app():
         try:
             conn = get_db_connection()
             cursor = conn.cursor(dictionary=True)
-            cursor.callproc('sp_tx_wallet_txs', [address, mint_address, min(limit, 200)])
+            cursor.callproc('sp_tx_bmap_get_wallet_txs', [address, mint_address, min(limit, 200)])
 
             # Check if result is a JSON error or a result set of rows
             rows = []
