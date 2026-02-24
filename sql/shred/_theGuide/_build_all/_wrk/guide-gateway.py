@@ -1296,7 +1296,7 @@ def create_app():
             }
         }), 202
 
-    @app.route('/api/bmap/get-wallet-txs', methods=['GET'])
+    @app.route('/api/bmap/get-wallet-txs', methods=['GET', 'POST'])
     def bmap_get_wallet_txs():
         """Get a wallet's transaction history with a specific token via sp_tx_bmap_get_wallet_txs."""
 
@@ -1316,10 +1316,20 @@ def create_app():
             resp.headers['Retry-After'] = str(retry_after)
             return resp, 429
 
-        # --- Query params ---
-        address = request.args.get('address')
-        mint_address = request.args.get('mint')
-        limit = request.args.get('limit', default=50, type=int)
+        # --- Params: query string (GET) or JSON body (POST) ---
+        if request.method == 'POST' and request.is_json:
+            body = request.get_json(silent=True) or {}
+            address = body.get('address')
+            mint_address = body.get('mint')
+            limit = body.get('limit', 50)
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                limit = 50
+        else:
+            address = request.args.get('address')
+            mint_address = request.args.get('mint')
+            limit = request.args.get('limit', default=50, type=int)
 
         if not address:
             return jsonify({'error': 'address is required'}), 400
