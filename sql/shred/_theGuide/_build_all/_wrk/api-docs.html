@@ -446,7 +446,7 @@
       "get": {
         "operationId": "bmapGetWalletTxs",
         "summary": "Get Wallet Transaction History",
-        "description": "Returns a wallet's transaction history for a specific token.\n\nEach row includes the transaction signature, type (swap_in, swap_out, spl_transfer, etc.), direction (in/out), amount, counterparty address and label, post-balance, DEX name, and pool label.\n\nResults are ordered by block_time descending (most recent first).",
+        "description": "Returns a wallet's transaction history, optionally filtered by token.\n\nWhen `mint` is omitted, returns transactions across all tokens for the wallet. Each row includes the transaction signature, type (swap_in, swap_out, spl_transfer, etc.), direction (in/out), amount, token_symbol, mint_address, counterparty address and label, post-balance, DEX name, and pool label.\n\nResults are ordered by block_time descending (most recent first).",
         "tags": ["Bmap"],
         "parameters": [
           { "$ref": "#/components/parameters/X-Request-Id" },
@@ -461,8 +461,8 @@
           {
             "name": "mint",
             "in": "query",
-            "required": true,
-            "description": "Token mint address (base58, 44 chars)",
+            "required": false,
+            "description": "Token mint address (base58, 44 chars). When omitted, returns transactions across all tokens.",
             "schema": { "type": "string", "maxLength": 44 }
           },
           {
@@ -481,7 +481,7 @@
                   "type": "object",
                   "properties": {
                     "address": { "type": "string", "description": "Wallet address" },
-                    "mint": { "type": "string", "description": "Token mint address" },
+                    "mint": { "type": "string", "nullable": true, "description": "Token mint address (null when not filtered)" },
                     "count": { "type": "integer", "description": "Number of transactions returned" },
                     "transactions": {
                       "type": "array",
@@ -494,6 +494,8 @@
                           "type_code": { "type": "string", "description": "Edge type (swap_in, swap_out, spl_transfer, etc.)" },
                           "direction": { "type": "string", "enum": ["in", "out"], "description": "Token flow direction relative to wallet" },
                           "amount": { "type": "number", "description": "Token amount (decimal-adjusted)" },
+                          "token_symbol": { "type": "string", "nullable": true, "description": "Token symbol (e.g. SOL, Wk)" },
+                          "mint_address": { "type": "string", "description": "Token mint address for this edge" },
                           "counterparty": { "type": "string", "description": "Address on the other side of the edge" },
                           "counterparty_label": { "type": "string", "description": "Label or address_type of counterparty" },
                           "post_balance": { "type": "number", "description": "Wallet token balance after this tx" },
@@ -506,7 +508,7 @@
                 },
                 "example": {
                   "address": "BAoVYrCEjFk7bgP2fRp2ahLcH6ktYUVSgXWHT88jYymy",
-                  "mint": "eFua55nxgpaMqdP65qKweyN8PqPqHqWFzdNuC6ppump",
+                  "mint": null,
                   "count": 2,
                   "transactions": [
                     {
@@ -516,6 +518,8 @@
                       "type_code": "swap_in",
                       "direction": "out",
                       "amount": 93514650.583056,
+                      "token_symbol": "Wk",
+                      "mint_address": "eFua55nxgpaMqdP65qKweyN8PqPqHqWFzdNuC6ppump",
                       "counterparty": "HXWsqSPxuJLyHAjLbZczGdK19JG8X3x2bjTdf6MrTjtT",
                       "counterparty_label": "Pump.fun (Wk) Bonding Curve",
                       "post_balance": 0.0,
@@ -528,7 +532,7 @@
             }
           },
           "400": {
-            "description": "Missing required parameters (address and mint)"
+            "description": "Missing required parameter (address)"
           },
           "404": {
             "description": "Wallet or token not found"
