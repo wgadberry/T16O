@@ -259,7 +259,8 @@ def _build_worker_registry():
         'funder':     {'description': 'Discovers funding relationships for addresses', 'cascade_to': []},
         'aggregator': {'description': 'Syncs funding edges and guide data',          'cascade_to': ['enricher']},
         'enricher':   {'description': 'Enriches token and pool metadata',            'cascade_to': []},
-        'shredder':   {'description': 'Processes staged data into tx tables',        'cascade_to': []},
+        'shredder':      {'description': 'Processes staged data into tx tables',        'cascade_to': []},
+        'synchronizer':  {'description': 'Fills gaps in mint transaction history',      'cascade_to': []},
     }
     for name, info in workers.items():
         q = get_queue_names(name)
@@ -962,7 +963,8 @@ def process_request(
         'priority': priority,
         'timestamp': timestamp,
         'action': action,
-        'batch': payload.get('batch', {})
+        'batch': payload.get('batch', {}),
+        'sync': payload.get('sync', {}),
     }
 
     # Log request for this worker (not the gateway record)
@@ -1294,21 +1296,153 @@ def create_app():
             }
         }), 202
 
+    @app.route('/api/bmap/get-wallet-txs', methods=['GET'])
+    def bmap_get_wallet_txs():
+        """Get a wallet's transaction history with a specific token via sp_tx_wallet_txs."""
+
+        # --- Auth ---
+        api_key = request.headers.get('X-API-Key')
+        if not api_key:
+            return jsonify({'error': 'Missing X-API-Key header'}), 401
+        key_info = validate_api_key(api_key)
+        if not key_info:
+            return jsonify({'error': 'Invalid or inactive API key'}), 401
+
+        # Rate limit
+        rate_limit = key_info.get('rate_limit', 0)
+        allowed, retry_after = check_rate_limit(key_info['id'], rate_limit)
+        if not allowed:
+            resp = jsonify({'error': 'Rate limit exceeded', 'retry_after_seconds': retry_after})
+            resp.headers['Retry-After'] = str(retry_after)
+            return resp, 429
+
+        # --- Query params ---
+        address = request.args.get('address')
+        mint_address = request.args.get('mint')
+        limit = request.args.get('limit', default=50, type=int)
+
+        if not address or not mint_address:
+            return jsonify({'error': 'address and mint are required'}), 400
+
+        # --- Call stored procedure ---
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.callproc('sp_tx_wallet_txs', [address, mint_address, min(limit, 200)])
+
+            # Check if result is a JSON error or a result set of rows
+            rows = []
+            for result_set in cursor.stored_results():
+                rows = result_set.fetchall()
+                break
+
+            cursor.close()
+
+            if not rows:
+                return jsonify({'address': address, 'mint': mint_address, 'transactions': []}), 200
+
+            # Check for SP error response (single row with 'result' key containing JSON)
+            if len(rows) == 1 and 'result' in rows[0]:
+                error_data = json.loads(rows[0]['result']) if isinstance(rows[0]['result'], str) else rows[0]['result']
+                return jsonify(error_data), 404
+
+            # Convert rows: datetime/decimal to serializable types
+            txs = []
+            for row in rows:
+                tx = {}
+                for k, v in row.items():
+                    if hasattr(v, 'isoformat'):
+                        tx[k] = v.isoformat()
+                    elif isinstance(v, __import__('decimal').Decimal):
+                        tx[k] = float(v)
+                    else:
+                        tx[k] = v
+                txs.append(tx)
+
+            return jsonify({
+                'address': address,
+                'mint': mint_address,
+                'count': len(txs),
+                'transactions': txs
+            }), 200
+
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if conn:
+                conn.close()
+
     @app.route('/api/workers', methods=['GET'])
     def list_workers():
-        """List available workers"""
+        """List available workers with live consumer/message counts and thread config"""
+        # Fetch queue stats from RabbitMQ management API
+        queue_stats = {}
+        try:
+            import requests as http_requests
+            rmq_mgmt_url = f"http://{RABBITMQ_CONFIG['host']}:15672/api/queues/{RABBITMQ_CONFIG['vhost']}"
+            resp = http_requests.get(
+                rmq_mgmt_url,
+                auth=(RABBITMQ_CONFIG['user'], RABBITMQ_CONFIG['password']),
+                timeout=3
+            )
+            if resp.status_code == 200:
+                for q in resp.json():
+                    queue_stats[q['name']] = {
+                        'consumers': q.get('consumers', 0),
+                        'messages': q.get('messages', 0),
+                    }
+        except Exception:
+            pass  # Fall back to no stats if management API unavailable
+
+        # Fetch configured thread counts from config table
+        thread_config = {}
+        try:
+            import mysql.connector
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT config_key, config_value FROM config "
+                "WHERE config_key LIKE '%\\_wrk\\_cnt\\_threads' ESCAPE '\\\\'"
+            )
+            for key, val in cursor.fetchall():
+                worker_name = key.replace('_wrk_cnt_threads', '')
+                thread_config[worker_name] = int(val) if val else 0
+            cursor.close()
+            conn.close()
+        except Exception:
+            pass  # Fall back to no thread info
+
         workers = {}
+        total_active = 0
         for name, config in WORKER_REGISTRY.items():
+            req_queue = config['request_queue']
+            resp_queue = config['response_queue']
+            dlq = config['dlq']
+            req_stats = queue_stats.get(req_queue, {})
+            resp_stats = queue_stats.get(resp_queue, {})
+            dlq_stats = queue_stats.get(dlq, {})
+            consumers = req_stats.get('consumers', 0)
+            threads = thread_config.get(name, None)
+            if consumers > 0:
+                total_active += 1
             workers[name] = {
                 'description': config['description'],
                 'cascade_to': config['cascade_to'],
+                'active': consumers > 0,
+                'consumers': consumers,
+                'threads': threads,
                 'queues': {
-                    'request': config['request_queue'],
-                    'response': config['response_queue'],
-                    'dlq': config['dlq']
+                    'request':  {**{'name': req_queue},  **req_stats},
+                    'response': {**{'name': resp_queue}, **resp_stats},
+                    'dlq':      {**{'name': dlq},        **dlq_stats},
                 }
             }
-        return jsonify({'workers': workers})
+        return jsonify({
+            'active_workers': total_active,
+            'total_workers': len(WORKER_REGISTRY),
+            'workers': workers
+        })
 
     @app.route('/api/trigger/<worker>', methods=['POST'])
     def trigger_worker(worker):
