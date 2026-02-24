@@ -19,7 +19,7 @@
   "info": {
     "title": "Guide Gateway API",
     "version": "1.0.0",
-    "description": "Transaction processing pipeline for Solana blockchain data.\n\n## Workers\n- **producer** - Fetches transaction signatures from RPC\n- **decoder** - Decodes raw transactions via Shyft API\n- **detailer** - Enriches transactions with additional data\n- **funder** - Discovers funding wallets for addresses\n\n## Authentication\nAll endpoints require an API key passed via the `X-API-Key` header."
+    "description": "Transaction processing pipeline for Solana blockchain data.\n\n## Workers\n- **producer** - Fetches transaction signatures from RPC\n- **decoder** - Decodes raw transactions via Solscan API\n- **detailer** - Enriches transactions with balance/detail data\n- **shredder** - Parses staging rows into tx tables\n- **enricher** - Enriches tokens/pools via Solscan API\n- **funder** - Classifies addresses, discovers funding wallets\n- **aggregator** - Aggregates edges, computes participation stats\n- **synchronizer** - Fills gaps in mint transaction history from chain\n\n## Authentication\nAll endpoints require an API key passed via the `X-API-Key` header."
   },
   "servers": [
     {
@@ -242,6 +242,39 @@
           "batch": { "$ref": "#/components/schemas/FunderBatch" }
         }
       },
+      "SynchronizerBatch": {
+        "type": "object",
+        "properties": {
+          "mint_address": {
+            "type": "string",
+            "description": "Solana mint address (44 chars). Takes precedence over mint_symbol.",
+            "example": "So11111111111111111111111111111112"
+          },
+          "mint_symbol": {
+            "type": "string",
+            "description": "Token symbol (e.g., WSOL, BONK). Used if mint_address not provided.",
+            "example": "WSOL"
+          }
+        }
+      },
+      "SynchronizerTriggerRequest": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "sync": { "$ref": "#/components/schemas/SynchronizerBatch" }
+        }
+      },
+      "SynchronizerResult": {
+        "type": "object",
+        "properties": {
+          "mint_address": { "type": "string", "description": "Resolved mint address" },
+          "sync_id": { "type": "string", "description": "UUID identifying this sync run" },
+          "total_on_chain": { "type": "integer", "description": "Total signatures found on-chain" },
+          "already_have": { "type": "integer", "description": "Signatures already in our database" },
+          "gaps_found": { "type": "integer", "description": "Missing signatures (gaps to fill)" },
+          "batches_queued": { "type": "integer", "description": "Batches sent to decoder/detailer pipeline" }
+        }
+      },
       "BmapResponse": {
         "type": "object",
         "properties": {
@@ -399,6 +432,106 @@
           },
           "404": {
             "description": "Token not found and mint address could not be resolved for auto-fetch"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "description": "Database error"
+          }
+        }
+      }
+    },
+    "/api/bmap/get-wallet-txs": {
+      "get": {
+        "operationId": "bmapGetWalletTxs",
+        "summary": "Get Wallet Transaction History",
+        "description": "Returns a wallet's transaction history for a specific token.\n\nEach row includes the transaction signature, type (swap_in, swap_out, spl_transfer, etc.), direction (in/out), amount, counterparty address and label, post-balance, DEX name, and pool label.\n\nResults are ordered by block_time descending (most recent first).",
+        "tags": ["Bmap"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          {
+            "name": "address",
+            "in": "query",
+            "required": true,
+            "description": "Wallet address (base58, 44 chars)",
+            "schema": { "type": "string", "maxLength": 44 }
+          },
+          {
+            "name": "mint",
+            "in": "query",
+            "required": true,
+            "description": "Token mint address (base58, 44 chars)",
+            "schema": { "type": "string", "maxLength": 44 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max transactions to return (default 50, max 200)",
+            "schema": { "type": "integer", "default": 50, "maximum": 200 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet transaction history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": { "type": "string", "description": "Wallet address" },
+                    "mint": { "type": "string", "description": "Token mint address" },
+                    "count": { "type": "integer", "description": "Number of transactions returned" },
+                    "transactions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "signature": { "type": "string", "description": "Transaction signature" },
+                          "block_time": { "type": "integer", "description": "Unix timestamp" },
+                          "block_time_utc": { "type": "string", "description": "UTC datetime" },
+                          "type_code": { "type": "string", "description": "Edge type (swap_in, swap_out, spl_transfer, etc.)" },
+                          "direction": { "type": "string", "enum": ["in", "out"], "description": "Token flow direction relative to wallet" },
+                          "amount": { "type": "number", "description": "Token amount (decimal-adjusted)" },
+                          "counterparty": { "type": "string", "description": "Address on the other side of the edge" },
+                          "counterparty_label": { "type": "string", "description": "Label or address_type of counterparty" },
+                          "post_balance": { "type": "number", "description": "Wallet token balance after this tx" },
+                          "dex": { "type": "string", "nullable": true, "description": "DEX name if swap" },
+                          "pool_label": { "type": "string", "nullable": true, "description": "Pool label if swap" }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "address": "BAoVYrCEjFk7bgP2fRp2ahLcH6ktYUVSgXWHT88jYymy",
+                  "mint": "eFua55nxgpaMqdP65qKweyN8PqPqHqWFzdNuC6ppump",
+                  "count": 2,
+                  "transactions": [
+                    {
+                      "signature": "47nfGGdp58JDaTJSN8aEHv7FgA25rpavTSxTADCtZhk1...",
+                      "block_time": 1771588802,
+                      "block_time_utc": "2026-02-20T12:00:02",
+                      "type_code": "swap_in",
+                      "direction": "out",
+                      "amount": 93514650.583056,
+                      "counterparty": "HXWsqSPxuJLyHAjLbZczGdK19JG8X3x2bjTdf6MrTjtT",
+                      "counterparty_label": "Pump.fun (Wk) Bonding Curve",
+                      "post_balance": 0.0,
+                      "dex": "Pump.fun",
+                      "pool_label": "Pump.fun (Wk) Bonding Curve"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required parameters (address and mint)"
+          },
+          "404": {
+            "description": "Wallet or token not found"
           },
           "429": {
             "description": "Rate limit exceeded"
@@ -648,6 +781,73 @@
         }
       }
     },
+    "/api/trigger/synchronizer": {
+      "post": {
+        "operationId": "triggerSynchronizer",
+        "summary": "Trigger Synchronizer",
+        "description": "Fill gaps in transaction history for a mint.\n\nThe synchronizer will:\n1. Resolve the mint address (by address or symbol)\n2. Find the oldest known transaction for this mint in our database\n3. Fetch all on-chain signatures from Chainstack RPC (newest → oldest known)\n4. Diff against our database to identify missing transactions (gaps)\n5. Cascade missing signatures to the decoder/detailer pipeline in batches of 20\n\n**Use case:** Different API consumers request different time windows for the same mint, creating gaps in coverage. The synchronizer fills those gaps.\n\n**Note:** This is a long-running operation — a mint with thousands of on-chain transactions may take 10-30 seconds to sync. The response includes stats on how many gaps were found and batches queued.",
+        "tags": ["Workers"],
+        "parameters": [
+          { "$ref": "#/components/parameters/X-Request-Id" },
+          { "$ref": "#/components/parameters/X-Correlation-Id" },
+          { "$ref": "#/components/parameters/X-Priority" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SynchronizerTriggerRequest" },
+              "examples": {
+                "syncByMintAddress": {
+                  "summary": "Sync by mint address",
+                  "value": {
+                    "sync": {
+                      "mint_address": "So11111111111111111111111111111112"
+                    }
+                  }
+                },
+                "syncBySymbol": {
+                  "summary": "Sync by token symbol",
+                  "value": {
+                    "sync": {
+                      "mint_symbol": "BONK"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sync completed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TriggerResponse" },
+                "example": {
+                  "success": true,
+                  "request_id": "sync-001",
+                  "correlation_id": "sync-001",
+                  "worker": "synchronizer",
+                  "status": "completed",
+                  "result": {
+                    "mint_address": "So11111111111111111111111111111112",
+                    "sync_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "total_on_chain": 5000,
+                    "already_have": 4200,
+                    "gaps_found": 800,
+                    "batches_queued": 40
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid request (no mint_address or mint_symbol provided)" },
+          "401": { "description": "Invalid API key" },
+          "404": { "description": "Mint not found in database" }
+        }
+      }
+    },
     "/api/status/{request_id}": {
       "get": {
         "operationId": "getRequestStatus",
@@ -680,7 +880,7 @@
       "get": {
         "operationId": "getPipelineStatus",
         "summary": "Get Pipeline Status",
-        "description": "Get aggregated status of all requests in a pipeline by correlation_id.\n\nReturns all worker requests (gateway, producer, decoder, detailer, funder) that share the same correlation_id.",
+        "description": "Get aggregated status of all requests in a pipeline by correlation_id.\n\nReturns all worker requests (gateway, producer, decoder, detailer, funder, synchronizer) that share the same correlation_id.",
         "tags": ["Status"],
         "parameters": [
           {
