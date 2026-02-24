@@ -1321,8 +1321,8 @@ def create_app():
         mint_address = request.args.get('mint')
         limit = request.args.get('limit', default=50, type=int)
 
-        if not address or not mint_address:
-            return jsonify({'error': 'address and mint are required'}), 400
+        if not address:
+            return jsonify({'error': 'address is required'}), 400
 
         # --- Call stored procedure ---
         conn = None
