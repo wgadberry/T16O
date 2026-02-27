@@ -689,6 +689,7 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
         'sig_hash': sig_hash,
         'action': 'cascade',
         'source_worker': 'producer',
+        'tx_origin': 1,  # user-requested
         'priority': priority,
         'timestamp': datetime.now().isoformat() + 'Z',
         'batch': {

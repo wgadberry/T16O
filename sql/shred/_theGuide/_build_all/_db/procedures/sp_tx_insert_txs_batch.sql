@@ -9,6 +9,7 @@ DROP PROCEDURE IF EXISTS `sp_tx_insert_txs_batch`;;
 CREATE DEFINER=`root`@`%` PROCEDURE `sp_tx_insert_txs_batch`(
     IN p_txs_json JSON,
     IN p_request_log_id BIGINT UNSIGNED,
+    IN p_tx_origin TINYINT UNSIGNED,
     OUT p_inserted_count INT,
     OUT p_skipped_count INT
 )
@@ -56,7 +57,8 @@ BEGIN
         agg_fee_token_id,
         -- tx_json,
         tx_state,
-        request_log_id
+        request_log_id,
+        tx_origin
     )
     SELECT
         t.tx_hash,
@@ -80,7 +82,8 @@ BEGIN
         CASE WHEN t.activity_type = 'ACTIVITY_TOKEN_SWAP' THEN fee_tok.id ELSE NULL END,
         -- t.tx_json,
         8,
-        p_request_log_id
+        p_request_log_id,
+        IFNULL(p_tx_origin, 0)
     FROM JSON_TABLE(
         p_txs_json,
         '$.data[*]' COLUMNS (

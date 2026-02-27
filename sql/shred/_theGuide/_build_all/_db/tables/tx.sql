@@ -24,6 +24,7 @@ CREATE TABLE `tx` (
   `agg_fee_token_id` bigint DEFAULT NULL COMMENT 'FK to tx_token - fee token',
   `tx_json` json DEFAULT NULL,
   `tx_state` bigint unsigned DEFAULT '0' COMMENT 'Bitmask: 1=SHREDDED,2=DECODED,4=GUIDE_EDGES,8=ADDRESSES_QUEUED,16=SWAPS,32=GUIDE_LOADED,64=DETAILED,128=TOKENS,256=POOLS,512=FUNDING,1024=CLASSIFIED',
+  `tx_origin` tinyint unsigned DEFAULT '0' COMMENT '0=system, 1=user, 2=sync',
   `created_utc` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_signature` (`signature`),

@@ -187,7 +187,14 @@ SERVICE_REGISTRY = {
     },
     'shredder': {
         'worker_module': 'guide-shredder',
-        'worker_entry': 'run_daemon',
+        'worker_entry': 'run_supervisor',
         'has_queue': False,  # Polls DB staging table
+        'auto_args': False,
+    },
+    'synchronizer': {
+        'worker_module': 'guide-synchronizer',
+        'worker_entry': 'run_supervisor',
+        'has_queue': True,
+        'auto_args': False,
     },
 }

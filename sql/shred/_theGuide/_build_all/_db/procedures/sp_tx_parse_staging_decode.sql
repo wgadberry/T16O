@@ -23,6 +23,7 @@ BEGIN
     DECLARE v_txs_json JSON;
     DECLARE v_shredded_state INT;
     DECLARE v_request_log_id BIGINT UNSIGNED;
+    DECLARE v_tx_origin TINYINT UNSIGNED DEFAULT 0;
     DECLARE v_features INT UNSIGNED DEFAULT 0;
 
     SET p_tx_count = 0;
@@ -34,7 +35,7 @@ BEGIN
     SET v_shredded_state = CAST(fn_get_config('tx_state', 'shredded') AS UNSIGNED);
 
     
-    SELECT txs, request_log_id INTO v_txs_json, v_request_log_id
+    SELECT txs, request_log_id, tx_origin INTO v_txs_json, v_request_log_id, v_tx_origin
     FROM t16o_db_staging.txs
     WHERE id = p_staging_id;
 
@@ -54,7 +55,7 @@ BEGIN
     END IF;
    
     CALL sp_tx_prepopulate_lookups(v_txs_json, v_request_log_id, v_features);    
-    CALL sp_tx_insert_txs_batch(v_txs_json, v_request_log_id, p_tx_count, p_skipped_count);  
+    CALL sp_tx_insert_txs_batch(v_txs_json, v_request_log_id, v_tx_origin, p_tx_count, p_skipped_count);
     CALL sp_tx_insert_transfers(v_txs_json, p_transfer_count);    
     CALL sp_tx_insert_swaps(v_txs_json, v_features, p_swap_count);    
     CALL sp_tx_insert_activities(v_txs_json, v_features, p_activity_count);

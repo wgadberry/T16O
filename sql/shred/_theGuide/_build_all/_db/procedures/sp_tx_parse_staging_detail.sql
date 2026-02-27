@@ -64,9 +64,34 @@ BEGIN
     JOIN tx ON tx.signature = j.tx_hash;
 
     SET p_skipped_count = v_total_txs - p_tx_count;    
-    CALL sp_tx_insert_sol_balance(v_txs_json, v_features, v_searched_addresses, p_sol_balance_count);    
-    CALL sp_tx_insert_token_balance(v_txs_json, v_features, v_searched_addresses, p_token_balance_count);    
-    
+    CALL sp_tx_insert_sol_balance(v_txs_json, v_features, v_searched_addresses, p_sol_balance_count);
+    CALL sp_tx_insert_token_balance(v_txs_json, v_features, v_searched_addresses, p_token_balance_count);
+
+    -- Fix signer_address_id from the actual fee payer (signer[0] in detailed JSON).
+    -- The decode stage sets it from one_line_summary.data.account which is the activity
+    -- account, not the tx signer. The detailed RPC response has the true signer.
+    INSERT IGNORE INTO tx_address (address, address_type)
+    SELECT DISTINCT j.fee_payer, 'wallet'
+    FROM JSON_TABLE(
+        v_txs_json,
+        '$.data[*]' COLUMNS (
+            fee_payer VARCHAR(44) PATH '$.signer[0]'
+        )
+    ) j
+    WHERE j.fee_payer IS NOT NULL AND j.fee_payer != 'null';
+
+    UPDATE tx t
+    JOIN JSON_TABLE(
+        v_txs_json,
+        '$.data[*]' COLUMNS (
+            tx_hash VARCHAR(88) PATH '$.tx_hash',
+            fee_payer VARCHAR(44) PATH '$.signer[0]'
+        )
+    ) j ON j.tx_hash = t.signature
+    JOIN tx_address a ON a.address = j.fee_payer
+    SET t.signer_address_id = a.id
+    WHERE j.fee_payer IS NOT NULL;
+
     UPDATE tx SET tx_state = tx_state | 20
     WHERE signature IN (
         SELECT j.tx_hash

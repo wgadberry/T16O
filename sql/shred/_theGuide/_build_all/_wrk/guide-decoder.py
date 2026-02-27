@@ -211,7 +211,7 @@ def get_tx_state_decoded(cursor):
 
 def process_signatures(tag, cursor, conn, session, signatures,
                        priority, correlation_id, sig_hash, request_log_id,
-                       dry_run, api_timeout):
+                       tx_origin, dry_run, api_timeout):
     result = {'processed': 0, 'skipped': 0, 'staging_id': None, 'tx_count': 0, 'error': None}
     if not signatures:
         return result
@@ -253,9 +253,9 @@ def process_signatures(tag, cursor, conn, session, signatures,
     t1 = time.time()
     cursor.execute(
         f"INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE} "
-        "(txs, tx_state, priority, correlation_id, sig_hash, request_log_id) "
-        "VALUES (%s,%s,%s,%s,%s,%s)",
-        (json.dumps(decoded), tx_state, priority, correlation_id, sig_hash, request_log_id))
+        "(txs, tx_state, priority, correlation_id, sig_hash, request_log_id, tx_origin) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (json.dumps(decoded), tx_state, priority, correlation_id, sig_hash, request_log_id, tx_origin))
     conn.commit()
     staging_id = cursor.lastrowid
     insert_time = time.time() - t1
@@ -351,6 +351,7 @@ class WorkerThread(threading.Thread):
             batch_data     = msg.get('batch', {})
             priority       = msg.get('priority', 5)
             features       = msg.get('features', 0)
+            tx_origin      = msg.get('tx_origin', 0)
             signatures     = batch_data.get('signatures', [])
             batch_num      = batch_data.get('batch_num', 0)
 
@@ -373,7 +374,7 @@ class WorkerThread(threading.Thread):
             result = process_signatures(
                 self.tag, cursor, db_conn, session, signatures,
                 priority, correlation_id, sig_hash, request_log_id,
-                self.dry_run, self.api_timeout_sec)
+                tx_origin, self.dry_run, self.api_timeout_sec)
 
             if result.get('error'):
                 status = 'failed'

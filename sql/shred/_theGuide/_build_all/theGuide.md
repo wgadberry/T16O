@@ -429,10 +429,14 @@ tx.guide.addresses
 
 | Script | Purpose | Input | Output |
 |--------|---------|-------|--------|
-| `guide-producer.py` | Fetch transaction signatures | Chainstack RPC | tx.guide.signatures |
-| `guide-shredder.py` | Decode and shred transactions | tx.guide.signatures | tx_guide, tx.guide.addresses |
-| `guide-funder.py` | Identify wallet funders | tx.guide.addresses | tx_address.funded_by |
-| `guide-sync-funding.py` | Aggregate funding edges | tx_guide (poll) | tx_funding_edge |
+| `guide-producer.py` | Fetch transaction signatures | Chainstack RPC | mq.guide.decoder/detailer.request |
+| `guide-decoder.py` | Fetch decoded tx data from Solscan | mq.guide.decoder.request | t16o_db_staging.txs |
+| `guide-detailer.py` | Fetch detail/balance data from Solscan | mq.guide.detailer.request | t16o_db_staging.txs |
+| `guide-shredder.py` | Parse staging rows into tx tables | t16o_db_staging.txs (poll) | tx_guide, tx_transfer, tx_swap |
+| `guide-enricher.py` | Enrich tokens/pools via Solscan API | DB poll | tx_token, tx_pool |
+| `guide-funder.py` | Classify addresses, trace funders | DB poll | tx_address |
+| `guide-aggregator.py` | Aggregate edges, compute stats | DB poll | tx_funding_edge, tx_token_participant |
+| `guide-synchronizer.py` | Fill gaps in mint tx history | mq.guide.synchronizer.request | t16o_db_staging.txs_sync → decoder/detailer |
 
 **Producer Usage:**
 ```bash

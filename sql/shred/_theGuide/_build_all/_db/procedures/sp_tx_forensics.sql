@@ -22,6 +22,8 @@ BEGIN
     DECLARE v_total_edges INT DEFAULT 0;
     DECLARE v_total_txs INT DEFAULT 0;
     DECLARE v_unique_wallets INT DEFAULT 0;
+    DECLARE v_holders INT DEFAULT 0;
+    DECLARE v_holder_supply DECIMAL(30,6) DEFAULT 0;
     DECLARE v_first_bt BIGINT UNSIGNED;
     DECLARE v_last_bt BIGINT UNSIGNED;
     DECLARE v_lifespan_days INT DEFAULT 0;
@@ -45,6 +47,7 @@ BEGIN
     DECLARE v_sybil_json JSON;
     DECLARE v_wash_json JSON;
     DECLARE v_swap_json JSON;
+    DECLARE v_assoc_json JSON;
 
     -- ==========================================================================
     -- STEP 1: Resolve token (borrowed from sp_tx_bmap_get)
@@ -81,6 +84,38 @@ BEGIN
 
         SELECT COUNT(*) INTO v_unique_wallets FROM tmp_all_wallets;
         DROP TEMPORARY TABLE IF EXISTS tmp_all_wallets;
+
+        -- Current holders: wallets whose latest post_balance > 0
+        -- Use ROW_NUMBER to pick latest balance per wallet (avoids GROUP_CONCAT string building)
+        DROP TEMPORARY TABLE IF EXISTS tmp_latest_balance;
+        CREATE TEMPORARY TABLE tmp_latest_balance (
+            address_id INT UNSIGNED NOT NULL,
+            post_balance BIGINT UNSIGNED DEFAULT 0,
+            rn INT UNSIGNED NOT NULL,
+            KEY (address_id, rn)
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_latest_balance (address_id, post_balance, rn)
+        SELECT address_id, post_balance,
+               ROW_NUMBER() OVER (PARTITION BY address_id ORDER BY block_time DESC, tx_id DESC) AS rn
+        FROM (
+            SELECT g.from_address_id AS address_id, g.block_time, g.tx_id, g.from_token_post_balance AS post_balance
+            FROM tx_guide g
+            JOIN tx_address a ON a.id = g.from_address_id AND a.address_type = 'wallet'
+            WHERE g.token_id = v_token_id AND g.from_token_post_balance IS NOT NULL
+            UNION ALL
+            SELECT g.to_address_id, g.block_time, g.tx_id, g.to_token_post_balance
+            FROM tx_guide g
+            JOIN tx_address a ON a.id = g.to_address_id AND a.address_type = 'wallet'
+            WHERE g.token_id = v_token_id AND g.to_token_post_balance IS NOT NULL
+        ) combined;
+
+        SELECT COUNT(*), COALESCE(ROUND(SUM(post_balance / POW(10, COALESCE(v_decimals, 9))), 6), 0)
+        INTO v_holders, v_holder_supply
+        FROM tmp_latest_balance
+        WHERE rn = 1 AND post_balance > 0;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_latest_balance;
 
         SET v_lifespan_days = GREATEST(1, FLOOR((CAST(v_last_bt AS SIGNED) - CAST(v_first_bt AS SIGNED)) / 86400));
 
@@ -158,48 +193,132 @@ BEGIN
             edge_count INT DEFAULT 0,
             buy_volume DECIMAL(30,6) DEFAULT 0,
             sell_volume DECIMAL(30,6) DEFAULT 0,
+            swap_in_count INT DEFAULT 0,
+            swap_out_count INT DEFAULT 0,
             transfer_in DECIMAL(30,6) DEFAULT 0,
-            transfer_out DECIMAL(30,6) DEFAULT 0
+            transfer_out DECIMAL(30,6) DEFAULT 0,
+            edge_types VARCHAR(500) DEFAULT NULL
         );
 
         -- FROM side (sender/outflow)
         INSERT INTO tmp_wallet_stats (address_id, address, label, address_type, funded_by,
-                                      total_volume, edge_count, sell_volume, transfer_out)
+                                      total_volume, edge_count, sell_volume, swap_in_count, transfer_out)
         SELECT
-            a.id, a.address, COALESCE(a.label, a.address_type), a.address_type,
+            a.id, a.address, a.address_type, a.address_type,
             f.address,
             ROUND(SUM(g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9))), 6),
             COUNT(*),
             ROUND(SUM(CASE WHEN gt.type_code = 'swap_in' THEN g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9)) ELSE 0 END), 6),
+            SUM(CASE WHEN gt.type_code = 'swap_in' THEN 1 ELSE 0 END),
             ROUND(SUM(CASE WHEN gt.type_code IN ('spl_transfer','sol_transfer') THEN g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9)) ELSE 0 END), 6)
         FROM tx_guide g
         JOIN tx_guide_type gt ON gt.id = g.edge_type_id
         JOIN tx_address a ON a.id = g.from_address_id
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
         WHERE g.token_id = v_token_id
-        GROUP BY a.id, a.address, a.label, a.address_type, f.address;
+        GROUP BY a.id, a.address, a.address_type, f.address;
 
         -- TO side (receiver/inflow) — merge
         INSERT INTO tmp_wallet_stats (address_id, address, label, address_type, funded_by,
-                                      total_volume, edge_count, buy_volume, transfer_in)
+                                      total_volume, edge_count, buy_volume, swap_out_count, transfer_in)
         SELECT
-            a.id, a.address, COALESCE(a.label, a.address_type), a.address_type,
+            a.id, a.address, a.address_type, a.address_type,
             f.address,
             ROUND(SUM(g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9))), 6),
             COUNT(*),
             ROUND(SUM(CASE WHEN gt.type_code = 'swap_out' THEN g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9)) ELSE 0 END), 6),
+            SUM(CASE WHEN gt.type_code = 'swap_out' THEN 1 ELSE 0 END),
             ROUND(SUM(CASE WHEN gt.type_code IN ('spl_transfer','sol_transfer') THEN g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9)) ELSE 0 END), 6)
         FROM tx_guide g
         JOIN tx_guide_type gt ON gt.id = g.edge_type_id
         JOIN tx_address a ON a.id = g.to_address_id
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
         WHERE g.token_id = v_token_id
-        GROUP BY a.id, a.address, a.label, a.address_type, f.address
+        GROUP BY a.id, a.address, a.address_type, f.address
         ON DUPLICATE KEY UPDATE
             total_volume = tmp_wallet_stats.total_volume + VALUES(total_volume),
             edge_count = tmp_wallet_stats.edge_count + VALUES(edge_count),
             buy_volume = tmp_wallet_stats.buy_volume + VALUES(buy_volume),
+            swap_out_count = tmp_wallet_stats.swap_out_count + VALUES(swap_out_count),
             transfer_in = tmp_wallet_stats.transfer_in + VALUES(transfer_in);
+
+        -- Populate distinct edge types per wallet (both sides merged)
+        -- Pre-compute into temp table to avoid correlated OR subquery (N×M scan)
+        DROP TEMPORARY TABLE IF EXISTS tmp_wallet_edge_types;
+        CREATE TEMPORARY TABLE tmp_wallet_edge_types (
+            address_id INT UNSIGNED NOT NULL,
+            type_code VARCHAR(30) NOT NULL,
+            PRIMARY KEY (address_id, type_code)
+        ) ENGINE=MEMORY;
+
+        INSERT IGNORE INTO tmp_wallet_edge_types (address_id, type_code)
+        SELECT g.from_address_id, gt.type_code
+        FROM tx_guide g
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        JOIN tmp_wallet_stats w ON w.address_id = g.from_address_id
+        WHERE g.token_id = v_token_id;
+
+        INSERT IGNORE INTO tmp_wallet_edge_types (address_id, type_code)
+        SELECT g.to_address_id, gt.type_code
+        FROM tx_guide g
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        JOIN tmp_wallet_stats w ON w.address_id = g.to_address_id
+        WHERE g.token_id = v_token_id;
+
+        UPDATE tmp_wallet_stats w
+        SET w.edge_types = (
+            SELECT GROUP_CONCAT(et.type_code ORDER BY et.type_code SEPARATOR ', ')
+            FROM tmp_wallet_edge_types et
+            WHERE et.address_id = w.address_id
+        );
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_wallet_edge_types;
+
+        -- -----------------------------------------------------------------
+        -- STEP 5b: Enrich labels from related tables (per-token context)
+        -- Priority: mint-edge "Token Creator" > pool_label > program name
+        --           > token symbol > tx_address.label (if not misleading)
+        --           > address_type
+        -- -----------------------------------------------------------------
+
+        -- 1) Addresses that have a mint edge (type_code=38) for THIS token = actual creator
+        UPDATE tmp_wallet_stats w
+        SET w.label = 'Token Creator'
+        WHERE EXISTS (
+            SELECT 1 FROM tx_guide g
+            WHERE g.token_id = v_token_id
+              AND g.edge_type_id = 38
+              AND g.from_address_id = w.address_id
+        );
+
+        -- 2) Pool labels from tx_pool
+        UPDATE tmp_wallet_stats w
+        JOIN tx_pool p ON p.pool_address_id = w.address_id
+        SET w.label = p.pool_label
+        WHERE w.label = w.address_type
+          AND p.pool_label IS NOT NULL AND p.pool_label != '';
+
+        -- 3) Program names from tx_program
+        UPDATE tmp_wallet_stats w
+        JOIN tx_program pr ON pr.program_address_id = w.address_id
+        SET w.label = pr.name
+        WHERE w.label = w.address_type
+          AND pr.name IS NOT NULL AND pr.name != '';
+
+        -- 4) Token symbol/name for mint addresses
+        UPDATE tmp_wallet_stats w
+        JOIN tx_token tk ON tk.mint_address_id = w.address_id
+        SET w.label = CONCAT(COALESCE(tk.token_symbol, ''), IF(tk.token_name IS NOT NULL AND tk.token_name != '', CONCAT(' (', tk.token_name, ')'), ''))
+        WHERE w.label = w.address_type
+          AND (tk.token_symbol IS NOT NULL OR tk.token_name IS NOT NULL);
+
+        -- 5) Apply tx_address.label for remaining unlabeled, but skip misleading globals
+        UPDATE tmp_wallet_stats w
+        JOIN tx_address a ON a.id = w.address_id
+        SET w.label = a.label
+        WHERE w.label = w.address_type
+          AND a.label IS NOT NULL AND a.label != ''
+          AND a.label NOT IN ('Token Creator');
 
         SELECT JSON_ARRAYAGG(wallet_data) INTO v_wallets_json
         FROM (
@@ -212,8 +331,11 @@ BEGIN
                 'edge_count', w.edge_count,
                 'buy_volume', w.buy_volume,
                 'sell_volume', w.sell_volume,
+                'swap_in_count', w.swap_in_count,
+                'swap_out_count', w.swap_out_count,
                 'transfer_in', w.transfer_in,
-                'transfer_out', w.transfer_out
+                'transfer_out', w.transfer_out,
+                'edge_types', w.edge_types
             ) AS wallet_data
             FROM tmp_wallet_stats w
             ORDER BY w.total_volume DESC
@@ -312,24 +434,48 @@ BEGIN
         GROUP BY COALESCE(g.dex, 'Unknown');
 
         -- Calculate top2 sell concentration per DEX
-        -- For each DEX, sum the top 2 seller volumes and divide by total sell volume
+        -- Pre-materialize seller volumes, then rank to pick top 2 per DEX
+        DROP TEMPORARY TABLE IF EXISTS tmp_seller_vols;
+        CREATE TEMPORARY TABLE tmp_seller_vols (
+            dex VARCHAR(50) NOT NULL,
+            seller_id INT UNSIGNED NOT NULL,
+            seller_vol DECIMAL(30,6) NOT NULL,
+            rn INT UNSIGNED DEFAULT 0,
+            KEY (dex, rn)
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_seller_vols (dex, seller_id, seller_vol)
+        SELECT COALESCE(g.dex, 'Unknown'), g.from_address_id,
+               ROUND(SUM(g.amount / POW(10, COALESCE(g.decimals, v_decimals, 9))), 6)
+        FROM tx_guide g
+        JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+        WHERE g.token_id = v_token_id AND gt.type_code = 'swap_in'
+        GROUP BY COALESCE(g.dex, 'Unknown'), g.from_address_id;
+
+        -- Rank sellers per DEX (can't self-reference temp table, so use UPDATE with window)
+        DROP TEMPORARY TABLE IF EXISTS tmp_seller_ranked;
+        CREATE TEMPORARY TABLE tmp_seller_ranked (
+            dex VARCHAR(50) NOT NULL,
+            seller_vol DECIMAL(30,6) NOT NULL,
+            rn INT UNSIGNED NOT NULL,
+            KEY (dex, rn)
+        ) ENGINE=MEMORY;
+
+        INSERT INTO tmp_seller_ranked (dex, seller_vol, rn)
+        SELECT dex, seller_vol,
+               ROW_NUMBER() OVER (PARTITION BY dex ORDER BY seller_vol DESC) AS rn
+        FROM tmp_seller_vols;
+
         UPDATE tmp_dex_stats d
-        SET d.top2_sell_pct = (
-            SELECT ROUND(SUM(seller_vol) / GREATEST(d.sell_volume, 0.000001) * 100, 2)
-            FROM (
-                SELECT
-                    ROUND(SUM(g2.amount / POW(10, COALESCE(g2.decimals, v_decimals, 9))), 6) AS seller_vol
-                FROM tx_guide g2
-                JOIN tx_guide_type gt2 ON gt2.id = g2.edge_type_id
-                WHERE g2.token_id = v_token_id
-                  AND gt2.type_code = 'swap_in'
-                  AND COALESCE(g2.dex, 'Unknown') = d.dex
-                GROUP BY g2.from_address_id
-                ORDER BY seller_vol DESC
-                LIMIT 2
-            ) top2
-        )
+        SET d.top2_sell_pct = COALESCE((
+            SELECT ROUND(SUM(sr.seller_vol) / GREATEST(d.sell_volume, 0.000001) * 100, 2)
+            FROM tmp_seller_ranked sr
+            WHERE sr.dex = d.dex AND sr.rn <= 2
+        ), 0)
         WHERE d.sell_volume > 0;
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_seller_vols;
+        DROP TEMPORARY TABLE IF EXISTS tmp_seller_ranked;
 
         SELECT COALESCE(MAX(top2_sell_pct), 0) INTO v_max_top2_sell_pct FROM tmp_dex_stats;
 
@@ -355,6 +501,61 @@ BEGIN
 
         DROP TEMPORARY TABLE IF EXISTS tmp_dex_stats;
         DROP TEMPORARY TABLE IF EXISTS tmp_wallet_stats;
+
+        -- ==========================================================================
+        -- STEP 8b: Associations — pools, programs, dexes, paired tokens
+        -- ==========================================================================
+        SELECT JSON_OBJECT(
+            'pools', COALESCE((
+                SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                    'address', pa.address,
+                    'label', p.pool_label,
+                    'program', prg.name
+                ))
+                FROM tx_pool p
+                JOIN tx_address pa ON pa.id = p.pool_address_id
+                LEFT JOIN tx_program prg ON prg.id = p.program_id
+                WHERE p.token1_id = v_token_id OR p.token2_id = v_token_id
+            ), JSON_ARRAY()),
+            'programs', COALESCE((
+                SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                    'address', pra.address,
+                    'name', prg.name,
+                    'type', prg.program_type
+                ))
+                FROM (
+                    SELECT DISTINCT prg2.id
+                    FROM tx_pool p
+                    JOIN tx_program prg2 ON prg2.id = p.program_id
+                    WHERE p.token1_id = v_token_id OR p.token2_id = v_token_id
+                ) dp
+                JOIN tx_program prg ON prg.id = dp.id
+                JOIN tx_address pra ON pra.id = prg.program_address_id
+            ), JSON_ARRAY()),
+            'dexes', COALESCE((
+                SELECT JSON_ARRAYAGG(dex_name)
+                FROM (
+                    SELECT DISTINCT g.dex AS dex_name
+                    FROM tx_guide g
+                    WHERE g.token_id = v_token_id AND g.dex IS NOT NULL
+                ) dd
+            ), JSON_ARRAY()),
+            'paired_tokens', COALESCE((
+                SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                    'mint', ma.address,
+                    'symbol', tk2.token_symbol,
+                    'name', tk2.token_name
+                ))
+                FROM (
+                    SELECT DISTINCT CASE WHEN p.token1_id = v_token_id THEN p.token2_id ELSE p.token1_id END AS other_token_id
+                    FROM tx_pool p
+                    WHERE (p.token1_id = v_token_id OR p.token2_id = v_token_id)
+                      AND CASE WHEN p.token1_id = v_token_id THEN p.token2_id ELSE p.token1_id END IS NOT NULL
+                ) ot
+                JOIN tx_token tk2 ON tk2.id = ot.other_token_id
+                JOIN tx_address ma ON ma.id = tk2.mint_address_id
+            ), JSON_ARRAY())
+        ) INTO v_assoc_json;
 
         -- ==========================================================================
         -- STEP 9: Risk score (0-100)
@@ -427,7 +628,9 @@ BEGIN
             'first_block_time_utc', FROM_UNIXTIME(v_first_bt),
             'last_block_time', v_last_bt,
             'last_block_time_utc', FROM_UNIXTIME(v_last_bt),
-            'lifespan_days', v_lifespan_days
+            'lifespan_days', v_lifespan_days,
+            'holders', v_holders,
+            'holder_supply', v_holder_supply
         );
 
         -- ==========================================================================
@@ -447,6 +650,7 @@ BEGIN
                 'sybil_clusters', COALESCE(v_sybil_json, JSON_ARRAY()),
                 'wash_trading', COALESCE(v_wash_json, JSON_ARRAY()),
                 'swap_concentration', COALESCE(v_swap_json, JSON_ARRAY()),
+                'associations', v_assoc_json,
                 'risk_score', JSON_OBJECT(
                     'score', v_risk_score,
                     'rating', CASE

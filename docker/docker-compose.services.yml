@@ -167,6 +167,21 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  synchronizer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: t16o_v1_services_synchronizer
+    restart: unless-stopped
+    volumes:
+      - ./guide-config.docker.json:/app/_wrk/guide-config.json:ro
+    command: ["python3", "-u", "guide-synchronizer.py"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
   shredder:
     build:
       context: ..
