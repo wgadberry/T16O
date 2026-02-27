@@ -111,6 +111,36 @@ BEGIN
                 LEFT JOIN tx_address fa ON fa.id = g.from_address_id
                 WHERE g.to_address_id = v_wallet_id
                   AND (v_token_id IS NULL OR g.token_id = v_token_id)
+
+                UNION ALL
+
+                -- POOL side: address is the pool (swap activity through this pool)
+                SELECT
+                    t.signature,
+                    t.block_time,
+                    gt.type_code,
+                    CASE WHEN g.from_address_id = v_wallet_id THEN 'out'
+                         WHEN g.to_address_id = v_wallet_id THEN 'in'
+                         ELSE 'swap' END AS direction,
+                    ROUND(g.amount / POW(10, COALESCE(g.decimals, tk.decimals, 9)), 9) AS amount,
+                    tk.token_symbol,
+                    ma.address AS mint_address,
+                    COALESCE(fa.address, ta.address) AS counterparty,
+                    COALESCE(fa.label, fa.address_type, ta.label, ta.address_type) AS counterparty_label,
+                    NULL AS post_balance,
+                    g.dex,
+                    g.pool_label
+                FROM tx_guide g
+                JOIN tx t ON t.id = g.tx_id
+                JOIN tx_guide_type gt ON gt.id = g.edge_type_id
+                JOIN tx_token tk ON tk.id = g.token_id
+                JOIN tx_address ma ON ma.id = tk.mint_address_id
+                LEFT JOIN tx_address fa ON fa.id = g.from_address_id
+                LEFT JOIN tx_address ta ON ta.id = g.to_address_id
+                WHERE g.pool_address_id = v_wallet_id
+                  AND g.from_address_id != v_wallet_id
+                  AND g.to_address_id != v_wallet_id
+                  AND (v_token_id IS NULL OR g.token_id = v_token_id)
             ) r
             ORDER BY r.block_time DESC
             LIMIT p_limit;

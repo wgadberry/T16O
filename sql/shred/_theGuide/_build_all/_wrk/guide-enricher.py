@@ -408,7 +408,7 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
     # Phase 1: Solscan API (claim batch with FOR UPDATE SKIP LOCKED)
     tokens = claim_batch(
         cursor, conn, table='tx_token',
-        where_clause="(token_symbol IS NULL OR token_symbol = '' OR token_name IS NULL OR token_name = '' OR decimals IS NULL)",
+        where_clause="(token_symbol IS NULL OR token_symbol = '' OR token_name IS NULL OR token_name = '' OR decimals IS NULL OR (decimals = 0 AND token_type IS NULL))",
         where_params=(),
         max_attempts=max_attempts, limit=limit,
         join_clause='JOIN tx_address a ON a.id = t.mint_address_id',

@@ -144,11 +144,15 @@ BEGIN
     JOIN tmp_detail_address tda ON tda.address = tdt.token_address
     SET tdt.address_id = tda.address_id;
 
-    -- Ensure tokens exist
-    INSERT INTO tx_token (mint_address_id, decimals)
-    SELECT address_id, COALESCE(decimals, 0) FROM tmp_detail_token
+    -- Ensure tokens exist (classify fungible at insert; decimals=0 needs API for nft vs semi_fungible)
+    INSERT INTO tx_token (mint_address_id, decimals, token_type)
+    SELECT address_id, COALESCE(decimals, 0),
+           CASE WHEN COALESCE(decimals, 0) >= 1 THEN 'fungible' ELSE NULL END
+    FROM tmp_detail_token
     WHERE address_id IS NOT NULL
-    ON DUPLICATE KEY UPDATE id = id;
+    ON DUPLICATE KEY UPDATE
+        decimals = COALESCE(VALUES(decimals), tx_token.decimals),
+        token_type = COALESCE(tx_token.token_type, VALUES(token_type));
 
     -- Lookup token IDs
     UPDATE tmp_detail_token tdt

@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import random
+import requests as http_requests
 
 # LLM support (optional)
 try:
@@ -309,6 +310,121 @@ def fetch_wallet():
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+GATEWAY_URL = 'https://svcs.the16oracles.io'
+GATEWAY_API_KEY = 'BMFer'
+
+@app.route('/api/trigger/producer', methods=['POST'])
+def proxy_trigger_producer():
+    """Proxy producer trigger to AWS API Gateway to avoid CORS issues."""
+    try:
+        data = request.get_json()
+        resp = http_requests.post(
+            f'{GATEWAY_URL}/api/trigger/producer',
+            json=data,
+            headers={
+                'Content-Type': 'application/json',
+                'X-API-Key': GATEWAY_API_KEY,
+                'X-Request-Id': request.headers.get('X-Request-Id', ''),
+                'X-Correlation-Id': request.headers.get('X-Correlation-Id', ''),
+            },
+            timeout=30
+        )
+        return (resp.text, resp.status_code, {'Content-Type': 'application/json'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+@app.route('/api/bmap/get-wallet-txs', methods=['GET', 'POST'])
+def get_wallet_txs():
+    """
+    Get wallet transaction history via sp_tx_bmap_get_wallet_txs.
+    - address: Wallet address (required)
+    - mint: Token mint address (optional)
+    - limit: Max rows (default 50, max 200)
+    """
+    if request.method == 'POST' and request.is_json:
+        body = request.get_json(silent=True) or {}
+        address = body.get('address')
+        mint_address = body.get('mint')
+        limit = body.get('limit', 50)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 50
+    else:
+        address = request.args.get('address')
+        mint_address = request.args.get('mint')
+        limit = request.args.get('limit', default=50, type=int)
+
+    if not address:
+        return jsonify({'error': 'address is required'}), 400
+
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        conn = None
+        cursor = None
+        try:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor(dictionary=True)
+            cursor.callproc('sp_tx_bmap_get_wallet_txs', [address, mint_address, min(limit, 200)])
+
+            rows = []
+            for result_set in cursor.stored_results():
+                rows = result_set.fetchall()
+                break
+
+            cursor.close()
+            conn.close()
+
+            # Check for SP error response
+            if len(rows) == 1 and 'result' in rows[0]:
+                error_data = json.loads(rows[0]['result']) if isinstance(rows[0]['result'], str) else rows[0]['result']
+                return jsonify(error_data), 404
+
+            # Serialize decimals/datetimes
+            import decimal, datetime
+            txs = []
+            for row in rows:
+                tx = {}
+                for k, v in row.items():
+                    if isinstance(v, decimal.Decimal):
+                        tx[k] = float(v)
+                    elif isinstance(v, (datetime.datetime, datetime.date)):
+                        tx[k] = v.isoformat()
+                    else:
+                        tx[k] = v
+                txs.append(tx)
+
+            return jsonify({
+                'address': address,
+                'mint': mint_address,
+                'count': len(txs),
+                'transactions': txs
+            })
+
+        except mysql.connector.Error as e:
+            last_error = e
+            if cursor:
+                try: cursor.close()
+                except: pass
+            if conn:
+                try: conn.close()
+                except: pass
+            if e.errno == 1213 and attempt < MAX_RETRIES - 1:
+                backoff = BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 0.2)
+                time.sleep(backoff)
+                continue
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+        except Exception as e:
+            if cursor:
+                try: cursor.close()
+                except: pass
+            if conn:
+                try: conn.close()
+                except: pass
+            return jsonify({'error': f'Error: {str(e)}'}), 500
+
+    return jsonify({'error': f'Database error after {MAX_RETRIES} retries: {str(last_error)}'}), 500
 
 def fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit, token_name=None):
     """Helper to get bmap data for explain endpoint."""

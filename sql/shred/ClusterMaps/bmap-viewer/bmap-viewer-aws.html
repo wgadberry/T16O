@@ -786,6 +786,26 @@
         .explanation-loading { padding: 30px; text-align: center; color: #888; background: #fafafa; }
         .explanation-loading::after { content: ''; animation: dots 1.5s infinite; }
         .explanation-error { padding: 20px; color: #dc2626; background: #fef2f2; }
+
+        /* Wallet Transaction History Table */
+        .wallet-txs-panel { background: var(--bg-card); border-radius: 10px; margin-top: 15px; overflow: hidden; border: 1px solid var(--border); }
+        .wallet-txs-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+        .wallet-txs-header h3 { font-size: 13px; color: var(--text-primary); margin: 0; }
+        .wallet-txs-header .wallet-addr { font-family: monospace; font-size: 11px; color: var(--accent); }
+        .wallet-txs-header .close-btn { background: none; border: 1px solid var(--border); color: var(--text-secondary); cursor: pointer; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+        .wallet-txs-header .close-btn:hover { color: var(--accent); border-color: var(--accent); }
+        .wallet-txs-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        .wallet-txs-table thead th { background: var(--bg-input); color: var(--text-secondary); padding: 8px 10px; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; position: sticky; top: 0; }
+        .wallet-txs-table tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
+        .wallet-txs-table tbody tr:hover { background: rgba(59, 130, 246, 0.08); }
+        .wallet-txs-table tbody td { padding: 7px 10px; color: var(--text-primary); white-space: nowrap; }
+        .wallet-txs-table .dir-in { color: #4ade80; font-weight: 600; }
+        .wallet-txs-table .dir-out { color: #f87171; font-weight: 600; }
+        .wallet-txs-table .sig-cell { font-family: monospace; color: var(--accent); font-size: 10px; }
+        .wallet-txs-table .amount-cell { font-family: monospace; text-align: right; }
+        .wallet-txs-table .type-badge { padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; }
+        .wallet-txs-scroll { max-height: 400px; overflow-y: auto; }
+        .wallet-txs-loading { padding: 30px; text-align: center; color: var(--text-secondary); }
     </style>
 </head>
 <body>
@@ -1134,6 +1154,7 @@
                         <div class="legend-item"><div class="legend-dot" style="background: #666;"></div> Zero/Sold (Pools, ATAs)</div>
                         <div class="legend-item"><div class="legend-dot" style="background: #a855f7;"></div> Funded By Link</div>
                     </div>
+                    <div id="wallet-txs-panel"></div>
                 </div>
             `;
 
@@ -1835,6 +1856,7 @@
         let allNodes = null; // Store all nodes for filtering
         let allEdges = null; // Store all edges for filtering
         let signatureOnlyMode = false; // True when loaded by signature only (show all tokens)
+        let nodeClickTimer = null; // Debounce single-click to avoid firing on dblclick
 
         function renderBubbleMap(nodes, edges) {
             const container = document.getElementById('bubble-map');
@@ -2106,7 +2128,7 @@
                             ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
                         </div>` : ''}
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
-                            Click to copy address &bull; Double-click to fetch txns
+                            Click for tx history &bull; Double-click to fetch new txns
                         </div>
                     `)
                     .style('left', (event.pageX + 10) + 'px')
@@ -2117,11 +2139,14 @@
                 })
                 .on('click', (event, d) => {
                     event.stopPropagation();
-                    copyAddr(d.id, null);
+                    tooltip.style('opacity', 0);
+                    clearTimeout(nodeClickTimer);
+                    nodeClickTimer = setTimeout(() => showWalletTxs(d.id), 250);
                 })
                 .on('dblclick', (event, d) => {
                     event.stopPropagation();
                     tooltip.style('opacity', 0);
+                    clearTimeout(nodeClickTimer);
                     fetchWalletTransactions(d.id);
                 });
 
@@ -2818,7 +2843,7 @@
                             ${ix.pools?.length ? `<div>Pools: <span style="color: #e94560;">${ix.pools.map(p => p.label || p.address?.slice(0,12)).join(', ')}</span></div>` : ''}
                         </div>` : ''}
                         <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; color: #aaa; font-size: 10px;">
-                            Click to copy address &bull; Double-click to fetch txns
+                            Click for tx history &bull; Double-click to fetch new txns
                         </div>
                     `)
                     .style('left', (event.pageX + 10) + 'px')
@@ -2829,11 +2854,14 @@
                 })
                 .on('click', (event, d) => {
                     event.stopPropagation();
-                    copyAddr(d.id, null);
+                    tooltip.style('opacity', 0);
+                    clearTimeout(nodeClickTimer);
+                    nodeClickTimer = setTimeout(() => showWalletTxs(d.id), 250);
                 })
                 .on('dblclick', (event, d) => {
                     event.stopPropagation();
                     tooltip.style('opacity', 0);
+                    clearTimeout(nodeClickTimer);
                     fetchWalletTransactions(d.id);
                 });
 
@@ -3002,22 +3030,161 @@
         }
 
         // Fetch wallet transactions via guide-producer
-        async function fetchWalletTransactions(address) {
-            showToast(`Fetching transactions for ${address.slice(0,8)}...`, 'pending');
-            
+        async function showWalletTxs(address) {
+            const panel = document.getElementById('wallet-txs-panel');
+            if (!panel) return;
+
+            // Get current mint from form (optional filter)
+            const mint = document.getElementById('mint_address')?.value || null;
+            const mintParam = mint ? `&mint=${encodeURIComponent(mint)}` : '';
+            const addrShort = `${address.slice(0,6)}...${address.slice(-4)}`;
+
+            panel.innerHTML = `
+                <div class="wallet-txs-panel">
+                    <div class="wallet-txs-header">
+                        <h3>Transaction History</h3>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span class="wallet-addr" title="${address}">${addrShort}</span>
+                            <button class="close-btn" onclick="document.getElementById('wallet-txs-panel').innerHTML=''">&times;</button>
+                        </div>
+                    </div>
+                    <div class="wallet-txs-loading">Loading transactions...</div>
+                </div>`;
+
+            // Scroll panel into view
+            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
             try {
-                const response = await fetch('/api/fetch-wallet', {
+                const resp = await fetch(`/api/bmap/get-wallet-txs?address=${encodeURIComponent(address)}${mintParam}&limit=100`);
+                const data = await resp.json();
+
+                if (data.error) {
+                    panel.querySelector('.wallet-txs-loading').innerHTML = `<span style="color:#ef4444;">${data.error}</span>`;
+                    return;
+                }
+
+                const txs = data.transactions || [];
+                if (txs.length === 0) {
+                    panel.querySelector('.wallet-txs-loading').innerHTML = 'No transactions found for this wallet.';
+                    return;
+                }
+
+                const typeColor = (tc) => {
+                    if (tc?.startsWith('swap')) return '#fbbf24';
+                    if (tc === 'spl_transfer') return '#3b82f6';
+                    if (tc?.startsWith('create') || tc?.startsWith('close')) return '#0891b2';
+                    if (tc?.startsWith('lend') || tc?.startsWith('borrow')) return '#a855f7';
+                    return '#888';
+                };
+
+                let tableHtml = `
+                    <div class="wallet-txs-scroll">
+                        <table class="wallet-txs-table">
+                            <thead>
+                                <tr>
+                                    <th>Time (UTC)</th>
+                                    <th>Dir</th>
+                                    <th>Type</th>
+                                    <th>Token</th>
+                                    <th style="text-align:right;">Amount</th>
+                                    <th>Counterparty</th>
+                                    <th>DEX / Pool</th>
+                                    <th style="text-align:right;">Post Bal</th>
+                                    <th>Signature</th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+
+                for (const tx of txs) {
+                    const dir = tx.direction === 'in'
+                        ? '<span class="dir-in">IN</span>'
+                        : tx.direction === 'swap'
+                        ? '<span style="color:#fbbf24;font-weight:600;">SWAP</span>'
+                        : '<span class="dir-out">OUT</span>';
+                    const cpShort = tx.counterparty ? `${tx.counterparty.slice(0,6)}...${tx.counterparty.slice(-4)}` : '-';
+                    const cpLabel = tx.counterparty_label && tx.counterparty_label !== 'wallet'
+                        ? `<div style="font-size:9px;color:var(--text-secondary);">${tx.counterparty_label}</div>` : '';
+                    const dexPool = [tx.dex, tx.pool_label].filter(Boolean).join(' / ') || '-';
+                    const sigShort = tx.signature ? `${tx.signature.slice(0,8)}...` : '-';
+                    const amt = tx.amount != null ? formatNumber(tx.amount) : '-';
+                    const postBal = tx.post_balance != null ? formatNumber(tx.post_balance) : '-';
+                    const tokenSym = tx.token_symbol || (tx.mint_address ? tx.mint_address.slice(0,6) + '...' : '-');
+
+                    tableHtml += `
+                                <tr onclick="navigateTo('${tx.signature}')" title="Click to navigate to this transaction">
+                                    <td>${tx.block_time_utc || '-'}</td>
+                                    <td>${dir}</td>
+                                    <td><span class="type-badge" style="background:${typeColor(tx.type_code)}22;color:${typeColor(tx.type_code)};">${tx.type_code || '-'}</span></td>
+                                    <td>${tokenSym}</td>
+                                    <td class="amount-cell">${amt}</td>
+                                    <td>${cpShort}${cpLabel}</td>
+                                    <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;">${dexPool}</td>
+                                    <td class="amount-cell">${postBal}</td>
+                                    <td class="sig-cell">${sigShort}</td>
+                                </tr>`;
+                }
+
+                tableHtml += `</tbody></table></div>`;
+
+                panel.innerHTML = `
+                    <div class="wallet-txs-panel">
+                        <div class="wallet-txs-header">
+                            <h3>Transaction History <span style="color:var(--text-secondary);font-size:11px;font-weight:normal;">(${txs.length} rows)</span></h3>
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <span class="wallet-addr" title="${address}" style="cursor:pointer;" onclick="event.stopPropagation(); copyAddr('${address}', null);">${addrShort}</span>
+                                <button class="close-btn" onclick="document.getElementById('wallet-txs-panel').innerHTML=''">&times;</button>
+                            </div>
+                        </div>
+                        ${tableHtml}
+                    </div>`;
+
+            } catch (err) {
+                const loading = panel.querySelector('.wallet-txs-loading');
+                if (loading) loading.innerHTML = `<span style="color:#ef4444;">Error: ${err.message}</span>`;
+            }
+        }
+
+        async function fetchWalletTransactions(address) {
+            const currentSig = document.getElementById('signature')?.value || '';
+            const addrShort = `${address.slice(0,6)}...${address.slice(-4)}`;
+            showToast(`Fetching txns for ${addrShort} via producer...`, 'pending');
+
+            const payload = {
+                batch: {
+                    filters: {
+                        signature: '',
+                        sig_adjacent_cnt: 5,
+                        addresses: [address],
+                        before: {},
+                        until: currentSig ? { signature: currentSig } : {}
+                    },
+                    address_sig_cnt: 10
+                }
+            };
+
+            try {
+                const response = await fetch('/api/trigger/producer', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ address })
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Request-Id': `bmap-viewer-${Date.now()}`,
+                        'X-Correlation-Id': 'bmap-viewer-fetch'
+                    },
+                    body: JSON.stringify(payload)
                 });
-                
+
                 const result = await response.json();
-                
-                if (result.success) {
-                    showToast(`Queued ${result.message || 'wallet fetch'}`, 'success');
+
+                if (response.ok) {
+                    showToast(`Producer triggered for ${addrShort} — loading txs in 15s...`, 'success');
+                    // Auto-reload: wait for producer to process, then show wallet txs + refresh bmap
+                    setTimeout(() => {
+                        showToast(`Loading transactions for ${addrShort}...`, 'pending');
+                        showWalletTxs(address);
+                        fetchData();
+                    }, 15000);
                 } else {
-                    showToast(`Error: ${result.error || 'Unknown error'}`, 'error');
+                    showToast(`Error: ${result.error || result.message || response.statusText}`, 'error');
                 }
             } catch (error) {
                 showToast(`Error: ${error.message}`, 'error');

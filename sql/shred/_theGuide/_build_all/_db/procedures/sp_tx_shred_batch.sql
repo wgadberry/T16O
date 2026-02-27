@@ -90,11 +90,15 @@ BEGIN
     WHERE a.address_type = 'pool'
       AND NOT EXISTS (SELECT 1 FROM tx_pool p WHERE p.pool_address_id = a.id);
 
-    INSERT INTO tx_token (mint_address_id, decimals)
-    SELECT a.id, jt.decimal_val FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
+    INSERT INTO tx_token (mint_address_id, decimals, token_type)
+    SELECT a.id, jt.decimal_val,
+           CASE WHEN jt.decimal_val >= 1 THEN 'fungible' ELSE NULL END
+    FROM JSON_TABLE(p_json, '$.data[*].transfers[*]' COLUMNS (
         t_addr VARCHAR(44) PATH '$.token_address', decimal_val TINYINT PATH '$.decimals'
     )) AS jt JOIN tx_address a ON a.address = jt.t_addr WHERE jt.t_addr IS NOT NULL
-    ON DUPLICATE KEY UPDATE decimals = COALESCE(VALUES(decimals), decimals);
+    ON DUPLICATE KEY UPDATE
+        decimals = COALESCE(VALUES(decimals), tx_token.decimals),
+        token_type = COALESCE(tx_token.token_type, VALUES(token_type));
 
     
     INSERT INTO tx_token (mint_address_id)
