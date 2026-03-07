@@ -33,7 +33,7 @@ builder.Services.AddSwaggerGen(options =>
     options.SwaggerDoc("v1", new OpenApiInfo
     {
         Version = "v1",
-        Title = "Demo Proxy API",
+        Title = "T16O API",
         Description = "Local proxy API for the T16O cluster map widget demo. Forwards requests to the upstream hosted API with authentication."
     });
 });
@@ -53,7 +53,7 @@ if (app.Environment.IsDevelopment())
     app.MapScalarApiReference(options =>
     {
         options
-            .WithTitle("Demo Proxy API")
+            .WithTitle("T16O API")
             .WithTheme(ScalarTheme.DeepSpace)
             .WithDefaultHttpClient(ScalarTarget.CSharp, ScalarClient.HttpClient);
     });
