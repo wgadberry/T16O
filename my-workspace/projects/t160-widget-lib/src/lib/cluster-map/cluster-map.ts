@@ -87,7 +87,7 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   walletTxs: WalletTokenTx[] = [];
   walletTxsLoading = false;
   walletTxsError = '';
-  txHistoryTab: 'edges' | 'history' = 'history';
+  txHistoryTab: 'edges' | 'history' = 'edges';
 
   // D3 elements
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
@@ -739,7 +739,7 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   private onNodeClick(event: MouseEvent, d: D3Node): void {
     event.stopPropagation();
     this.selectedNode = d;
-    this.txHistoryTab = d.isProgram ? 'edges' : 'history';
+    this.txHistoryTab = 'edges';
     this.buildNodeEdgeRows(d.id);
     this.nodeSelected.emit(d);
 
