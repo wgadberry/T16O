@@ -12,6 +12,9 @@ import { SelectModule } from 'primeng/select';
 import { ProgressSpinnerModule } from 'primeng/progressspinner';
 import { MessageModule } from 'primeng/message';
 import { TooltipModule } from 'primeng/tooltip';
+import { SpeedDialModule } from 'primeng/speeddial';
+import { DialogModule } from 'primeng/dialog';
+import { MenuItem } from 'primeng/api';
 
 import { ClusterMapService } from './cluster-map.service';
 import {
@@ -38,7 +41,9 @@ import {
     SelectModule,
     ProgressSpinnerModule,
     MessageModule,
-    TooltipModule
+    TooltipModule,
+    SpeedDialModule,
+    DialogModule
   ],
   templateUrl: './cluster-map.html',
   styleUrl: './cluster-map.css',
@@ -78,9 +83,16 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   currentData: BubbleMapResponse | null = null;
   showLabels = true;
   selectedNode: D3Node | null = null;
-  queryPanelExpanded = true;
-  tokenInfoPanelExpanded = true;
-  txNavPanelExpanded = true;
+  txHistoryNode: D3Node | null = null;
+
+  // Speed dial & dialogs
+  speedDialItems: MenuItem[] = [];
+  showTokenDialog = false;
+  showTxDialog = false;
+  showTokenInfoDialog = false;
+  showTxNavDialog = false;
+  showNodeDetailsDialog = false;
+  txSignature = '';
 
   // Transaction history below the map
   nodeEdgeRows: NodeEdgeRow[] = [];
@@ -129,6 +141,34 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
     if (this.data) {
       this.currentData = this.data;
     }
+
+    this.speedDialItems = [
+      {
+        icon: 'pi pi-search',
+        tooltipOptions: { tooltipLabel: 'Token Lookup' },
+        command: () => { this.showTokenDialog = true; }
+      },
+      {
+        icon: 'pi pi-bolt',
+        tooltipOptions: { tooltipLabel: 'TX Lookup' },
+        command: () => { this.showTxDialog = true; }
+      },
+      {
+        icon: 'pi pi-info-circle',
+        tooltipOptions: { tooltipLabel: 'Token Info' },
+        command: () => { this.showTokenInfoDialog = true; }
+      },
+      {
+        icon: 'pi pi-arrows-h',
+        tooltipOptions: { tooltipLabel: 'TX Nav' },
+        command: () => { this.showTxNavDialog = true; }
+      },
+      {
+        icon: 'pi pi-user',
+        tooltipOptions: { tooltipLabel: 'Node Details' },
+        command: () => { this.showNodeDetailsDialog = true; }
+      }
+    ];
   }
 
   ngAfterViewInit(): void {
@@ -152,7 +192,7 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
 
     const container = this.containerRef.nativeElement;
     const width = container.clientWidth || 800;
-    const height = 850;
+    const height = container.clientHeight || 500;
 
     // Clear existing SVG
     d3.select(container).selectAll('svg').remove();
@@ -166,14 +206,14 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
       .style('background', '#0d0d1a')
       .on('click', () => this.closeDetailsPanel());
 
-    // Add background image with 40% opacity
+    // Add background image with 40% opacity — fit to full width
     this.svg.append('image')
       .attr('xlink:href', this.backgroundImagePath)
       .attr('x', 0)
       .attr('y', 0)
-      .attr('width', width)
-      .attr('height', height)
-      .attr('preserveAspectRatio', 'xMidYMid slice')
+      .attr('width', '100%')
+      .attr('height', '100%')
+      .attr('preserveAspectRatio', 'xMidYMin meet')
       .attr('opacity', 0.4)
       .style('pointer-events', 'none');
 
@@ -386,7 +426,7 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
 
     const container = this.containerRef.nativeElement;
     const width = container.clientWidth || 800;
-    const height = 850;
+    const height = container.clientHeight || 500;
 
     // Re-initialize SVG if needed
     if (!this.svg || width === 0) {
@@ -739,6 +779,8 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
   private onNodeClick(event: MouseEvent, d: D3Node): void {
     event.stopPropagation();
     this.selectedNode = d;
+    this.txHistoryNode = d;
+    this.showNodeDetailsDialog = true;
     this.txHistoryTab = 'edges';
     this.buildNodeEdgeRows(d.id);
     this.nodeSelected.emit(d);
@@ -755,11 +797,15 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
 
   closeDetailsPanel(): void {
     this.selectedNode = null;
+    this.nodeSelected.emit(null);
+  }
+
+  closeTxHistory(): void {
+    this.txHistoryNode = null;
     this.nodeEdgeRows = [];
     this.walletTxs = [];
     this.walletTxsLoading = false;
     this.walletTxsError = '';
-    this.nodeSelected.emit(null);
   }
 
   private buildNodeEdgeRows(nodeAddress: string): void {
@@ -824,16 +870,12 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
     return `${address.slice(0, 4)}...${address.slice(-4)}`;
   }
 
-  toggleQueryPanel(): void {
-    this.queryPanelExpanded = !this.queryPanelExpanded;
-  }
-
-  toggleTokenInfoPanel(): void {
-    this.tokenInfoPanelExpanded = !this.tokenInfoPanelExpanded;
-  }
-
-  toggleTxNavPanel(): void {
-    this.txNavPanelExpanded = !this.txNavPanelExpanded;
+  loadTransaction(): void {
+    if (!this.txSignature) {
+      this.errorMessage = 'Please enter a transaction signature';
+      return;
+    }
+    this.navigateToTransaction(this.txSignature);
   }
 
   copyToClipboard(text: string): void {

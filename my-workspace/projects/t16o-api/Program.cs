@@ -36,7 +36,47 @@ builder.Services.AddSwaggerGen(options =>
         Title = "T16O API",
         Description = "Local proxy API for the T16O cluster map widget demo. Forwards requests to the upstream hosted API with authentication."
     });
+    options.AddSecurityDefinition("ClientCredentials", new OpenApiSecurityScheme
+    {
+        Type = SecuritySchemeType.ApiKey,
+        In = ParameterLocation.Header,
+        Name = "X-Client-Id",
+        Description = "Client identifier"
+    });
+    options.AddSecurityDefinition("ClientSecret", new OpenApiSecurityScheme
+    {
+        Type = SecuritySchemeType.ApiKey,
+        In = ParameterLocation.Header,
+        Name = "X-Client-Secret",
+        Description = "Client secret"
+    });
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "ClientCredentials" }
+            },
+            Array.Empty<string>()
+        },
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "ClientSecret" }
+            },
+            Array.Empty<string>()
+        }
+    });
 });
+
+// Build client credentials lookup from config
+var clientCredentials = builder.Configuration
+    .GetSection("Clients")
+    .GetChildren()
+    .ToDictionary(
+        c => c["ClientId"] ?? "",
+        c => c["ClientSecret"] ?? "",
+        StringComparer.OrdinalIgnoreCase);
 
 var app = builder.Build();
 
@@ -61,6 +101,33 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseCors("AllowDemoApp");
+
+// Client credentials auth middleware
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path.Value ?? "";
+    if (path.StartsWith("/openapi", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/swagger", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/scalar", StringComparison.OrdinalIgnoreCase))
+    {
+        await next();
+        return;
+    }
+
+    var clientId = ctx.Request.Headers["X-Client-Id"].FirstOrDefault();
+    var clientSecret = ctx.Request.Headers["X-Client-Secret"].FirstOrDefault();
+
+    if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret) ||
+        !clientCredentials.TryGetValue(clientId, out var expectedSecret) ||
+        !string.Equals(clientSecret, expectedSecret, StringComparison.Ordinal))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { error = "Invalid or missing client credentials" });
+        return;
+    }
+
+    await next();
+});
 
 // Shared proxy helper — forwards the incoming query string to an upstream path
 async Task<IResult> ProxyToUpstream(HttpContext ctx, IHttpClientFactory httpClientFactory, string upstreamPath)

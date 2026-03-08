@@ -174,7 +174,7 @@
 /* Bubble Map Container */
 .bubble-map-canvas {
   width: 100%;
-  min-height: 600px;
+  min-height: 500px;
   background: #0d0d1a;
   border-radius: var(--border-radius, 6px);
   position: relative;
@@ -186,99 +186,18 @@
   position: relative;
 }
 
-/* Left Panels Container */
-.left-panels-container {
+/* Speed Dial */
+.speed-dial {
   position: absolute;
   top: 20px;
   left: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  z-index: 100;
-  max-height: calc(100% - 40px);
-  overflow-y: auto;
+  z-index: 200;
 }
 
-/* Shared Panel Styles */
-.query-panel,
-.token-info-panel,
-.tx-nav-panel {
-  position: relative;
-  width: 280px;
-  background: rgba(15, 15, 25, 0.3);
-  border: 1px solid rgba(100, 100, 150, 0.4);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  overflow: hidden;
-  transition: width 0.3s ease;
+:host ::ng-deep .speed-dial .p-speeddial-list {
+  z-index: 200;
 }
 
-.query-panel.collapsed,
-.token-info-panel.collapsed,
-.tx-nav-panel.collapsed {
-  width: auto;
-  background: rgba(15, 15, 25, 0.5);
-}
-
-.panel-toggle {
-  position: absolute;
-  top: 0;
-  right: -1px;
-  width: 32px;
-  height: 32px;
-  background: rgba(100, 100, 150, 0.3);
-  border: 1px solid rgba(100, 100, 150, 0.4);
-  border-radius: 0 8px 8px 0;
-  color: #aaa;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.query-panel.collapsed .panel-toggle,
-.token-info-panel.collapsed .panel-toggle,
-.tx-nav-panel.collapsed .panel-toggle {
-  position: relative;
-  right: 0;
-  width: 100%;
-  height: auto;
-  padding: 0.75rem 1rem;
-  border-radius: 12px;
-  flex-direction: row;
-  gap: 0.5rem;
-}
-
-.panel-toggle:hover {
-  background: rgba(100, 100, 150, 0.5);
-  color: #fff;
-}
-
-.toggle-label {
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-
-.panel-content {
-  padding: 1rem;
-  padding-right: 2.5rem;
-}
-
-.tx-nav-panel .panel-content {
-  padding-right: 2.5rem;
-}
-
-.panel-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-  color: #e0e0e0;
-  font-weight: 600;
-  font-size: 0.9rem;
-}
 
 /* Query Form Styles */
 .query-form .form-group {
@@ -303,35 +222,7 @@
   border-color: var(--primary-color, #3b82f6);
 }
 
-/* Token Info Panel Styles */
-.token-info-panel .token-symbol {
-  font-size: 1.5rem;
-  font-weight: bold;
-  color: var(--primary-color, #3b82f6);
-  margin-bottom: 0.75rem;
-}
-
-.token-info-panel .info-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.4rem 0;
-  border-bottom: 1px solid rgba(100, 100, 150, 0.2);
-  font-size: 0.85rem;
-}
-
-.token-info-panel .info-row:last-child {
-  border-bottom: none;
-}
-
-.token-info-panel .info-row .label {
-  color: #888;
-}
-
-.token-info-panel .info-row .value {
-  font-family: monospace;
-  color: #e0e0e0;
-}
+/* Token Info Dialog Styles (reused in dialog) */
 
 .value-with-copy {
   display: flex;
@@ -348,34 +239,7 @@
   opacity: 1;
 }
 
-/* Node Details Panel */
-.node-details-panel {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  width: 320px;
-  background: rgba(15, 15, 25, 0.3);
-  border: 1px solid rgba(100, 100, 150, 0.4);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(10px);
-  z-index: 100;
-  overflow: hidden;
-}
-
-.details-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem;
-  border-bottom: 1px solid rgba(100, 100, 150, 0.3);
-}
-
-.details-header h4 {
-  margin: 0;
-  font-size: 1.1rem;
-  font-weight: 600;
-}
+/* Node Details (used in dialog) */
 
 .details-content {
   padding: 1rem;
@@ -745,19 +609,35 @@
 
 /* Responsive */
 @media (max-width: 900px) {
-  .node-details-panel {
-    width: calc(100% - 40px);
-    max-width: 320px;
+  .bubble-map-canvas {
+    min-height: 350px;
   }
+}
 
-  .left-panels-container {
-    max-width: calc(100% - 40px);
-  }
+/* Dialog Overrides — dark/glassmorphism theme */
+:host ::ng-deep .p-dialog {
+  background: rgba(15, 15, 25, 0.95);
+  border: 1px solid rgba(100, 100, 150, 0.4);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+}
 
-  .query-panel,
-  .token-info-panel,
-  .tx-nav-panel {
-    width: 100%;
-    max-width: 280px;
-  }
+:host ::ng-deep .p-dialog-header {
+  background: rgba(15, 15, 25, 0.95);
+  border-bottom: 1px solid rgba(100, 100, 150, 0.3);
+  color: #e0e0e0;
+}
+
+:host ::ng-deep .p-dialog-content {
+  background: rgba(15, 15, 25, 0.95);
+  color: #e0e0e0;
+}
+
+:host ::ng-deep .p-dialog-footer {
+  background: rgba(15, 15, 25, 0.95);
+  border-top: 1px solid rgba(100, 100, 150, 0.3);
+}
+
+:host ::ng-deep .p-dialog-mask {
+  backdrop-filter: blur(4px);
 }
