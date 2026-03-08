@@ -141,6 +141,11 @@
             "type": "integer",
             "default": 10,
             "description": "Number of signatures to fetch per address"
+          },
+          "prime_sig_cnt": {
+            "type": "integer",
+            "default": 100,
+            "description": "Number of oldest (origination) signatures to fetch when action='prime'"
           }
         }
       },
@@ -224,8 +229,20 @@
       "ProducerTriggerRequest": {
         "type": "object",
         "properties": {
-          "action": { "type": "string", "default": "process", "description": "Action to perform" },
+          "action": { "type": "string", "default": "process", "enum": ["process", "prime"], "description": "Action to perform. Use 'prime' to fetch the first N transactions from a mint's origination." },
           "batch": { "$ref": "#/components/schemas/ProducerBatch" }
+        }
+      },
+      "ProducerPrimeResult": {
+        "type": "object",
+        "properties": {
+          "processed": { "type": "integer", "description": "Number of signatures selected for priming" },
+          "batches": { "type": "integer", "description": "Number of batches cascaded to decoder/detailer" },
+          "skipped": { "type": "integer", "description": "Signatures already in database (deduplicated)" },
+          "total_on_chain": { "type": "integer", "description": "Total signatures found on-chain for this mint" },
+          "first_mint_time": { "type": "integer", "description": "Unix timestamp of mint creation" },
+          "prime_sig_cnt": { "type": "integer", "description": "Number of oldest signatures selected" },
+          "mode": { "type": "string", "enum": ["prime"] }
         }
       },
       "DecoderTriggerRequest": {
@@ -550,7 +567,7 @@
       "post": {
         "operationId": "triggerProducer",
         "summary": "Trigger Producer",
-        "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing\n\n## Boundary Options\nUse `before` and `until` to control the range of signatures fetched:\n- **signature**: Direct transaction signature\n- **block_id**: Slot number (resolved to nearest signature)\n- **block_time**: ISO 8601 datetime (resolved to nearest signature)\n\nYou can mix boundary types (e.g., before=signature, until=block_time).",
+        "description": "Fetch transaction signatures for addresses from Solana RPC.\n\nThe producer will:\n1. Query RPC for signatures matching the filter addresses\n2. Store signatures in staging\n3. Cascade to decoder for processing\n\n## Actions\n- **process** (default): Fetch signatures by address with boundary options\n- **prime**: Fetch the first N transactions from a mint's origination. Looks up `first_mint_time` from token metadata (or Solscan API if unknown), then fetches all on-chain signatures and selects the oldest N for processing.\n\n## Boundary Options (action=process)\nUse `before` and `until` to control the range of signatures fetched:\n- **signature**: Direct transaction signature\n- **block_id**: Slot number (resolved to nearest signature)\n- **block_time**: ISO 8601 datetime (resolved to nearest signature)\n\nYou can mix boundary types (e.g., before=signature, until=block_time).",
         "tags": ["Workers"],
         "parameters": [
           { "$ref": "#/components/parameters/X-Request-Id" },
@@ -647,6 +664,30 @@
                         "until": { "block_time": "2025-01-01T00:00:00Z" }
                       },
                       "address_sig_cnt": 100000
+                    }
+                  }
+                },
+                "primeOrigination": {
+                  "summary": "Prime first 100 transactions from mint origination",
+                  "value": {
+                    "action": "prime",
+                    "batch": {
+                      "filters": {
+                        "mint_address": "So11111111111111111111111111111112"
+                      },
+                      "prime_sig_cnt": 100
+                    }
+                  }
+                },
+                "primeCustomCount": {
+                  "summary": "Prime first 50 transactions from mint origination",
+                  "value": {
+                    "action": "prime",
+                    "batch": {
+                      "filters": {
+                        "mint_address": "J2UXqJ1HYRwjCviLEqkY9mhoEPJ5UnoHEnbeijCweREV"
+                      },
+                      "prime_sig_cnt": 50
                     }
                   }
                 }

@@ -41,7 +41,13 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from t16o_exchange.guide.common.config import (
     get_db_config, get_rabbitmq_config, get_rpc_config, get_queue_names,
+    get_solscan_config,
 )
+
+_solscan                = get_solscan_config()
+SOLSCAN_API_BASE        = _solscan['api_base']
+SOLSCAN_API_TOKEN       = _solscan['token']
+DEFAULT_PRIME_SIG_CNT   = 100
 
 _rmq                    = get_rabbitmq_config()
 _queues                 = get_queue_names('producer')
@@ -675,7 +681,8 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
                                 total_batches: int, priority: int = 5,
                                 request_log_id: int = None,
                                 api_key_id: int = None,
-                                features: int = 0) -> bool:
+                                features: int = 0,
+                                tx_origin: int = 1) -> bool:
     """Publish a batch of signatures to both decoder and detailer queues in parallel"""
     # Compute sig_hash for pairing decoder and detailer batches
     sig_hash = compute_sig_hash(signatures)
@@ -689,7 +696,7 @@ def publish_cascade_to_workers(channel, request_id: str, correlation_id: str,
         'sig_hash': sig_hash,
         'action': 'cascade',
         'source_worker': 'producer',
-        'tx_origin': 1,  # user-requested
+        'tx_origin': tx_origin,
         'priority': priority,
         'timestamp': datetime.now().isoformat() + 'Z',
         'batch': {
@@ -948,6 +955,292 @@ def process_single_address(message: dict, rpc_session, gateway_channel, db_curso
     except Exception as e:
         print(f"    [ERROR] {e}")
         return {'processed': total_fetched, 'batches': total_batched, 'errors': 1, 'error': str(e)}
+
+
+def fetch_solscan_token_meta(session: requests.Session, mint_address: str) -> Optional[dict]:
+    """Fetch token metadata from Solscan /v2.0/token/meta for a single mint address."""
+    url = f"{SOLSCAN_API_BASE}/token/meta"
+    try:
+        session.headers['token'] = SOLSCAN_API_TOKEN
+        r = session.get(url, params={'address': mint_address}, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get('success') and data.get('data'):
+            return data['data']
+    except Exception as e:
+        print(f"  [PRIME] Solscan token/meta error for {mint_address[:16]}...: {e}")
+    return None
+
+
+def upsert_token_from_solscan(db_cursor, db_conn, mint_address: str, meta: dict) -> Optional[int]:
+    """Upsert tx_address + tx_token from Solscan metadata. Returns mint_address_id."""
+    # Ensure address exists
+    db_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (mint_address,))
+    row = db_cursor.fetchone()
+    if row:
+        addr_id = row[0]
+    else:
+        db_cursor.execute(
+            "INSERT INTO tx_address (address, address_type) VALUES (%s, 'mint')",
+            (mint_address,))
+        db_conn.commit()
+        addr_id = db_cursor.lastrowid
+
+    name = (meta.get('name') or '').strip() or None
+    symbol = (meta.get('symbol') or '').strip() or None
+    icon = meta.get('icon')
+    decimals = meta.get('decimals')
+    supply_str = meta.get('supply')
+    supply = int(supply_str) if supply_str is not None else None
+    mint_authority = meta.get('mint_authority')
+
+    token_type = None
+    if decimals is not None:
+        if decimals >= 1:
+            token_type = 'fungible'
+        elif not mint_authority and supply is not None and supply <= 1:
+            token_type = 'nft'
+        elif supply is not None and supply > 1:
+            token_type = 'semi_fungible'
+        else:
+            token_type = 'unknown'
+
+    token_json_str = json.dumps(meta)
+
+    # Check if token already exists
+    db_cursor.execute("SELECT id FROM tx_token WHERE mint_address_id = %s", (addr_id,))
+    token_row = db_cursor.fetchone()
+    if token_row:
+        db_cursor.execute("""
+            UPDATE tx_token
+            SET token_name = COALESCE(%s, token_name),
+                token_symbol = COALESCE(%s, token_symbol),
+                token_icon = COALESCE(%s, token_icon),
+                decimals = COALESCE(%s, decimals),
+                supply = COALESCE(%s, supply),
+                token_type = COALESCE(%s, token_type),
+                token_json = COALESCE(%s, token_json),
+                attempt_cnt = 0
+            WHERE id = %s
+        """, (name, symbol, icon, decimals, supply, token_type, token_json_str, token_row[0]))
+    else:
+        db_cursor.execute("""
+            INSERT INTO tx_token (mint_address_id, token_name, token_symbol, token_icon,
+                                  decimals, supply, token_type, token_json, attempt_cnt)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)
+        """, (addr_id, name, symbol, icon, decimals, supply, token_type, token_json_str))
+    db_conn.commit()
+    return addr_id
+
+
+def process_prime_request(message: dict, rpc_session, gateway_channel, db_cursor, db_conn) -> dict:
+    """
+    Prime mode: fetch the first N signatures for a mint from its origination.
+
+    Flow:
+    1. Resolve mint address in DB
+    2. Get first_mint_time from token_json (or Solscan API if missing)
+    3. Binary-search for signatures near origination time, fetch N oldest
+    4. Deduplicate against tx table
+    5. Cascade to decoder + detailer
+    """
+    request_id = message.get('request_id', 'unknown')
+    correlation_id = message.get('correlation_id', request_id)
+    request_log_id = message.get('request_log_id')
+    api_key_id = message.get('api_key_id')
+    features = message.get('features', 0)
+    priority = message.get('priority', 5)
+    batch = message.get('batch', {})
+    filters = batch.get('filters', {})
+    mint_address = filters.get('mint_address')
+    prime_sig_cnt = batch.get('prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
+
+    if not mint_address:
+        return {'processed': 0, 'errors': 1, 'error': 'prime requires batch.filters.mint_address'}
+
+    if not db_cursor:
+        return {'processed': 0, 'errors': 1, 'error': 'prime requires database connection'}
+
+    print(f"[{request_id[:8]}] PRIME mode: mint={mint_address[:20]}... sig_cnt={prime_sig_cnt}")
+
+    # Step 1: Resolve mint in DB
+    db_cursor.execute("SELECT id FROM tx_address WHERE address = %s", (mint_address,))
+    addr_row = db_cursor.fetchone()
+
+    anchor_tx = None
+    first_mint_time = None
+    anchor_source = None
+    meta = None
+
+    if addr_row:
+        addr_id = addr_row[0]
+        # Step 2a: Try to get anchor tx from token_json
+        # Priority: first_mint_tx → create_tx
+        db_cursor.execute("""
+            SELECT JSON_UNQUOTE(JSON_EXTRACT(token_json, '$.first_mint_tx')),
+                   JSON_UNQUOTE(JSON_EXTRACT(token_json, '$.create_tx')),
+                   JSON_EXTRACT(token_json, '$.first_mint_time'),
+                   JSON_EXTRACT(token_json, '$.created_time')
+            FROM tx_token WHERE mint_address_id = %s
+        """, (addr_id,))
+        token_row = db_cursor.fetchone()
+        if token_row:
+            fmt = token_row[0]
+            ctx = token_row[1]
+            fmt_time = token_row[2]
+            ctx_time = token_row[3]
+
+            if fmt and fmt != 'null':
+                anchor_tx = fmt
+                anchor_source = 'first_mint_tx (DB)'
+                if fmt_time is not None:
+                    first_mint_time = int(fmt_time)
+            elif ctx and ctx != 'null':
+                anchor_tx = ctx
+                anchor_source = 'create_tx (DB)'
+                if ctx_time is not None:
+                    first_mint_time = int(ctx_time)
+                elif fmt_time is not None:
+                    first_mint_time = int(fmt_time)
+
+        if anchor_tx:
+            print(f"  [PRIME] anchor from {anchor_source}: {anchor_tx[:20]}...")
+        if first_mint_time:
+            print(f"  [PRIME] origination time: {first_mint_time}")
+
+    # Step 2b: If no anchor tx, call Solscan API
+    if not anchor_tx:
+        print(f"  [PRIME] No anchor tx in DB, calling Solscan token/meta...")
+        meta = fetch_solscan_token_meta(rpc_session, mint_address)
+        if meta:
+            # Priority: first_mint_tx → create_tx
+            anchor_tx = meta.get('first_mint_tx') or meta.get('create_tx')
+            first_mint_time = meta.get('first_mint_time') or meta.get('created_time')
+            if first_mint_time:
+                first_mint_time = int(first_mint_time)
+            if anchor_tx:
+                src = 'first_mint_tx' if meta.get('first_mint_tx') else 'create_tx'
+                anchor_source = f'{src} (Solscan)'
+                print(f"  [PRIME] anchor from {anchor_source}: {anchor_tx[:20]}...")
+            # Upsert token data into DB
+            upsert_token_from_solscan(db_cursor, db_conn, mint_address, meta)
+            print(f"  [PRIME] Token metadata upserted to DB")
+        else:
+            return {
+                'processed': 0, 'errors': 1, 'mode': 'prime',
+                'error': f'Could not fetch token metadata from Solscan for {mint_address}'
+            }
+
+    # Step 3: Fetch the oldest prime_sig_cnt signatures.
+    #
+    # Primary strategy (O(1)): Use anchor_tx (first_mint_tx or create_tx) as
+    # the RPC "until" parameter. getSignaturesForAddress(addr, {until: sig})
+    # returns sigs NEWER than that sig. One RPC call gives us the first N
+    # transactions right after creation.
+    #
+    # Fallback (when no anchor tx available): Paginate newest→oldest keeping
+    # only a rolling window of the last prime_sig_cnt sigs. Capped at
+    # MAX_FALLBACK_PAGES to avoid hanging on massive tokens.
+
+    prime_sigs = []
+
+    if anchor_tx:
+        print(f"  [PRIME] Fetching {prime_sig_cnt} sigs using {anchor_source} as anchor...")
+
+        for sig_obj in fetch_all_signatures(
+            rpc_session, mint_address, CHAINSTACK_RPC_URL,
+            max_signatures=prime_sig_cnt,
+            until=anchor_tx,
+            skip_failed=True
+        ):
+            sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
+            if sig_str:
+                prime_sigs.append(sig_str)
+
+        # RPC returns newest-first, reverse to chronological (oldest first)
+        prime_sigs.reverse()
+
+        # Prepend the anchor tx itself (it's excluded by RPC "until")
+        prime_sigs.insert(0, anchor_tx)
+
+        print(f"  [PRIME] Fetched {len(prime_sigs)} signatures (including anchor tx)")
+    else:
+        # Fallback: no anchor tx — paginate to the end with a rolling window
+        MAX_FALLBACK_PAGES = 500  # 500K sigs max (~100s at 0.2s/page)
+        print(f"  [PRIME] No first_mint_tx, fallback: paginating to oldest (max {MAX_FALLBACK_PAGES} pages)...")
+
+        # Use a rolling buffer — only keep the last prime_sig_cnt sigs
+        ring_buffer = []
+        total_fetched = 0
+        for sig_obj in fetch_all_signatures(
+            rpc_session, mint_address, CHAINSTACK_RPC_URL,
+            max_signatures=MAX_FALLBACK_PAGES * 1000,
+            skip_failed=True
+        ):
+            sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
+            if sig_str:
+                ring_buffer.append(sig_str)
+                # Keep buffer from growing unbounded
+                if len(ring_buffer) > prime_sig_cnt * 2:
+                    ring_buffer = ring_buffer[-prime_sig_cnt:]
+            total_fetched += 1
+            if total_fetched % 10000 == 0:
+                print(f"    ... scanned {total_fetched} signatures")
+
+        if ring_buffer:
+            prime_sigs = ring_buffer[-prime_sig_cnt:] if len(ring_buffer) > prime_sig_cnt else ring_buffer
+            prime_sigs.reverse()  # Oldest first
+            print(f"  [PRIME] Fallback: selected {len(prime_sigs)} oldest from {total_fetched} scanned")
+
+    if not prime_sigs:
+        print(f"  [PRIME] No signatures found for this mint")
+        return {
+            'processed': 0, 'batches': 0, 'skipped': 0, 'errors': 0,
+            'mode': 'prime',
+            'first_mint_tx': first_mint_tx,
+            'first_mint_time': first_mint_time,
+            'prime_sig_cnt': 0,
+            'cascade_to': []
+        }
+
+    print(f"  [PRIME] Selected {len(prime_sigs)} oldest signatures for priming")
+
+    # Step 4: Deduplicate and cascade
+    batch_size = 20
+    total_batched = 0
+    total_skipped = 0
+    estimated_batches = (len(prime_sigs) + batch_size - 1) // batch_size
+
+    for i in range(0, len(prime_sigs), batch_size):
+        batch_to_send = prime_sigs[i:i + batch_size]
+        new_sigs, skipped = filter_existing_signatures(db_cursor, batch_to_send)
+        total_skipped += skipped
+
+        if new_sigs:
+            total_batched += 1
+            if publish_cascade_to_workers(
+                gateway_channel, request_id, correlation_id,
+                new_sigs, total_batched, estimated_batches, priority,
+                request_log_id, api_key_id, features,
+                tx_origin=3  # prime backfill
+            ):
+                skip_info = f", skipped {skipped}" if skipped > 0 else ""
+                print(f"    [CASCADE] Batch {total_batched} -> decoder+detailer ({len(new_sigs)} sigs{skip_info})")
+
+    print(f"  [PRIME] Complete: {total_batched} batches cascaded, {total_skipped} duplicates skipped")
+
+    return {
+        'processed': len(prime_sigs),
+        'batches': total_batched,
+        'skipped': total_skipped,
+        'errors': 0,
+        'mode': 'prime',
+        'anchor_tx': anchor_tx,
+        'anchor_source': anchor_source,
+        'first_mint_time': first_mint_time,
+        'prime_sig_cnt': len(prime_sigs),
+        'cascade_to': []
+    }
 
 
 def process_gateway_request(message: dict, rpc_session, gateway_channel, db_cursor=None) -> dict:
@@ -1225,6 +1518,23 @@ def run_queue_consumer(prefetch: int = 1):
 
                     # Validate message format
                     batch = message.get('batch', {})
+                    action = message.get('action', 'process')
+
+                    # Prime mode: separate flow for fetching origination transactions
+                    if action == 'prime':
+                        correlation_id = message.get('correlation_id', request_id)
+                        request_log_id = message.get('request_log_id')
+                        priority = message.get('priority', 5)
+                        api_key = message.get('api_key')
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received PRIME request {request_id[:8]} (corr: {correlation_id[:8]}, pri: {priority})")
+
+                        db_cursor = ensure_db_connection()
+                        result = process_prime_request(message, rpc_session, gateway_channel, db_cursor, db_state['conn'])
+                        status = 'completed' if result.get('errors', 0) == 0 else 'partial'
+                        publish_response(gateway_channel, request_id, correlation_id, status, result,
+                                       priority=priority, api_key=api_key, request_log_id=request_log_id)
+                        ch.basic_ack(delivery_tag=method.delivery_tag)
+                        return
 
                     # Pass-through mode: batch.signatures provided directly (skip RPC)
                     direct_signatures = batch.get('signatures', [])
