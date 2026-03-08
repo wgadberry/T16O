@@ -144,19 +144,9 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
 
     this.speedDialItems = [
       {
-        icon: 'pi pi-search',
-        tooltipOptions: { tooltipLabel: 'Token Lookup' },
-        command: () => { this.showTokenDialog = true; }
-      },
-      {
-        icon: 'pi pi-bolt',
-        tooltipOptions: { tooltipLabel: 'TX Lookup' },
-        command: () => { this.showTxDialog = true; }
-      },
-      {
-        icon: 'pi pi-info-circle',
-        tooltipOptions: { tooltipLabel: 'Token Info' },
-        command: () => { this.showTokenInfoDialog = true; }
+        icon: 'pi pi-user',
+        tooltipOptions: { tooltipLabel: 'Node Details' },
+        command: () => { this.showNodeDetailsDialog = true; }
       },
       {
         icon: 'pi pi-arrows-h',
@@ -164,9 +154,19 @@ export class ClusterMap implements OnInit, OnDestroy, AfterViewInit {
         command: () => { this.showTxNavDialog = true; }
       },
       {
-        icon: 'pi pi-user',
-        tooltipOptions: { tooltipLabel: 'Node Details' },
-        command: () => { this.showNodeDetailsDialog = true; }
+        icon: 'pi pi-info-circle',
+        tooltipOptions: { tooltipLabel: 'Token Info' },
+        command: () => { this.showTokenInfoDialog = true; }
+      },
+      {
+        icon: 'pi pi-bolt',
+        tooltipOptions: { tooltipLabel: 'TX Lookup' },
+        command: () => { this.showTxDialog = true; }
+      },
+      {
+        icon: 'pi pi-search',
+        tooltipOptions: { tooltipLabel: 'Token Lookup' },
+        command: () => { this.showTokenDialog = true; }
       }
     ];
   }
