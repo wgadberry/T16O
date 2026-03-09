@@ -99,10 +99,6 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-// Skip HTTPS redirection when behind a load balancer (API Gateway → NLB → HTTP)
-if (app.Environment.IsDevelopment())
-    app.UseHttpsRedirection();
-
 app.UseCors("AllowDemoApp");
 
 // Client credentials auth middleware
