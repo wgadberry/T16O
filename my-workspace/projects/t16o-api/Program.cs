@@ -8,10 +8,10 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowDemoApp", policy =>
     {
-        policy.SetIsOriginAllowed(origin =>
-                new Uri(origin).Host == "localhost")
-              .AllowAnyHeader()
-              .AllowAnyMethod();
+        policy
+            .AllowAnyOrigin()   // Allow all domains
+            .AllowAnyMethod()   // Allow all HTTP methods (GET, POST, etc.)
+            .AllowAnyHeader();  // Allow all headers
     });
 });
 
@@ -99,7 +99,10 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-app.UseHttpsRedirection();
+// Skip HTTPS redirection when behind a load balancer (API Gateway → NLB → HTTP)
+if (app.Environment.IsDevelopment())
+    app.UseHttpsRedirection();
+
 app.UseCors("AllowDemoApp");
 
 // Client credentials auth middleware
