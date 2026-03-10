@@ -258,8 +258,8 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_from_token_same;
     CREATE TEMPORARY TABLE tmp_from_token_same (
         guide_id BIGINT PRIMARY KEY,
-        pre_balance BIGINT,
-        post_balance BIGINT
+        pre_balance DECIMAL(38,0),
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     INSERT INTO tmp_from_token_same
@@ -285,8 +285,8 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_to_token_same;
     CREATE TEMPORARY TABLE tmp_to_token_same (
         guide_id BIGINT PRIMARY KEY,
-        pre_balance BIGINT,
-        post_balance BIGINT
+        pre_balance DECIMAL(38,0),
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     INSERT INTO tmp_to_token_same
@@ -348,7 +348,7 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_from_token_prior;
     CREATE TEMPORARY TABLE tmp_from_token_prior (
         guide_id BIGINT PRIMARY KEY,
-        post_balance BIGINT
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     -- Pass 1: match by token_account (uses idx_tbc_acct_token_blocktime)
@@ -358,7 +358,7 @@ BEGIN
         token_account_id INT UNSIGNED,
         token_id BIGINT,
         block_time BIGINT UNSIGNED,
-        post_balance BIGINT,
+        post_balance DECIMAL(38,0),
         PRIMARY KEY (token_account_id, token_id, block_time)
     ) ENGINE=MEMORY;
 
@@ -395,7 +395,7 @@ BEGIN
         owner_id INT UNSIGNED,
         token_id BIGINT,
         block_time BIGINT UNSIGNED,
-        post_balance BIGINT,
+        post_balance DECIMAL(38,0),
         PRIMARY KEY (owner_id, token_id, block_time)
     ) ENGINE=MEMORY;
 
@@ -436,7 +436,7 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_to_token_prior;
     CREATE TEMPORARY TABLE tmp_to_token_prior (
         guide_id BIGINT PRIMARY KEY,
-        post_balance BIGINT
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     -- Pass 1: match by token_account (uses idx_tbc_acct_token_blocktime)
@@ -445,7 +445,7 @@ BEGIN
         token_account_id INT UNSIGNED,
         token_id BIGINT,
         block_time BIGINT UNSIGNED,
-        post_balance BIGINT,
+        post_balance DECIMAL(38,0),
         PRIMARY KEY (token_account_id, token_id, block_time)
     ) ENGINE=MEMORY;
 
@@ -481,7 +481,7 @@ BEGIN
         owner_id INT UNSIGNED,
         token_id BIGINT,
         block_time BIGINT UNSIGNED,
-        post_balance BIGINT,
+        post_balance DECIMAL(38,0),
         PRIMARY KEY (owner_id, token_id, block_time)
     ) ENGINE=MEMORY;
 
@@ -526,8 +526,8 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_from_sol_same;
     CREATE TEMPORARY TABLE tmp_from_sol_same (
         guide_id BIGINT PRIMARY KEY,
-        pre_balance BIGINT,
-        post_balance BIGINT
+        pre_balance DECIMAL(38,0),
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     INSERT INTO tmp_from_sol_same
@@ -544,8 +544,8 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_to_sol_same;
     CREATE TEMPORARY TABLE tmp_to_sol_same (
         guide_id BIGINT PRIMARY KEY,
-        pre_balance BIGINT,
-        post_balance BIGINT
+        pre_balance DECIMAL(38,0),
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     INSERT INTO tmp_to_sol_same
@@ -589,14 +589,14 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_from_sol_prior;
     CREATE TEMPORARY TABLE tmp_from_sol_prior (
         guide_id BIGINT PRIMARY KEY,
-        post_balance BIGINT
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     DROP TEMPORARY TABLE IF EXISTS tmp_dedup_from_sol;
     CREATE TEMPORARY TABLE tmp_dedup_from_sol (
         address_id INT UNSIGNED,
         block_time BIGINT UNSIGNED,
-        post_balance BIGINT,
+        post_balance DECIMAL(38,0),
         PRIMARY KEY (address_id, block_time)
     ) ENGINE=MEMORY;
 
@@ -633,14 +633,14 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS tmp_to_sol_prior;
     CREATE TEMPORARY TABLE tmp_to_sol_prior (
         guide_id BIGINT PRIMARY KEY,
-        post_balance BIGINT
+        post_balance DECIMAL(38,0)
     ) ENGINE=MEMORY;
 
     DROP TEMPORARY TABLE IF EXISTS tmp_dedup_to_sol;
     CREATE TEMPORARY TABLE tmp_dedup_to_sol (
         address_id INT UNSIGNED,
         block_time BIGINT UNSIGNED,
-        post_balance BIGINT,
+        post_balance DECIMAL(38,0),
         PRIMARY KEY (address_id, block_time)
     ) ENGINE=MEMORY;
 
@@ -718,27 +718,24 @@ BEGIN
     -- ============================================================
     UPDATE tx_guide g
     SET
-        g.tax_amount = CAST(g.amount AS SIGNED)
-                     - (CAST(g.to_token_post_balance AS SIGNED)
-                      - CAST(g.to_token_pre_balance AS SIGNED)),
+        g.tax_amount = CAST(g.amount AS DECIMAL(38,0))
+                     - (g.to_token_post_balance - g.to_token_pre_balance),
         g.tax_bps = ROUND(
-            (CAST(g.amount AS SIGNED)
-             - (CAST(g.to_token_post_balance AS SIGNED)
-              - CAST(g.to_token_pre_balance AS SIGNED)))
-            / CAST(g.amount AS DECIMAL(30,10)) * 10000
+            (CAST(g.amount AS DECIMAL(38,0))
+             - (g.to_token_post_balance - g.to_token_pre_balance))
+            / CAST(g.amount AS DECIMAL(38,10)) * 10000
         )
     WHERE g.tx_id >= v_start AND g.tx_id < v_end
       AND g.token_id IS NOT NULL AND g.amount > 0
       AND g.to_token_pre_balance IS NOT NULL
       AND g.to_token_post_balance IS NOT NULL
-      AND CAST(g.to_token_post_balance AS SIGNED) > CAST(g.to_token_pre_balance AS SIGNED)
-      AND CAST(g.amount AS SIGNED) >
-          (CAST(g.to_token_post_balance AS SIGNED) - CAST(g.to_token_pre_balance AS SIGNED)) * 1.005
+      AND g.to_token_post_balance > g.to_token_pre_balance
+      AND CAST(g.amount AS DECIMAL(38,0)) >
+          (g.to_token_post_balance - g.to_token_pre_balance) * 1.005
       AND ROUND(
-          (CAST(g.amount AS SIGNED)
-           - (CAST(g.to_token_post_balance AS SIGNED)
-            - CAST(g.to_token_pre_balance AS SIGNED)))
-          / CAST(g.amount AS DECIMAL(30,10)) * 10000
+          (CAST(g.amount AS DECIMAL(38,0))
+           - (g.to_token_post_balance - g.to_token_pre_balance))
+          / CAST(g.amount AS DECIMAL(38,10)) * 10000
       ) BETWEEN 100 AND 4999;
 
     -- ============================================================
