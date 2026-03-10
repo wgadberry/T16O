@@ -726,7 +726,8 @@ class WorkerThread(threading.Thread):
 
         except MySQLError:
             nack_with_retry(ch, method.delivery_tag, properties,
-                            log_fn=lambda msg: log(self.tag, f"[DB ERROR] {msg}"))
+                            log_fn=lambda msg: log(self.tag, f"[DB ERROR] {msg}"),
+                            queue_name=REQUEST_QUEUE, body=body)
             raise
         except Exception as e:
             log(self.tag, f"ERROR processing message -> DLQ: {e}")

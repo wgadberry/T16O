@@ -1630,7 +1630,8 @@ def run_queue_consumer(prefetch: int = 1):
                 except MySQLError as e:
                     print(f"[DB ERROR] {e}")
                     nack_with_retry(ch, method.delivery_tag, properties,
-                                    log_fn=lambda msg: print(f"[DB ERROR] {msg}"))
+                                    log_fn=lambda msg: print(f"[DB ERROR] {msg}"),
+                                    queue_name=REQUEST_QUEUE, body=body)
                 except Exception as e:
                     print(f"[ERROR] Failed to process message -> DLQ: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ

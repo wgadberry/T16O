@@ -129,40 +129,60 @@ def get_retry_config() -> Dict[str, Any]:
 DEFAULT_MAX_REDELIVERY = 3
 
 
-def should_requeue(properties, max_retries: int = DEFAULT_MAX_REDELIVERY) -> bool:
-    """Check x-delivery-count header to decide requeue vs DLQ.
-
-    RabbitMQ 3.8+ tracks redelivery count in message headers.
-    Returns True if the message should be requeued, False if it should go to DLQ.
-    """
+def _get_retry_count(properties) -> int:
+    """Get current retry count from custom header."""
     headers = getattr(properties, 'headers', None) or {}
-    delivery_count = headers.get('x-delivery-count', 0)
-    return delivery_count < max_retries
+    return headers.get('x-retry-count', 0)
 
 
 def nack_with_retry(ch, delivery_tag, properties, log_fn=None,
-                    max_retries: int = DEFAULT_MAX_REDELIVERY):
-    """Nack a message, requeuing if under max retries, otherwise sending to DLQ.
+                    max_retries: int = DEFAULT_MAX_REDELIVERY,
+                    queue_name: str = None, body: bytes = None):
+    """Handle a failed message with retry tracking.
+
+    Classic queues don't support x-delivery-count, so we track retries
+    via a custom x-retry-count header. On retry: ack + republish with
+    incremented header. On max exceeded: nack with requeue=False (-> DLQ).
 
     Args:
         ch: pika channel
         delivery_tag: message delivery tag
-        properties: pika message properties (contains headers)
+        properties: pika message properties
         log_fn: optional callable(msg) for logging
-        max_retries: max redelivery attempts before DLQ
+        max_retries: max retry attempts before DLQ
+        queue_name: queue to republish to (required for retry to work)
+        body: original message body (required for retry to work)
     """
-    headers = getattr(properties, 'headers', None) or {}
-    delivery_count = headers.get('x-delivery-count', 0)
-    requeue = delivery_count < max_retries
+    import pika
+    retry_count = _get_retry_count(properties)
 
-    if log_fn:
-        if requeue:
-            log_fn(f"Requeuing (attempt {delivery_count + 1}/{max_retries})")
-        else:
+    if retry_count < max_retries and queue_name and body is not None:
+        # Ack original, republish with incremented retry count
+        retry_count += 1
+        if log_fn:
+            log_fn(f"Requeuing (attempt {retry_count}/{max_retries})")
+
+        headers = dict(getattr(properties, 'headers', None) or {})
+        headers['x-retry-count'] = retry_count
+
+        ch.basic_ack(delivery_tag=delivery_tag)
+        ch.basic_publish(
+            exchange='',
+            routing_key=queue_name,
+            body=body,
+            properties=pika.BasicProperties(
+                delivery_mode=properties.delivery_mode,
+                content_type=properties.content_type,
+                priority=properties.priority,
+                headers=headers,
+            ))
+    else:
+        # Max retries exceeded or missing queue/body — send to DLQ
+        if log_fn:
             log_fn(f"Max retries ({max_retries}) exceeded -> DLQ")
+        ch.basic_nack(delivery_tag=delivery_tag, requeue=False)
 
-    ch.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
-    return requeue
+    return retry_count < max_retries
 
 
 def get_service_config(service_name: str) -> Dict[str, Any]:
