@@ -766,10 +766,13 @@ def enrich_pools(tag, session, cursor, conn, limit, max_attempts, api_delay, api
                 SELECT 1 FROM tx_address a
                 LEFT JOIN tx_pool p ON p.pool_address_id = a.id
                 WHERE a.address_type IN ('pool','lp_token') AND p.id IS NULL
+                  AND a.label LIKE '%%(%%-%%)'
                 LIMIT 1
             ) OR EXISTS(
-                SELECT 1 FROM tx_pool
-                WHERE token1_id IS NULL OR pool_label IS NULL
+                SELECT 1 FROM tx_pool p
+                JOIN tx_address a ON a.id = p.pool_address_id
+                WHERE (p.token1_id IS NULL OR p.token2_id IS NULL OR p.pool_label IS NULL)
+                  AND a.label LIKE '%%(%%-%%)'
                 LIMIT 1
             ) AS needs_work
         """)
