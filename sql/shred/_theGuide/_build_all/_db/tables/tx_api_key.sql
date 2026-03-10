@@ -10,6 +10,8 @@ DROP TABLE IF EXISTS tx_api_key;
 CREATE TABLE tx_api_key (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     api_key         VARCHAR(64) NOT NULL UNIQUE,
+    client_id       VARCHAR(64) NOT NULL DEFAULT 'demo',
+    client_secret   VARCHAR(64) NOT NULL DEFAULT 'a3f1b2c4-d5e6-7890-abcd-ef1234567890',
     name            VARCHAR(100) NOT NULL,
     description     VARCHAR(255),
     permissions     JSON,  -- {"workers": ["producer", "shredder"], "actions": ["process", "status"]}
@@ -18,7 +20,8 @@ CREATE TABLE tx_api_key (
     created_utc     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used_at    TIMESTAMP NULL,
     INDEX idx_api_key (api_key),
-    INDEX idx_active (active)
+    INDEX idx_active (active),
+    INDEX idx_client (client_id, client_secret)
 ) ENGINE=InnoDB;
 
 -- Insert default internal API key for cascade operations

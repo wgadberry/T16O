@@ -33,12 +33,12 @@ DELIMITER //
 DROP PROCEDURE IF EXISTS sp_tx_bmap_get//
 
 CREATE PROCEDURE sp_tx_bmap_get(
-    IN p_token_name VARCHAR(128),
+   IN p_token_name VARCHAR(128),
     IN p_token_symbol VARCHAR(128),
     IN p_mint_address VARCHAR(44),
     IN p_signature VARCHAR(88),
     IN p_block_time BIGINT UNSIGNED,
-    IN p_tx_limit TINYINT UNSIGNED  -- 10, 20, 50, 100 (divided by 2 for prev/next)
+    IN p_tx_limit TINYINT UNSIGNED  
 )
 BEGIN
     DECLARE v_token_id BIGINT;
@@ -60,19 +60,19 @@ BEGIN
     DECLARE v_next_json JSON;
     DECLARE v_current_edge_types JSON;
     DECLARE v_related_tokens_json JSON;
-    DECLARE v_signature_only_mode TINYINT DEFAULT 0;  -- 1 = show all tokens in tx
+    DECLARE v_signature_only_mode TINYINT DEFAULT 0;  
 
-    -- Default tx_limit to 10, validate, and calculate half
-    -- Valid values: 1 (single tx), 10, 20, 50, 100
+    
+    
     SET p_tx_limit = COALESCE(p_tx_limit, 10);
     IF p_tx_limit NOT IN (1, 10, 20, 50, 100) THEN
         SET p_tx_limit = 10;
     END IF;
     SET v_half_limit = p_tx_limit DIV 2;
 
-    -- ==========================================================================
-    -- STEP 1: Resolve token
-    -- ==========================================================================
+    
+    
+    
     IF p_mint_address IS NOT NULL THEN
         SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
@@ -81,7 +81,7 @@ BEGIN
         WHERE mint.address = p_mint_address
         LIMIT 1;
     ELSEIF p_token_symbol IS NOT NULL THEN
-        -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
+        
         SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
@@ -91,7 +91,7 @@ BEGIN
         ORDER BY COALESCE(g.cnt, 0) DESC, (mint.address_type = 'mint') DESC, tk.id
         LIMIT 1;
     ELSEIF p_token_name IS NOT NULL THEN
-        -- Prefer tokens with: 1) address_type='mint', 2) actual tx_guide activity
+        
         SELECT tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
         INTO v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx_token tk
@@ -101,11 +101,11 @@ BEGIN
         ORDER BY COALESCE(g.cnt, 0) DESC, (mint.address_type = 'mint') DESC, tk.id
         LIMIT 1;
     ELSEIF p_signature IS NOT NULL THEN
-        -- Signature-only mode: show ALL tokens in the transaction
+        
         SET v_signature_only_mode = 1;
 
-        -- Derive primary token from signature's tx_guide activity (for display only)
-        -- Prefer "interesting" tokens over base currencies (SOL, WSOL, stablecoins)
+        
+        
         SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
         INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
         FROM tx t
@@ -115,13 +115,13 @@ BEGIN
         WHERE t.signature = p_signature
           AND g.token_id IS NOT NULL
           AND UPPER(COALESCE(tk.token_symbol, '')) NOT IN (
-              'SOL', 'WSOL',                          -- Native/Wrapped SOL
-              'USDC', 'USDT', 'PYUSD', 'USDH', 'UXD', -- Stablecoins
-              'MSOL', 'JITOSOL', 'BSOL', 'LSTSOL'    -- Liquid staking tokens
+              'SOL', 'WSOL',                          
+              'USDC', 'USDT', 'PYUSD', 'USDH', 'UXD', 
+              'MSOL', 'JITOSOL', 'BSOL', 'LSTSOL'    
           )
         LIMIT 1;
 
-        -- Fallback: if no interesting token found, take any token
+        
         IF v_token_id IS NULL THEN
             SELECT t.id, t.signature, t.block_time, tk.id, mint.address, tk.token_symbol, tk.token_type, tk.decimals
             INTO v_tx_id, v_signature, v_block_time, v_token_id, v_mint_address, v_token_symbol, v_token_type, v_decimals
@@ -138,14 +138,14 @@ BEGIN
     IF v_token_id IS NULL THEN
         SELECT JSON_OBJECT('result', JSON_OBJECT('error', 'Token not found')) AS result;
     ELSE
-        -- ==========================================================================
-        -- STEP 2: Resolve current signature and block_time
-        -- ==========================================================================
+        
+        
+        
         IF v_tx_id IS NOT NULL THEN
-            -- Already resolved from signature-only call in STEP 1
-            SET v_tx_id = v_tx_id;  -- no-op, already set
+            
+            SET v_tx_id = v_tx_id;  
         ELSEIF p_signature IS NOT NULL THEN
-            -- Verify signature exists AND relates to this token (p_block_time ignored)
+            
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
@@ -155,7 +155,7 @@ BEGIN
             LIMIT 1;
 
             IF v_tx_id IS NULL THEN
-                -- Check if signature exists at all (just not for this token)
+                
                 IF EXISTS (SELECT 1 FROM tx WHERE signature = p_signature) THEN
                     SELECT JSON_OBJECT('result', JSON_OBJECT(
                         'error', 'Signature not found for this token',
@@ -168,12 +168,12 @@ BEGIN
                         'signature', p_signature
                     )) AS result;
                 END IF;
-                -- Exit early
+                
                 SET v_token_id = NULL;
             END IF;
         ELSEIF p_block_time IS NOT NULL THEN
-            -- Find nearest tx to provided block_time for this token
-            -- Uses idx_token_blocktime (token_id, block_time) for efficient seek
+            
+            
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
@@ -187,11 +187,11 @@ BEGIN
                     'error', 'No transactions found for this token',
                     'mint', v_mint_address
                 )) AS result;
-                -- Exit early
+                
                 SET v_token_id = NULL;
             END IF;
         ELSE
-            -- Most recent tx for this token (uses idx_token_blocktime)
+            
             SELECT t.id, t.signature, t.block_time
             INTO v_tx_id, v_signature, v_block_time
             FROM tx_guide g
@@ -205,42 +205,42 @@ BEGIN
                     'error', 'No transactions found for this token',
                     'mint', v_mint_address
                 )) AS result;
-                -- Exit early
+                
                 SET v_token_id = NULL;
             END IF;
         END IF;
     END IF;
 
     IF v_token_id IS NOT NULL AND v_tx_id IS NOT NULL THEN
-        -- Always show all tokens in the transaction (not just the searched token)
-        -- The token_id is used for navigation (finding prev/next), but display is unfiltered
+        
+        
         SET v_signature_only_mode = 1;
 
-        -- Resolve signer from tx.signer_address_id
+        
         SELECT a.address INTO v_signer_address
         FROM tx t
         JOIN tx_address a ON a.id = t.signer_address_id
         WHERE t.id = v_tx_id;
 
-        -- ==========================================================================
-        -- STEP 3: Build sliding window of tx_ids (prev N + current + next N)
-        -- Always fetch 5 prev + 5 next for NAVIGATION, but filter nodes/edges by v_half_limit
-        -- ==========================================================================
+        
+        
+        
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_window;
         CREATE TEMPORARY TABLE tmp_window (
             tx_id BIGINT PRIMARY KEY,
             signature VARCHAR(88),
             block_time BIGINT UNSIGNED,
-            window_pos TINYINT  -- negative = prev, 0 = current, positive = next
+            window_pos TINYINT  
         );
 
-        -- Current tx
+        
         INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
         VALUES (v_tx_id, v_signature, v_block_time, 0);
 
-        -- Previous 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
-        -- Inner query uses idx_token_cover (token_id, block_time, tx_id) as covering index
-        -- Outer join fetches signature from tx only for the 5 results
+        
+        
+        
         SET @sql_prev = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
             SELECT sub.tx_id, t.signature, sub.block_time,
@@ -261,8 +261,8 @@ BEGIN
         EXECUTE stmt_prev;
         DEALLOCATE PREPARE stmt_prev;
 
-        -- Next 5 (always fetch 5 for navigation, use v_half_limit for display filtering)
-        -- Inner query uses idx_token_cover (token_id, block_time, tx_id) as covering index
+        
+        
         SET @sql_next = CONCAT('
             INSERT INTO tmp_window (tx_id, signature, block_time, window_pos)
             SELECT sub.tx_id, t.signature, sub.block_time,
@@ -281,25 +281,15 @@ BEGIN
         ');
         PREPARE stmt_next FROM @sql_next;
         EXECUTE stmt_next;
-        DEALLOCATE PREPARE stmt_next;
-
-        -- ==========================================================================
-        -- STEP 3b: Create display window (filtered by v_half_limit for nodes/edges)
-        -- Navigation uses full tmp_window (5 prev + 5 next)
-        -- Display uses tmp_display_window (v_half_limit prev + v_half_limit next)
-        -- ==========================================================================
+        DEALLOCATE PREPARE stmt_next;        
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window;
         CREATE TEMPORARY TABLE tmp_display_window AS
         SELECT * FROM tmp_window
         WHERE window_pos = 0
            OR (window_pos < 0 AND window_pos >= -v_half_limit)
            OR (window_pos > 0 AND window_pos <= v_half_limit);
-
-        -- ==========================================================================
-        -- STEP 4: Build prev/next navigation JSON from window
-        -- ==========================================================================
-
-        -- Previous 5 with edge_types
+           
         SELECT JSON_ARRAYAGG(nav_data) INTO v_prev_json
         FROM (
             SELECT JSON_OBJECT(
@@ -322,7 +312,7 @@ BEGIN
             ORDER BY w.block_time DESC, w.tx_id DESC
         ) nav_outer;
 
-        -- Next 5 with edge_types
+        
         SELECT JSON_ARRAYAGG(nav_data) INTO v_next_json
         FROM (
             SELECT JSON_OBJECT(
@@ -345,7 +335,7 @@ BEGIN
             ORDER BY w.block_time ASC, w.tx_id ASC
         ) nav_outer;
 
-        -- Current frame edge_types
+        
         SELECT JSON_ARRAYAGG(dt.type_code) INTO v_current_edge_types
         FROM (
             SELECT DISTINCT gt.type_code
@@ -355,10 +345,10 @@ BEGIN
               AND g.tx_id = v_tx_id
         ) dt;
 
-        -- ==========================================================================
-        -- STEP 5: Build nodes (all addresses in sliding window, with their balance)
-        -- Balances sourced from tx_guide post-balance columns via temp tables
-        -- ==========================================================================
+        
+        
+        
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes;
         CREATE TEMPORARY TABLE tmp_nodes (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -370,14 +360,13 @@ BEGIN
             balance DECIMAL(30,9) DEFAULT 0,
             sol_balance DECIMAL(20,9) DEFAULT NULL,
             funded_by VARCHAR(44) DEFAULT NULL,
-            last_tx_time BIGINT UNSIGNED DEFAULT NULL,
-            -- Interaction summaries (aggregated from edges)
+            
             interactions_pools JSON DEFAULT NULL,
             interactions_programs JSON DEFAULT NULL,
             interactions_dexes JSON DEFAULT NULL
         );
 
-        -- First: Insert all addresses that appear in the DISPLAY window (from OR to)
+        
         INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
         SELECT DISTINCT
             a.id,
@@ -406,7 +395,7 @@ BEGIN
         LEFT JOIN tx_address f ON f.id = a.funded_by_address_id
         WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id);
 
-        -- Add pool addresses as nodes (from tx_guide.pool_address_id for swaps in display window)
+        
         INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
         SELECT DISTINCT
             pa.id,
@@ -418,12 +407,8 @@ BEGIN
         FROM tx_guide g
         JOIN tmp_display_window w ON w.tx_id = g.tx_id
         JOIN tx_address pa ON pa.id = g.pool_address_id
-        WHERE g.pool_address_id IS NOT NULL;
-
-        -- Remove vault nodes that have no visible edges in the bmap output.
-        -- Swap edges are routed through pool_address_id, so a vault's swap edges
-        -- render as pool→wallet — the vault never appears as source/target.
-        -- Keep vaults that have non-swap edges to/from non-vaults (e.g. fee transfers).
+        WHERE g.pool_address_id IS NOT NULL;     
+        
         DELETE n FROM tmp_nodes n
         WHERE n.address_type = 'vault'
           AND NOT EXISTS (
@@ -438,23 +423,18 @@ BEGIN
                 AND (g.from_address_id = n.address_id OR g.to_address_id = n.address_id)
           );
 
-        -- Enrich pool nodes with pool_label from tx_pool (indexed on pool_address_id)
+        
         UPDATE tmp_nodes n
         JOIN tx_pool p ON p.pool_address_id = n.address_id
         SET n.pool_label = p.pool_label
         WHERE n.pool_label IS NULL AND n.address_type = 'pool' AND p.pool_label IS NOT NULL;
 
-        -- Enrich mint nodes with token_name
+        
         UPDATE tmp_nodes n
         JOIN tx_token tk ON tk.mint_address_id = n.address_id
         SET n.token_name = tk.token_name
-        WHERE tk.token_name IS NOT NULL;
-
-        -- ==========================================================================
-        -- STEP 5a: Token balances from tx_guide post-balance columns
-        -- Two queries (from-side + to-side) with ON DUPLICATE KEY to get latest balance
-        -- Uses idx_from_token_time / idx_to_token_time for efficient (address, token, time) seeks
-        -- ==========================================================================
+        WHERE tk.token_name IS NOT NULL;    
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
         CREATE TEMPORARY TABLE tmp_token_bal (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -463,7 +443,7 @@ BEGIN
             guide_id BIGINT UNSIGNED
         ) ENGINE=MEMORY;
 
-        -- Get token balances from FROM side (uses idx_from_token_time)
+        
         INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
         SELECT g.from_address_id,
                ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
@@ -478,7 +458,7 @@ BEGIN
             block_time = GREATEST(VALUES(block_time), tmp_token_bal.block_time),
             guide_id = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(guide_id), tmp_token_bal.guide_id);
 
-        -- Get token balances from TO side (uses idx_to_token_time)
+        
         INSERT INTO tmp_token_bal (address_id, balance, block_time, guide_id)
         SELECT g.to_address_id,
                ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
@@ -493,107 +473,13 @@ BEGIN
             block_time = GREATEST(VALUES(block_time), tmp_token_bal.block_time),
             guide_id = IF(VALUES(block_time) >= tmp_token_bal.block_time, VALUES(guide_id), tmp_token_bal.guide_id);
 
-        -- Apply token balances to nodes
+        
         UPDATE tmp_nodes n
         JOIN tmp_token_bal tb ON tb.address_id = n.address_id
         SET n.balance = COALESCE(tb.balance, 0);
 
         DROP TEMPORARY TABLE IF EXISTS tmp_token_bal;
-
-        -- ==========================================================================
-        -- STEP 5a-bis: Inject top 20 token holders as nodes (even if not in tx window)
-        -- Scans ALL tx_guide rows for this token to find wallets with highest balances
-        -- Uses same ON DUPLICATE KEY pattern as STEP 5a but without node filter
-        -- ==========================================================================
-        DROP TEMPORARY TABLE IF EXISTS tmp_holder_bal;
-        CREATE TEMPORARY TABLE tmp_holder_bal (
-            address_id INT UNSIGNED PRIMARY KEY,
-            balance DECIMAL(30,9),
-            block_time BIGINT UNSIGNED,
-            guide_id BIGINT UNSIGNED
-        ) ENGINE=MEMORY;
-
-        -- Scan FROM side for all addresses holding this token (up to v_block_time)
-        INSERT INTO tmp_holder_bal (address_id, balance, block_time, guide_id)
-        SELECT g.from_address_id,
-               ROUND(g.from_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
-               g.block_time, g.id
-        FROM tx_guide g
-        WHERE g.token_id = v_token_id
-          AND g.block_time <= v_block_time
-          AND g.from_token_post_balance IS NOT NULL
-        ON DUPLICATE KEY UPDATE
-            balance = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
-                        VALUES(balance), tmp_holder_bal.balance),
-            block_time = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
-                        VALUES(block_time), tmp_holder_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
-                        VALUES(guide_id), tmp_holder_bal.guide_id);
-
-        -- Scan TO side for all addresses holding this token (up to v_block_time)
-        INSERT INTO tmp_holder_bal (address_id, balance, block_time, guide_id)
-        SELECT g.to_address_id,
-               ROUND(g.to_token_post_balance / POW(10, COALESCE(g.decimals, v_decimals, 9)), 9),
-               g.block_time, g.id
-        FROM tx_guide g
-        WHERE g.token_id = v_token_id
-          AND g.block_time <= v_block_time
-          AND g.to_token_post_balance IS NOT NULL
-        ON DUPLICATE KEY UPDATE
-            balance = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
-                        VALUES(balance), tmp_holder_bal.balance),
-            block_time = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
-                        VALUES(block_time), tmp_holder_bal.block_time),
-            guide_id = IF(VALUES(block_time) > tmp_holder_bal.block_time OR (VALUES(block_time) = tmp_holder_bal.block_time AND VALUES(guide_id) > tmp_holder_bal.guide_id),
-                        VALUES(guide_id), tmp_holder_bal.guide_id);
-
-        -- Copy existing node address_ids to avoid MySQL "Can't reopen table" error
-        DROP TEMPORARY TABLE IF EXISTS tmp_existing_nodes;
-        CREATE TEMPORARY TABLE tmp_existing_nodes AS
-        SELECT address_id FROM tmp_nodes;
-
-        -- Select top 20 holders into a temp table (materializes ORDER BY + LIMIT)
-        -- Only include wallets (not mints, programs, pools, vaults, etc.)
-        DROP TEMPORARY TABLE IF EXISTS tmp_top_holders;
-        CREATE TEMPORARY TABLE tmp_top_holders AS
-        SELECT h.address_id, h.balance
-        FROM tmp_holder_bal h
-        JOIN tx_address a ON a.id = h.address_id
-        WHERE h.address_id NOT IN (SELECT address_id FROM tmp_existing_nodes)
-          AND h.balance > 0
-          AND (a.address_type IN ('wallet', 'unknown') OR a.address_type IS NULL)
-        ORDER BY h.balance DESC
-        LIMIT 20;
-
-        -- Insert top holders as new nodes
-        INSERT IGNORE INTO tmp_nodes (address_id, address, label, address_type, balance, funded_by)
-        SELECT th.address_id, a.address, COALESCE(a.label, a.address_type), a.address_type,
-               th.balance,
-               f.address
-        FROM tmp_top_holders th
-        JOIN tx_address a ON a.id = th.address_id
-        LEFT JOIN tx_address f ON f.id = a.funded_by_address_id;
-
-        -- Also update balances for existing nodes that had 0 balance (from STEP 5a)
-        -- but now we have a better picture from the full scan
-        -- Set last_tx_time for all nodes that have holder data
-        UPDATE tmp_nodes n
-        JOIN tmp_holder_bal h ON h.address_id = n.address_id
-        SET n.balance = IF(n.balance = 0 AND h.balance > 0, h.balance, n.balance),
-            n.last_tx_time = h.block_time;
-
-        DROP TEMPORARY TABLE IF EXISTS tmp_holder_bal;
-        DROP TEMPORARY TABLE IF EXISTS tmp_existing_nodes;
-        DROP TEMPORARY TABLE IF EXISTS tmp_top_holders;
-
-        -- ==========================================================================
-        -- STEP 5b: SOL balances from tx_guide post-balance columns (two-step approach)
-        -- Step A: GROUP BY + MAX(block_time) per address to find latest SOL balance time
-        -- Step B: Fetch actual balance from that specific (address, block_time) row
-        -- This avoids inserting thousands of rows per address via ON DUPLICATE KEY
-        -- ==========================================================================
-
-        -- Step A: Find max block_time with SOL balance per node (FROM side)
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
         CREATE TEMPORARY TABLE tmp_sol_max (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -608,7 +494,7 @@ BEGIN
           AND g.from_sol_post_balance IS NOT NULL
         GROUP BY g.from_address_id;
 
-        -- Step B: Fetch FROM-side balance at that block_time
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
         CREATE TEMPORARY TABLE tmp_sol_bal (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -628,7 +514,7 @@ BEGIN
 
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
 
-        -- Step A: Find max block_time with SOL balance per node (TO side)
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
         CREATE TEMPORARY TABLE tmp_sol_max (
             address_id INT UNSIGNED PRIMARY KEY,
@@ -643,7 +529,7 @@ BEGIN
           AND g.to_sol_post_balance IS NOT NULL
         GROUP BY g.to_address_id;
 
-        -- Step B: Fetch TO-side balance, keep whichever side is more recent
+        
         INSERT INTO tmp_sol_bal (address_id, sol_balance, block_time, guide_id)
         SELECT m.address_id,
                ROUND(g.to_sol_post_balance / 1e9, 9),
@@ -659,23 +545,17 @@ BEGIN
 
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_max;
 
-        -- Apply SOL balances to nodes
+        
         UPDATE tmp_nodes n
         JOIN tmp_sol_bal sb ON sb.address_id = n.address_id
         SET n.sol_balance = COALESCE(sb.sol_balance, 0);
 
         DROP TEMPORARY TABLE IF EXISTS tmp_sol_bal;
-
-        -- ==========================================================================
-        -- STEP 5c: Populate interaction summaries (pools, programs, dexes per node)
-        -- Shows which pools/programs/dexes each wallet interacted with in this window
-        -- ==========================================================================
-
-        -- Create temp copy to avoid "Can't reopen table" error
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
         CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
 
-        -- Aggregate pools interacted with (from swap edges in tx_guide)
+        
         UPDATE tmp_nodes n
         SET interactions_pools = (
             SELECT JSON_ARRAYAGG(pool_info)
@@ -697,7 +577,7 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
         CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
 
-        -- Aggregate programs interacted with
+        
         UPDATE tmp_nodes n
         SET interactions_programs = (
             SELECT JSON_ARRAYAGG(prog_address)
@@ -718,7 +598,7 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
         CREATE TEMPORARY TABLE tmp_display_window_int AS SELECT * FROM tmp_display_window;
 
-        -- Aggregate DEXes interacted with (from tx_guide.dex)
+        
         UPDATE tmp_nodes n
         SET interactions_dexes = (
             SELECT JSON_ARRAYAGG(dex_name)
@@ -734,7 +614,7 @@ BEGIN
 
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window_int;
 
-        -- Build nodes JSON
+        
         SELECT JSON_ARRAYAGG(
             JSON_OBJECT(
                 'address', n.address,
@@ -744,8 +624,6 @@ BEGIN
                 'token_name', n.token_name,
                 'balance', ROUND(n.balance, 6),
                 'sol_balance', ROUND(COALESCE(n.sol_balance, 0), 9),
-                'last_tx_time', n.last_tx_time,
-                'last_tx_time_utc', FROM_UNIXTIME(n.last_tx_time),
                 'funded_by', n.funded_by,
                 'interactions', JSON_OBJECT(
                     'pools', COALESCE(n.interactions_pools, JSON_ARRAY()),
@@ -755,23 +633,16 @@ BEGIN
             )
         ) INTO v_nodes_json
         FROM tmp_nodes n;
-
-        -- ==========================================================================
-        -- STEP 6: Build edges (enriched with swap/transfer details)
-        -- Uses tmp_display_window (filtered by tx_limit) for edges
-        -- Includes token pre/post balances for tax detection
-        -- ==========================================================================
-
-        -- Copy temp tables to avoid MySQL "Can't reopen table" limitation
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
         CREATE TEMPORARY TABLE tmp_window2 AS SELECT * FROM tmp_display_window;
 
         SELECT JSON_ARRAYAGG(edge_data) INTO v_edges_json
         FROM (
-            -- Swap edges - route through pool when available
-            -- swap_in: wallet -> pool (sending token into swap)
-            -- swap_out: pool -> wallet (receiving token from swap)
-            -- dex/pool_label/pool_address_id now stored directly on tx_guide
+            
+            
+            
+            
             SELECT JSON_OBJECT(
                 'source', CASE
                     WHEN gt.type_code = 'swap_in' THEN fa.address
@@ -813,7 +684,7 @@ BEGIN
 
             UNION ALL
 
-            -- ALL other edge types (transfers, burns, mints, stake, liquidity, etc.)
+            
             SELECT JSON_OBJECT(
                 'source', fa.address,
                 'source_label', COALESCE(fa.label, fa.address_type),
@@ -837,17 +708,12 @@ BEGIN
             LEFT JOIN tx_token tk ON tk.id = g.token_id
             WHERE (v_signature_only_mode = 1 OR g.token_id = v_token_id OR g.token_id IS NULL)
               AND gt.type_code NOT IN ('swap_in', 'swap_out')
-              -- Filter out vault self-loops (vault activity is represented through pool routing)
+              
               AND NOT (fa.address_type = 'vault' AND ta.address_type = 'vault')
         ) edges;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_window2;
-
-        -- ==========================================================================
-        -- STEP 7: Find related tokens (other tokens swapped in same transactions)
-        -- ==========================================================================
-
-        -- Get tx_ids from display window where our target token has swap activity
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_swap_txs;
         CREATE TEMPORARY TABLE tmp_swap_txs AS
         SELECT DISTINCT g.tx_id
@@ -857,7 +723,7 @@ BEGIN
         WHERE g.token_id = v_token_id
           AND gt.type_code IN ('swap_in', 'swap_out');
 
-        -- Find other tokens in those same transactions (with swap edges)
+        
         SELECT JSON_ARRAYAGG(related_data) INTO v_related_tokens_json
         FROM (
             SELECT JSON_OBJECT(
@@ -882,10 +748,7 @@ BEGIN
         ) related_outer;
 
         DROP TEMPORARY TABLE IF EXISTS tmp_swap_txs;
-
-        -- ==========================================================================
-        -- STEP 8: Return JSON
-        -- ==========================================================================
+        
         SELECT JSON_OBJECT(
             'result', JSON_OBJECT(
                 'token', JSON_OBJECT(
@@ -897,7 +760,7 @@ BEGIN
                     'signature', v_signature,
                     'signer', v_signer_address,
                     'block_time', v_block_time,
-                    'block_time_utc', FROM_UNIXTIME(v_block_time),
+                    'block_time_utc', CONVERT_TZ(FROM_UNIXTIME(v_block_time), @@session.time_zone, '+00:00'),
                     'edge_types', COALESCE(v_current_edge_types, JSON_ARRAY()),
                     'prev', COALESCE(v_prev_json, JSON_ARRAY()),
                     'next', COALESCE(v_next_json, JSON_ARRAY())
@@ -908,7 +771,7 @@ BEGIN
             )
         ) AS result;
 
-        -- Cleanup
+        
         DROP TEMPORARY TABLE IF EXISTS tmp_nodes;
         DROP TEMPORARY TABLE IF EXISTS tmp_window;
         DROP TEMPORARY TABLE IF EXISTS tmp_display_window;

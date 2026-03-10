@@ -60,6 +60,7 @@ from t16o_exchange.guide.common.config import (
 _solscan            = get_solscan_config()
 _rmq                = get_rabbitmq_config()
 _queues             = get_queue_names('enricher')
+_producer_queues    = get_queue_names('producer')
 _retry              = get_retry_config()
 
 SOLSCAN_API_BASE    = _solscan['api_base']
@@ -76,6 +77,8 @@ REQUEST_QUEUE       = _queues['request']
 RESPONSE_QUEUE      = _queues['response']
 DLQ_QUEUE           = _queues['dlq']
 DB_CONFIG           = get_db_config()
+PRODUCER_REQUEST_QUEUE = _producer_queues['request']
+DEFAULT_PRIME_SIG_CNT  = 20
 
 MULTI_META_BATCH_SIZE = 50
 
@@ -341,6 +344,36 @@ def ensure_token(cursor, conn, mint_address):
 
 
 # =============================================================================
+# Auto-Prime: trigger producer for new mints with no history
+# =============================================================================
+
+def check_mint_has_history(cursor, token_id):
+    """Return True if this token already has any tx_guide edges."""
+    cursor.execute(
+        "SELECT 1 FROM tx_guide WHERE token_id = %s LIMIT 1", (token_id,))
+    return cursor.fetchone() is not None
+
+
+def publish_prime_request(ch, mint_address, prime_sig_cnt):
+    """Publish a prime request to the producer queue (fire-and-forget)."""
+    import uuid
+    msg = json.dumps({
+        'request_id': f"enricher-prime-{uuid.uuid4().hex[:12]}",
+        'action': 'prime',
+        'priority': 1,
+        'batch': {
+            'filters': {'mint_address': mint_address},
+            'prime_sig_cnt': prime_sig_cnt,
+        },
+    })
+    ch.basic_publish(
+        exchange='', routing_key=PRODUCER_REQUEST_QUEUE,
+        body=msg.encode('utf-8'),
+        properties=pika.BasicProperties(
+            delivery_mode=2, content_type='application/json', priority=1))
+
+
+# =============================================================================
 # Batch Claiming (FOR UPDATE SKIP LOCKED)
 # =============================================================================
 
@@ -385,8 +418,9 @@ def claim_batch(cursor, conn, table, where_clause, where_params,
 # Token Enrichment
 # =============================================================================
 
-def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, api_timeout):
-    stats = {'processed': 0, 'updated': 0, 'failed': 0, 'backfill_updated': 0}
+def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, api_timeout,
+                   rmq_channel=None, prime_sig_cnt=0):
+    stats = {'processed': 0, 'updated': 0, 'failed': 0, 'backfill_updated': 0, 'primed': 0}
 
     # Phase 0: Local backfill from tx_address labels
     try:
@@ -505,6 +539,16 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                         conn.commit()
                         log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec) [{token_type or '?'}]")
                         stats['updated'] += 1
+
+                        # Auto-prime: trigger producer for new mints with zero history
+                        if rmq_channel and prime_sig_cnt > 0:
+                            try:
+                                if not check_mint_has_history(cursor, token_id):
+                                    publish_prime_request(rmq_channel, mint, prime_sig_cnt)
+                                    log(tag, f"    PRIME: {mint[:16]}... queued ({prime_sig_cnt} sigs)")
+                                    stats['primed'] += 1
+                            except Exception as e:
+                                log(tag, f"    PRIME error: {e}")
                     else:
                         stats['failed'] += 1
                 else:
@@ -945,6 +989,7 @@ class WorkerThread(threading.Thread):
             limit = batch.get('limit', self.batch_limit)
             max_attempts = batch.get('max_attempts', self.max_attempts)
             delay = batch.get('delay', self.api_delay_sec)
+            prime_sig_cnt = get_config_int(cursor, 'batch', 'enricher_prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
 
             log(self.tag, f"Request {request_id[:8]} (action={action}, ops={operations})")
 
@@ -956,7 +1001,8 @@ class WorkerThread(threading.Thread):
             all_stats = {}
 
             if 'tokens' in operations:
-                s = enrich_tokens(self.tag, session, cursor, db_conn, limit, max_attempts, delay, self.api_timeout_sec)
+                s = enrich_tokens(self.tag, session, cursor, db_conn, limit, max_attempts, delay, self.api_timeout_sec,
+                                  rmq_channel=ch, prime_sig_cnt=prime_sig_cnt)
                 total_updated += s.get('updated', 0)
                 all_stats['tokens'] = s
 
@@ -993,6 +1039,7 @@ class WorkerThread(threading.Thread):
         """Handle supervisor-scheduled enrichment pass — loops until all types drained."""
         grand_total = 0
         pass_num = 0
+        prime_sig_cnt = get_config_int(cursor, 'batch', 'enricher_prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
 
         while not self.stop_event.is_set():
             pass_num += 1
@@ -1001,7 +1048,8 @@ class WorkerThread(threading.Thread):
 
             s = enrich_tokens(self.tag, session, cursor, db_conn,
                               self.batch_limit, self.max_attempts,
-                              self.api_delay_sec, self.api_timeout_sec)
+                              self.api_delay_sec, self.api_timeout_sec,
+                              rmq_channel=ch, prime_sig_cnt=prime_sig_cnt)
             pass_updated += s.get('updated', 0) + s.get('backfill_updated', 0)
             all_stats['tokens'] = s
 

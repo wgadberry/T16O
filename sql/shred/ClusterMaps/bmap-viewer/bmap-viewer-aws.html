@@ -1857,6 +1857,7 @@
         let allEdges = null; // Store all edges for filtering
         let signatureOnlyMode = false; // True when loaded by signature only (show all tokens)
         let nodeClickTimer = null; // Debounce single-click to avoid firing on dblclick
+        let wasDragged = false; // Track actual drag movement to avoid swallowing click/dblclick
 
         function renderBubbleMap(nodes, edges) {
             const container = document.getElementById('bubble-map');
@@ -2139,12 +2140,14 @@
                 })
                 .on('click', (event, d) => {
                     event.stopPropagation();
+                    if (wasDragged) return;
                     tooltip.style('opacity', 0);
                     clearTimeout(nodeClickTimer);
-                    nodeClickTimer = setTimeout(() => showWalletTxs(d.id), 250);
+                    nodeClickTimer = setTimeout(() => showWalletTxs(d.id), 350);
                 })
                 .on('dblclick', (event, d) => {
                     event.stopPropagation();
+                    if (wasDragged) return;
                     tooltip.style('opacity', 0);
                     clearTimeout(nodeClickTimer);
                     fetchWalletTransactions(d.id);
@@ -2295,22 +2298,23 @@
                         .attr('y', d => d.y);
                 });
 
-            // Drag functions
+            // Drag functions — track actual movement to avoid swallowing click/dblclick
             function dragstarted(event, d) {
+                wasDragged = false;
                 if (!event.active) simulation.alphaTarget(0.3).restart();
                 d.fx = d.x;
                 d.fy = d.y;
             }
 
             function dragged(event, d) {
+                wasDragged = true;
                 d.fx = event.x;
                 d.fy = event.y;
             }
 
             function dragended(event, d) {
                 if (!event.active) simulation.alphaTarget(0);
-                d.fx = null;
-                d.fy = null;
+                if (!wasDragged) { d.fx = null; d.fy = null; }
             }
         }
 
@@ -2854,12 +2858,14 @@
                 })
                 .on('click', (event, d) => {
                     event.stopPropagation();
+                    if (wasDragged) return;
                     tooltip.style('opacity', 0);
                     clearTimeout(nodeClickTimer);
-                    nodeClickTimer = setTimeout(() => showWalletTxs(d.id), 250);
+                    nodeClickTimer = setTimeout(() => showWalletTxs(d.id), 350);
                 })
                 .on('dblclick', (event, d) => {
                     event.stopPropagation();
+                    if (wasDragged) return;
                     tooltip.style('opacity', 0);
                     clearTimeout(nodeClickTimer);
                     fetchWalletTransactions(d.id);
@@ -3010,22 +3016,23 @@
                         .attr('y', d => d.y);
                 });
 
-            // Drag functions
+            // Drag functions — track actual movement to avoid swallowing click/dblclick
             function dragstarted(event, d) {
+                wasDragged = false;
                 if (!event.active) simulation.alphaTarget(0.3).restart();
                 d.fx = d.x;
                 d.fy = d.y;
             }
 
             function dragged(event, d) {
+                wasDragged = true;
                 d.fx = event.x;
                 d.fy = event.y;
             }
 
             function dragended(event, d) {
                 if (!event.active) simulation.alphaTarget(0);
-                d.fx = null;
-                d.fy = null;
+                if (!wasDragged) { d.fx = null; d.fy = null; }
             }
         }
 
@@ -3149,15 +3156,12 @@
             const addrShort = `${address.slice(0,6)}...${address.slice(-4)}`;
             showToast(`Fetching txns for ${addrShort} via producer...`, 'pending');
 
+            const filters = { addresses: [address] };
+            if (currentSig) filters.until = { signature: currentSig };
+
             const payload = {
                 batch: {
-                    filters: {
-                        signature: '',
-                        sig_adjacent_cnt: 5,
-                        addresses: [address],
-                        before: {},
-                        until: currentSig ? { signature: currentSig } : {}
-                    },
+                    filters,
                     address_sig_cnt: 10
                 }
             };
@@ -3177,11 +3181,11 @@
 
                 if (response.ok) {
                     showToast(`Producer triggered for ${addrShort} — loading txs in 15s...`, 'success');
-                    // Auto-reload: wait for producer to process, then show wallet txs + refresh bmap
-                    setTimeout(() => {
+                    // Auto-reload: wait for producer to process, then refresh sequentially to avoid deadlocks
+                    setTimeout(async () => {
                         showToast(`Loading transactions for ${addrShort}...`, 'pending');
-                        showWalletTxs(address);
-                        fetchData();
+                        await showWalletTxs(address);
+                        await fetchData();
                     }, 15000);
                 } else {
                     showToast(`Error: ${result.error || result.message || response.statusText}`, 'error');

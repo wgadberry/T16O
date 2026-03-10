@@ -8,6 +8,7 @@ Access: http://localhost:5050
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import mysql.connector
+from mysql.connector import pooling
 import json
 import os
 import subprocess
@@ -50,6 +51,9 @@ if _ANTHROPIC_API_KEY:
 MAX_RETRIES = 3
 BASE_BACKOFF = 0.3  # seconds
 
+# Serialize DB-heavy requests to avoid deadlocks between concurrent Flask threads
+_db_lock = threading.Lock()
+
 # Path to guide-producer.py
 GUIDE_PRODUCER_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__),
@@ -66,6 +70,32 @@ DB_CONFIG = {
     'password': 'p@ssw0rd',
     'database': 't16o_db'
 }
+
+# Connection pool — reuses connections to reduce lock contention
+DB_POOL = pooling.MySQLConnectionPool(
+    pool_name='bmap_pool',
+    pool_size=5,
+    pool_reset_session=True,
+    **DB_CONFIG
+)
+
+def get_connection():
+    """Get a connection from the pool, serialized to avoid deadlocks."""
+    _db_lock.acquire()
+    try:
+        conn = DB_POOL.get_connection()
+        # Wrap close() to release the lock when connection is returned
+        original_close = conn.close
+        def close_and_unlock():
+            try:
+                original_close()
+            finally:
+                _db_lock.release()
+        conn.close = close_and_unlock
+        return conn
+    except:
+        _db_lock.release()
+        raise
 
 @app.route('/')
 def index():
@@ -100,7 +130,7 @@ def get_bmap():
         conn = None
         cursor = None
         try:
-            conn = mysql.connector.connect(**DB_CONFIG)
+            conn = get_connection()
             cursor = conn.cursor()
 
             cursor.callproc('sp_tx_bmap_get', [
@@ -182,8 +212,9 @@ def get_timerange():
         conn = None
         cursor = None
         try:
-            conn = mysql.connector.connect(**DB_CONFIG)
+            conn = get_connection()
             cursor = conn.cursor(dictionary=True)
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
 
             if mint_address:
                 query = """
@@ -319,6 +350,7 @@ def proxy_trigger_producer():
     """Proxy producer trigger to AWS API Gateway to avoid CORS issues."""
     try:
         data = request.get_json()
+        print(f"[producer-proxy] Sending to gateway: {json.dumps(data, indent=2)}")
         resp = http_requests.post(
             f'{GATEWAY_URL}/api/trigger/producer',
             json=data,
@@ -330,8 +362,10 @@ def proxy_trigger_producer():
             },
             timeout=30
         )
+        print(f"[producer-proxy] Gateway responded {resp.status_code}: {resp.text[:500]}")
         return (resp.text, resp.status_code, {'Content-Type': 'application/json'})
     except Exception as e:
+        print(f"[producer-proxy] Error: {e}")
         return jsonify({'error': str(e)}), 502
 
 @app.route('/api/bmap/get-wallet-txs', methods=['GET', 'POST'])
@@ -364,8 +398,9 @@ def get_wallet_txs():
         conn = None
         cursor = None
         try:
-            conn = mysql.connector.connect(**DB_CONFIG)
+            conn = get_connection()
             cursor = conn.cursor(dictionary=True)
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             cursor.callproc('sp_tx_bmap_get_wallet_txs', [address, mint_address, min(limit, 200)])
 
             rows = []
@@ -428,7 +463,7 @@ def get_wallet_txs():
 
 def fetch_bmap_data(mint_address, token_symbol, signature, block_time, limit, token_name=None):
     """Helper to get bmap data for explain endpoint."""
-    conn = mysql.connector.connect(**DB_CONFIG)
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.callproc('sp_tx_bmap_get', [
