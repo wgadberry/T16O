@@ -351,9 +351,11 @@ class ShredderProcessor:
 
         Priority order:
         1. Complete pairs (decoded + detailed for same sig_hash) — processed together
-        2. Standalone decoded rows (remaining slots)
-        3. Standalone detailed rows (remaining slots)
+        2. Unpaired decoded rows with NULL sig_hash (no pair expected)
+        3. Unpaired detailed rows with NULL sig_hash (no pair expected)
 
+        Rows with a sig_hash wait until their pair arrives — no wasted cycles
+        processing half-pairs that will just fail.
         Within each category, ordered by priority DESC.
         Decoded is always processed before detailed for the same sig_hash.
         """
@@ -402,13 +404,14 @@ class ShredderProcessor:
                 claimed_ids.append(row['id'])
                 original_states[row['id']] = row['tx_state']
 
-        # Step 3: Claim standalone decoded rows (remaining slots)
+        # Step 3: Claim unpaired decoded rows with no sig_hash (no pair expected)
         remaining = limit - len(claimed_ids)
         if remaining > 0:
             self.cursor.execute(f"""
                 SELECT id
                 FROM {STAGING_SCHEMA}.{STAGING_TABLE}
                 WHERE tx_state = %s
+                  AND sig_hash IS NULL
                 ORDER BY priority DESC, created_utc ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
@@ -417,13 +420,14 @@ class ShredderProcessor:
                 claimed_ids.append(row['id'])
                 original_states[row['id']] = decoded_state
 
-        # Step 4: Claim standalone detailed rows (remaining slots)
+        # Step 4: Claim unpaired detailed rows with no sig_hash (no pair expected)
         remaining = limit - len(claimed_ids)
         if remaining > 0:
             self.cursor.execute(f"""
                 SELECT id
                 FROM {STAGING_SCHEMA}.{STAGING_TABLE}
                 WHERE tx_state = %s
+                  AND sig_hash IS NULL
                   AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
                 ORDER BY priority DESC, created_utc ASC
                 LIMIT %s
