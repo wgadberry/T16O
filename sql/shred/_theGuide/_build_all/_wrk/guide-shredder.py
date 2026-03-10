@@ -437,6 +437,29 @@ class ShredderProcessor:
                 claimed_ids.append(row['id'])
                 original_states[row['id']] = detailed_state
 
+        # Step 5: Claim orphaned sig_hash rows older than 5 min (partner never arrived)
+        remaining = limit - len(claimed_ids)
+        if remaining > 0:
+            self.cursor.execute(f"""
+                SELECT id, tx_state
+                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+                WHERE tx_state IN (%s, %s)
+                  AND sig_hash IS NOT NULL
+                  AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 300 SECOND)
+                  AND sig_hash NOT IN (
+                      SELECT sig_hash FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+                      WHERE sig_hash IS NOT NULL
+                      GROUP BY sig_hash
+                      HAVING SUM(tx_state = %s) > 0 AND SUM(tx_state = %s) > 0
+                  )
+                ORDER BY created_utc ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            """, (decoded_state, detailed_state, decoded_state, detailed_state, remaining))
+            for row in self.cursor.fetchall():
+                claimed_ids.append(row['id'])
+                original_states[row['id']] = row['tx_state']
+
         if not claimed_ids:
             self.db_conn.commit()  # Release any implicit locks
             return []
@@ -663,17 +686,40 @@ def purge_completed_staging(cursor, conn, min_age_seconds=60):
     Delete staging rows that have been fully processed (tx_state=shredded).
     Only deletes rows older than min_age_seconds to avoid racing with
     correlation completion checks.
+    For sig_hash rows, only purge when BOTH decode and detail are shredded
+    (prevents purging one half before the other arrives).
     Returns number of staging rows deleted.
     """
+    total_deleted = 0
+
+    # 1. Purge non-paired rows (no sig_hash) — safe to delete individually
     cursor.execute(f"""
         DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
         WHERE tx_state = %s
+          AND sig_hash IS NULL
           AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
         LIMIT 1000
     """, (TX_STATE_SHREDDED, min_age_seconds))
-    deleted = cursor.rowcount
+    total_deleted += cursor.rowcount
     conn.commit()
-    return deleted
+
+    # 2. Purge paired rows — only when both halves are shredded
+    cursor.execute(f"""
+        DELETE t FROM {STAGING_SCHEMA}.{STAGING_TABLE} t
+        INNER JOIN (
+            SELECT sig_hash
+            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+            WHERE sig_hash IS NOT NULL
+              AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
+            GROUP BY sig_hash
+            HAVING MIN(tx_state) = %s AND MAX(tx_state) = %s
+            LIMIT 500
+        ) paired ON t.sig_hash = paired.sig_hash
+    """, (min_age_seconds, TX_STATE_SHREDDED, TX_STATE_SHREDDED))
+    total_deleted += cursor.rowcount
+    conn.commit()
+
+    return total_deleted
 
 
 # =============================================================================
