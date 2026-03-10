@@ -470,7 +470,7 @@ def prime_new_tokens(tag, cursor, conn, ch, pre_guide_max_id, post_guide_max_id,
         SELECT DISTINCT t.id AS token_id, a.address AS mint_address
         FROM tx_guide g
         JOIN tx_token t ON t.id = g.token_id
-        JOIN tx_address a ON a.id = t.address_id
+        JOIN tx_address a ON a.id = t.mint_address_id
         WHERE g.id > %s AND g.id <= %s
           AND t.primed = 0
     """, (pre_guide_max_id, post_guide_max_id))
