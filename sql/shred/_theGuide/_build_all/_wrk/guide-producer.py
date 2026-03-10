@@ -1165,39 +1165,46 @@ def process_prime_request(message: dict, rpc_session, gateway_channel, db_cursor
 
         print(f"  [PRIME] Fetched {len(prime_sigs)} signatures (including anchor tx)")
     else:
-        # Fallback: no anchor tx — paginate to the end with a rolling window
-        MAX_FALLBACK_PAGES = 500  # 500K sigs max (~100s at 0.2s/page)
-        print(f"  [PRIME] No first_mint_tx, fallback: paginating to oldest (max {MAX_FALLBACK_PAGES} pages)...")
+        # Enricher-originated primes: skip fallback scan entirely.
+        # These are auto-discovered tokens — if no anchor tx exists, the token
+        # likely has massive history (e.g., Orca) and scanning would hang.
+        is_enricher_prime = request_id.startswith('enricher-prime-')
+        if is_enricher_prime:
+            print(f"  [PRIME] No anchor tx — skipping fallback for enricher-originated prime")
+        else:
+            # Fallback: no anchor tx — paginate to the end with a rolling window
+            MAX_FALLBACK_PAGES = 500  # 500K sigs max (~100s at 0.2s/page)
+            print(f"  [PRIME] No first_mint_tx, fallback: paginating to oldest (max {MAX_FALLBACK_PAGES} pages)...")
 
-        # Use a rolling buffer — only keep the last prime_sig_cnt sigs
-        ring_buffer = []
-        total_fetched = 0
-        for sig_obj in fetch_all_signatures(
-            rpc_session, mint_address, CHAINSTACK_RPC_URL,
-            max_signatures=MAX_FALLBACK_PAGES * 1000,
-            skip_failed=True
-        ):
-            sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
-            if sig_str:
-                ring_buffer.append(sig_str)
-                # Keep buffer from growing unbounded
-                if len(ring_buffer) > prime_sig_cnt * 2:
-                    ring_buffer = ring_buffer[-prime_sig_cnt:]
-            total_fetched += 1
-            if total_fetched % 10000 == 0:
-                print(f"    ... scanned {total_fetched} signatures")
+            # Use a rolling buffer — only keep the last prime_sig_cnt sigs
+            ring_buffer = []
+            total_fetched = 0
+            for sig_obj in fetch_all_signatures(
+                rpc_session, mint_address, CHAINSTACK_RPC_URL,
+                max_signatures=MAX_FALLBACK_PAGES * 1000,
+                skip_failed=True
+            ):
+                sig_str = sig_obj.get('signature') if isinstance(sig_obj, dict) else sig_obj
+                if sig_str:
+                    ring_buffer.append(sig_str)
+                    # Keep buffer from growing unbounded
+                    if len(ring_buffer) > prime_sig_cnt * 2:
+                        ring_buffer = ring_buffer[-prime_sig_cnt:]
+                total_fetched += 1
+                if total_fetched % 10000 == 0:
+                    print(f"    ... scanned {total_fetched} signatures")
 
-        if ring_buffer:
-            prime_sigs = ring_buffer[-prime_sig_cnt:] if len(ring_buffer) > prime_sig_cnt else ring_buffer
-            prime_sigs.reverse()  # Oldest first
-            print(f"  [PRIME] Fallback: selected {len(prime_sigs)} oldest from {total_fetched} scanned")
+            if ring_buffer:
+                prime_sigs = ring_buffer[-prime_sig_cnt:] if len(ring_buffer) > prime_sig_cnt else ring_buffer
+                prime_sigs.reverse()  # Oldest first
+                print(f"  [PRIME] Fallback: selected {len(prime_sigs)} oldest from {total_fetched} scanned")
 
     if not prime_sigs:
         print(f"  [PRIME] No signatures found for this mint")
         return {
             'processed': 0, 'batches': 0, 'skipped': 0, 'errors': 0,
             'mode': 'prime',
-            'first_mint_tx': first_mint_tx,
+            'first_mint_tx': anchor_tx,
             'first_mint_time': first_mint_time,
             'prime_sig_cnt': 0,
             'cascade_to': []
