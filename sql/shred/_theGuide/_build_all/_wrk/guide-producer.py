@@ -1048,15 +1048,15 @@ def process_prime_request(message: dict, rpc_session, gateway_channel, db_cursor
     filters = batch.get('filters', {})
     prime_sig_cnt = batch.get('prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
 
-    # Support both single and array
-    mint_addresses = filters.get('mint_addresses', [])
+    # Support array (addresses) and single (mint_address) for backward compat
+    mint_addresses = filters.get('addresses', [])
     if not mint_addresses:
         single = filters.get('mint_address')
         if single:
             mint_addresses = [single]
 
     if not mint_addresses:
-        return {'processed': 0, 'errors': 1, 'error': 'prime requires batch.filters.mint_address or mint_addresses'}
+        return {'processed': 0, 'errors': 1, 'error': 'prime requires batch.filters.addresses or mint_address'}
 
     if not db_cursor:
         return {'processed': 0, 'errors': 1, 'error': 'prime requires database connection'}

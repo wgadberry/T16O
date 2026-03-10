@@ -493,7 +493,7 @@ def prime_new_tokens(tag, cursor, conn, ch, pre_guide_max_id, post_guide_max_id,
             'action': 'prime',
             'priority': 1,
             'batch': {
-                'filters': {'mint_addresses': mint_addresses},
+                'filters': {'addresses': mint_addresses},
                 'prime_sig_cnt': prime_sig_cnt,
             },
         })

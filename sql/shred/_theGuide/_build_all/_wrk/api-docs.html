@@ -118,14 +118,8 @@
               "addresses": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "Solana addresses to fetch signatures for",
+                "description": "Solana addresses to fetch signatures for. For action='prime', these are mint addresses.",
                 "example": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
-              },
-              "mint_addresses": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Array of mint addresses for batch prime mode (action='prime'). Alternative to single mint_address.",
-                "example": ["So11111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
               },
               "before": {
                 "oneOf": [
@@ -703,7 +697,7 @@
                     "action": "prime",
                     "batch": {
                       "filters": {
-                        "mint_addresses": [
+                        "addresses": [
                           "So11111111111111111111111111111112",
                           "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
                         ]
