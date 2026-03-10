@@ -13,15 +13,14 @@ Config keys (config_type='queue'):
     shredder_wrk_poll_idle_sec        - worker sleep when no rows available
     shredder_wrk_reconnect_sec        - delay before reconnecting after errors
     shredder_wrk_shutdown_timeout_sec - max wait for worker thread on shutdown
-    shredder_wrk_purge_every_n        - purge every N supervisor polls
-    shredder_wrk_purge_min_age_sec    - min age before purging staging rows
 
-Consumes staged transactions from t16o_db_staging.txs and calls the appropriate
-stored procedure based on tx_state:
-  - tx_state=8 (decoded): CALL sp_tx_parse_staging_decode()
-  - tx_state=16 (detailed): CALL sp_tx_parse_staging_detail()
+Consumes staged transactions from t16o_db_staging.txs by deleting rows and
+passing the JSON payload directly to stored procedures:
+  - tx_state=8 (decoded): CALL sp_tx_parse_decode(json, ...)
+  - tx_state=16 (detailed): CALL sp_tx_parse_detail(json, ...)
 
-After processing, tx_state is set to 4 (shredded).
+On SP failure, the row is reinserted into staging with attempt_cnt incremented.
+No purge cycle needed — rows are deleted on consumption.
 
 Usage:
     python guide-shredder.py --daemon                 # Supervisor + worker threads
@@ -73,14 +72,12 @@ RABBITMQ_PASS       = _rmq['password']
 RABBITMQ_VHOST      = _rmq['vhost']
 RABBITMQ_RESPONSE_QUEUE = _queues['response']
 
-# Default tx_state values (will be fetched from config table)
-TX_STATE_SHREDDED = 4
+# tx_state values
 TX_STATE_DECODED = 8
 TX_STATE_DETAILED = 16
-TX_STATE_PROCESSING = 1  # Claimed by shredder, in progress
 
-# Max retry attempts for detailed rows before giving up
-MAX_DETAILED_ATTEMPTS = 3
+# Max retry attempts before giving up
+MAX_ATTEMPTS = 3
 
 # Known Solana program addresses for participant classification
 KNOWN_PROGRAMS = {
@@ -179,32 +176,26 @@ def rmq_connect():
 # Gateway Response Publishing
 # =============================================================================
 
-def check_correlation_complete(cursor, correlation_id, completed_correlations):
+def check_correlation_complete(cursor, correlation_id, completed_correlations, batch_count):
     """
-    Check if all staging rows for a correlation_id are shredded.
-    Returns stats dict if complete, None if not.
+    Check if all staging rows for a correlation_id have been consumed.
+    In the delete-on-consume model, complete = no rows remaining for this correlation.
+    batch_count is how many rows we processed for this correlation in this batch.
     """
     if not correlation_id or correlation_id in completed_correlations:
         return None
 
     cursor.execute(f"""
-        SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN tx_state = %s THEN 1 ELSE 0 END) as shredded,
-            SUM(CASE WHEN tx_state != %s THEN 1 ELSE 0 END) as pending
+        SELECT COUNT(*) as remaining
         FROM {STAGING_SCHEMA}.{STAGING_TABLE}
         WHERE correlation_id = %s
-    """, (TX_STATE_SHREDDED, TX_STATE_SHREDDED, correlation_id))
+    """, (correlation_id,))
 
     row = cursor.fetchone()
-    if not row or row['total'] == 0:
-        return None
-
-    if row['pending'] == 0:
+    if row and row['remaining'] == 0:
         completed_correlations.add(correlation_id)
         return {
-            'total_staging_rows': row['total'],
-            'shredded': row['shredded']
+            'total_staging_rows': batch_count,
         }
 
     return None
@@ -233,51 +224,170 @@ def publish_shredder_response(channel, correlation_id, stats):
             properties=pika.BasicProperties(delivery_mode=2, content_type='application/json')
         )
     except Exception:
-        pass  # Non-critical, logged at caller level
+        pass
 
 
 # =============================================================================
-# Core Processing (used by both WorkerThread and run_once)
+# Core Processing
 # =============================================================================
 
 class ShredderProcessor:
-    """Processes staged transactions using forward-only stored procedures"""
+    """Consumes staging rows: SELECT → DELETE → call SP with JSON → reinsert on failure"""
 
     def __init__(self, db_conn, dry_run=False, tag='PROC'):
         self.db_conn = db_conn
         self.cursor = db_conn.cursor(dictionary=True)
         self.dry_run = dry_run
         self.tag = tag
-        self._tx_states = {}
         self._completed_correlations = set()
 
-    def get_tx_state(self, key):
-        """Get tx_state value from config table (cached)"""
-        if key not in self._tx_states:
-            self.cursor.execute(
-                "SELECT CAST(config_value AS UNSIGNED) as val FROM config "
-                "WHERE config_type = 'tx_state' AND config_key = %s", (key,)
-            )
-            row = self.cursor.fetchone()
-            defaults = {'shredded': TX_STATE_SHREDDED, 'decoded': TX_STATE_DECODED, 'detailed': TX_STATE_DETAILED}
-            self._tx_states[key] = row['val'] if row else defaults.get(key, 0)
-        return self._tx_states[key]
-
-    def extract_and_insert_participants(self, staging_id):
+    def fetch_and_delete_rows(self, limit=10):
         """
-        Extract participants from staging row JSON and insert into tx_participant.
+        Atomically select and delete staging rows.
+        SELECT FOR UPDATE SKIP LOCKED → DELETE → COMMIT.
+        Returns list of row dicts with full data (txs, tx_state, etc.)
+        """
+        # Select rows to process — decoded first (tx_state ASC: 8 before 16)
+        self.cursor.execute(f"""
+            SELECT id, txs, tx_state, priority, correlation_id,
+                   request_log_id, tx_origin, attempt_cnt
+            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+            WHERE tx_state IN (%s, %s)
+            ORDER BY priority DESC, tx_state ASC, created_utc ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        """, (TX_STATE_DECODED, TX_STATE_DETAILED, limit))
+
+        rows = self.cursor.fetchall()
+        if not rows:
+            self.db_conn.commit()
+            return []
+
+        # Delete claimed rows
+        ids = [r['id'] for r in rows]
+        placeholders = ','.join(['%s'] * len(ids))
+        self.cursor.execute(f"""
+            DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+            WHERE id IN ({placeholders})
+        """, ids)
+        self.db_conn.commit()
+
+        return rows
+
+    def reinsert_row(self, row):
+        """Reinsert a failed row back into staging with incremented attempt_cnt."""
+        try:
+            self.cursor.execute(f"""
+                INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE}
+                    (txs, tx_state, priority, correlation_id,
+                     request_log_id, tx_origin, attempt_cnt)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row['txs'] if isinstance(row['txs'], str) else json.dumps(row['txs']),
+                row['tx_state'],
+                row['priority'],
+                row.get('correlation_id'),
+                row.get('request_log_id'),
+                row.get('tx_origin', 0),
+                row.get('attempt_cnt', 0) + 1
+            ))
+            self.db_conn.commit()
+        except Exception as e:
+            log(self.tag, f"  reinsert failed: {e}")
+            try:
+                self.db_conn.rollback()
+            except Exception:
+                pass
+
+    def process_row(self, row):
+        """
+        Process a single row by calling the appropriate SP with the JSON payload.
+        Returns result dict.
+        """
+        tx_state = row['tx_state']
+        txs_json = row['txs'] if isinstance(row['txs'], str) else json.dumps(row['txs'])
+        request_log_id = row.get('request_log_id')
+        tx_origin = row.get('tx_origin', 0)
+        attempt_cnt = row.get('attempt_cnt', 0)
+
+        result = {
+            'tx_state': tx_state,
+            'success': False,
+            'tx_count': 0,
+            'transfer_count': 0,
+            'swap_count': 0,
+            'activity_count': 0,
+            'sol_balance_count': 0,
+            'token_balance_count': 0,
+            'skipped_count': 0,
+            'error': None
+        }
+
+        try:
+            if tx_state == TX_STATE_DECODED:
+                self.cursor.execute(
+                    "SET @tx=0, @xfer=0, @swap=0, @act=0, @skip=0"
+                )
+                self.cursor.execute(
+                    "CALL sp_tx_parse_decode(%s, %s, %s, @tx, @xfer, @swap, @act, @skip)",
+                    (txs_json, request_log_id, tx_origin)
+                )
+                self.cursor.execute("SELECT @tx, @xfer, @swap, @act, @skip")
+                r = self.cursor.fetchone()
+                if r:
+                    result['tx_count'] = r['@tx'] or 0
+                    result['transfer_count'] = r['@xfer'] or 0
+                    result['swap_count'] = r['@swap'] or 0
+                    result['activity_count'] = r['@act'] or 0
+                    result['skipped_count'] = r['@skip'] or 0
+                result['success'] = True
+
+            elif tx_state == TX_STATE_DETAILED:
+                self.cursor.execute(
+                    "SET @tx=0, @sol=0, @tok=0, @skip=0"
+                )
+                self.cursor.execute(
+                    "CALL sp_tx_parse_detail(%s, %s, @tx, @sol, @tok, @skip)",
+                    (txs_json, request_log_id)
+                )
+                self.cursor.execute("SELECT @tx, @sol, @tok, @skip")
+                r = self.cursor.fetchone()
+                if r:
+                    result['tx_count'] = r['@tx'] or 0
+                    result['sol_balance_count'] = r['@sol'] or 0
+                    result['token_balance_count'] = r['@tok'] or 0
+                    result['skipped_count'] = r['@skip'] or 0
+
+                if result['tx_count'] > 0 or result['sol_balance_count'] > 0 or result['token_balance_count'] > 0:
+                    result['success'] = True
+                else:
+                    if attempt_cnt + 1 >= MAX_ATTEMPTS:
+                        result['error'] = f'All txs skipped - giving up after {attempt_cnt + 1} attempts'
+                        result['success'] = True  # Don't reinsert — give up
+                    else:
+                        result['error'] = f'All txs skipped (attempt {attempt_cnt + 1}/{MAX_ATTEMPTS})'
+            else:
+                result['error'] = f'Unknown tx_state: {tx_state}'
+                result['success'] = True  # Don't reinsert unknown states
+
+            self.db_conn.commit()
+
+        except MySQLError as e:
+            result['error'] = str(e)
+            try:
+                self.db_conn.rollback()
+            except Exception:
+                pass
+
+        return result
+
+    def extract_and_insert_participants(self, txs_data):
+        """
+        Extract participants from JSON data and insert into tx_participant.
         Returns number of participants inserted.
         """
         fresh_cursor = self.db_conn.cursor(dictionary=True)
         try:
-            fresh_cursor.execute(f"""
-                SELECT txs FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
-            """, (staging_id,))
-            row = fresh_cursor.fetchone()
-            if not row or not row.get('txs'):
-                return 0
-
-            txs_data = row['txs']
             if isinstance(txs_data, str):
                 txs_data = json.loads(txs_data)
 
@@ -343,326 +453,82 @@ class ShredderProcessor:
         finally:
             fresh_cursor.close()
 
-    def fetch_pending_staging_rows(self, limit=50):
-        """
-        Claim and fetch staging rows that need processing.
-        Uses atomic UPDATE to claim rows, avoiding locks that block INSERTs.
-
-        Priority order:
-        1. Complete pairs (decoded + detailed ready, SUM=24) - prevents starvation
-        2. Standalone decoded rows
-        3. Standalone detailed rows (where tx exists)
-
-        Within each category, ordered by priority DESC.
-        Decoded is always processed before detailed for the same sig_hash.
-        """
-        decoded_state = self.get_tx_state('decoded')
-        detailed_state = self.get_tx_state('detailed')
-
-        if self.dry_run:
-            self.cursor.execute(f"""
-                SELECT id, tx_state, priority, created_utc, correlation_id, sig_hash
-                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-                WHERE tx_state IN (%s, %s)
-                ORDER BY priority DESC, sig_hash, tx_state, created_utc ASC
-                LIMIT %s
-            """, (decoded_state, detailed_state, limit))
-            return self.cursor.fetchall()
-
-        claimed_count = 0
-
-        # Step 1: Find complete pairs (SUM(tx_state) = 24) ordered by priority
-        self.cursor.execute(f"""
-            SELECT sig_hash, MAX(priority) as max_priority
-            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-            WHERE tx_state IN (%s, %s)
-              AND sig_hash IS NOT NULL
-            GROUP BY sig_hash
-            HAVING SUM(tx_state) = 24
-            ORDER BY max_priority DESC
-            LIMIT %s
-        """, (decoded_state, detailed_state, limit // 2))
-
-        complete_pairs = [row['sig_hash'] for row in self.cursor.fetchall()]
-
-        # Step 2: Claim both decoded and detailed for complete pairs
-        if complete_pairs:
-            placeholders = ','.join(['%s'] * len(complete_pairs))
-
-            self.cursor.execute(f"""
-                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                SET priority = priority * 10 + 1,
-                    tx_state = {TX_STATE_PROCESSING}
-                WHERE tx_state = %s
-                  AND sig_hash IN ({placeholders})
-            """, (decoded_state, *complete_pairs))
-            decoded_from_pairs = self.cursor.rowcount
-
-            self.cursor.execute(f"""
-                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                SET priority = priority * 10 + 2,
-                    tx_state = {TX_STATE_PROCESSING}
-                WHERE tx_state = %s
-                  AND sig_hash IN ({placeholders})
-                  AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
-            """, (detailed_state, *complete_pairs))
-            detailed_from_pairs = self.cursor.rowcount
-
-            claimed_count = decoded_from_pairs + detailed_from_pairs
-            self.db_conn.commit()
-
-        # Step 3: Claim standalone decoded rows (remaining slots)
-        remaining_slots = limit - claimed_count
-        if remaining_slots > 0:
-            self.cursor.execute(f"""
-                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                SET priority = priority * 10 + 1,
-                    tx_state = {TX_STATE_PROCESSING}
-                WHERE tx_state = %s
-                ORDER BY priority DESC, created_utc ASC
-                LIMIT %s
-            """, (decoded_state, remaining_slots))
-            claimed_count += self.cursor.rowcount
-            self.db_conn.commit()
-
-        # Step 4: Claim standalone detailed rows (remaining slots)
-        remaining_slots = limit - claimed_count
-        if remaining_slots > 0:
-            self.cursor.execute(f"""
-                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                SET priority = priority * 10 + 2,
-                    tx_state = {TX_STATE_PROCESSING}
-                WHERE tx_state = %s
-                  AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
-                ORDER BY priority DESC, created_utc ASC
-                LIMIT %s
-            """, (detailed_state, remaining_slots))
-            claimed_count += self.cursor.rowcount
-            self.db_conn.commit()
-
-        if claimed_count == 0:
-            return []
-
-        # Step 5: Fetch claimed rows, ordered so decoded comes before detailed per sig_hash
-        self.cursor.execute(f"""
-            SELECT id,
-                   IF(priority MOD 10 = 1, %s, %s) as tx_state,
-                   (priority DIV 10) as priority,
-                   created_utc,
-                   correlation_id,
-                   sig_hash
-            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-            WHERE tx_state = {TX_STATE_PROCESSING}
-            ORDER BY sig_hash, (priority MOD 10) ASC
-        """, (decoded_state, detailed_state))
-
-        return self.cursor.fetchall()
-
-    def process_staging_row(self, staging_id, tx_state, priority):
-        """
-        Process a single staging row based on its tx_state.
-        Updates staging row to shredded (4) on success, restores original state on error.
-        """
-        result = {
-            'staging_id': staging_id,
-            'tx_state': tx_state,
-            'success': False,
-            'tx_count': 0,
-            'transfer_count': 0,
-            'swap_count': 0,
-            'activity_count': 0,
-            'sol_balance_count': 0,
-            'token_balance_count': 0,
-            'skipped_count': 0,
-            'participant_count': 0,
-            'error': None
-        }
-
-        decoded_state = self.get_tx_state('decoded')
-        detailed_state = self.get_tx_state('detailed')
-        shredded_state = self.get_tx_state('shredded')
-
-        try:
-            if tx_state == decoded_state:
-                self.cursor.execute(
-                    "SET @tx=0, @xfer=0, @swap=0, @act=0, @skip=0"
-                )
-                self.cursor.execute(
-                    "CALL sp_tx_parse_staging_decode(%s, @tx, @xfer, @swap, @act, @skip)",
-                    (staging_id,)
-                )
-                self.cursor.execute("SELECT @tx, @xfer, @swap, @act, @skip")
-                row = self.cursor.fetchone()
-                if row:
-                    result['tx_count'] = row['@tx'] or 0
-                    result['transfer_count'] = row['@xfer'] or 0
-                    result['swap_count'] = row['@swap'] or 0
-                    result['activity_count'] = row['@act'] or 0
-                    result['skipped_count'] = row['@skip'] or 0
-                result['success'] = True
-
-            elif tx_state == detailed_state:
-                self.cursor.execute(
-                    "SET @tx=0, @sol=0, @tok=0, @skip=0"
-                )
-                self.cursor.execute(
-                    "CALL sp_tx_parse_staging_detail(%s, @tx, @sol, @tok, @skip)",
-                    (staging_id,)
-                )
-                self.cursor.execute("SELECT @tx, @sol, @tok, @skip")
-                row = self.cursor.fetchone()
-                if row:
-                    result['tx_count'] = row['@tx'] or 0
-                    result['sol_balance_count'] = row['@sol'] or 0
-                    result['token_balance_count'] = row['@tok'] or 0
-                    result['skipped_count'] = row['@skip'] or 0
-                if result['tx_count'] > 0 or result['sol_balance_count'] > 0 or result['token_balance_count'] > 0:
-                    result['success'] = True
-                else:
-                    self.cursor.execute(f"""
-                        SELECT attempt_cnt FROM {STAGING_SCHEMA}.{STAGING_TABLE} WHERE id = %s
-                    """, (staging_id,))
-                    attempt_row = self.cursor.fetchone()
-                    current_attempts = (attempt_row['attempt_cnt'] if attempt_row else 0) + 1
-                    if current_attempts >= MAX_DETAILED_ATTEMPTS:
-                        result['error'] = f'All txs skipped - giving up after {current_attempts} attempts'
-                    else:
-                        result['error'] = f'All txs skipped (attempt {current_attempts}/{MAX_DETAILED_ATTEMPTS})'
-
-            else:
-                result['error'] = f'Unknown tx_state: {tx_state}'
-                self.cursor.execute(f"""
-                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                    SET tx_state = %s, priority = %s
-                    WHERE id = %s
-                """, (self.get_tx_state('shredded'), priority, staging_id))
-
-            if result['success']:
-                self.cursor.execute(f"""
-                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                    SET tx_state = %s, priority = %s
-                    WHERE id = %s
-                """, (shredded_state, priority, staging_id))
-            else:
-                self.cursor.execute(f"""
-                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                    SET tx_state = IF(attempt_cnt + 1 >= {MAX_DETAILED_ATTEMPTS}, %s, %s),
-                        priority = %s,
-                        attempt_cnt = attempt_cnt + 1
-                    WHERE id = %s
-                """, (shredded_state, tx_state, priority, staging_id))
-
-            self.db_conn.commit()
-
-        except MySQLError as e:
-            result['error'] = str(e)
-            self.db_conn.rollback()
-            try:
-                self.cursor.execute(f"""
-                    UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-                    SET tx_state = %s, priority = %s
-                    WHERE id = %s
-                """, (tx_state, priority, staging_id))
-                self.db_conn.commit()
-            except:
-                pass
-
-        return result
-
     def process_batch(self, limit=10, mq_channel=None):
-        """
-        Process a batch of staging rows.
-        Returns summary of processing.
-        """
+        """Process a batch of staging rows. Returns summary."""
         summary = {
             'processed': 0,
             'decoded_count': 0,
             'detailed_count': 0,
             'errors': 0,
-            'results': [],
+            'reinserted': 0,
             'correlations_completed': []
         }
 
-        rows = self.fetch_pending_staging_rows(limit)
+        if self.dry_run:
+            self.cursor.execute(f"""
+                SELECT id, tx_state, priority, created_utc, correlation_id
+                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+                WHERE tx_state IN (%s, %s)
+                ORDER BY priority DESC, tx_state ASC, created_utc ASC
+                LIMIT %s
+            """, (TX_STATE_DECODED, TX_STATE_DETAILED, limit))
+            rows = self.cursor.fetchall()
+            for row in rows:
+                state_name = 'decoded' if row['tx_state'] == TX_STATE_DECODED else 'detailed'
+                log(self.tag, f"[DRY] Would process staging.id={row['id']} "
+                      f"(state={state_name}, priority={row['priority']})")
+                summary['processed'] += 1
+            return summary
 
+        rows = self.fetch_and_delete_rows(limit)
         if not rows:
             return summary
 
-        decoded_state = self.get_tx_state('decoded')
-        detailed_state = self.get_tx_state('detailed')
-
-        processed_correlations = set()
+        # Track correlations for completion check
+        correlation_counts = {}
 
         for row in rows:
-            staging_id = row['id']
             tx_state = row['tx_state']
-            priority = row['priority']
             correlation_id = row.get('correlation_id')
 
             if correlation_id:
-                processed_correlations.add(correlation_id)
+                correlation_counts[correlation_id] = correlation_counts.get(correlation_id, 0) + 1
 
-            state_name = 'decoded' if tx_state == decoded_state else (
-                'detailed' if tx_state == detailed_state else f'unknown({tx_state})'
+            state_name = 'decoded' if tx_state == TX_STATE_DECODED else (
+                'detailed' if tx_state == TX_STATE_DETAILED else f'unknown({tx_state})'
             )
 
-            if self.dry_run:
-                log(self.tag, f"[DRY] Would process staging.id={staging_id} "
-                      f"(state={state_name}, priority={priority})")
-                summary['processed'] += 1
-                continue
-
-            result = self.process_staging_row(staging_id, tx_state, priority)
-            summary['results'].append(result)
+            result = self.process_row(row)
 
             if result['success']:
                 summary['processed'] += 1
-                if tx_state == decoded_state:
+                if tx_state == TX_STATE_DECODED:
                     summary['decoded_count'] += 1
-                    log(self.tag, f"staging.id={staging_id} (decoded): "
+                    log(self.tag, f"(decoded): "
                           f"tx={result['tx_count']} xfer={result['transfer_count']} "
                           f"swap={result['swap_count']} act={result['activity_count']} "
                           f"skip={result['skipped_count']}")
-                elif tx_state == detailed_state:
+                elif tx_state == TX_STATE_DETAILED:
                     summary['detailed_count'] += 1
-                    participant_info = f" part={result['participant_count']}" if result.get('participant_count') else ""
-                    log(self.tag, f"staging.id={staging_id} (detailed): "
+                    log(self.tag, f"(detailed): "
                           f"tx={result['tx_count']} sol={result['sol_balance_count']} "
-                          f"tok={result['token_balance_count']} skip={result['skipped_count']}{participant_info}")
+                          f"tok={result['token_balance_count']} skip={result['skipped_count']}")
             else:
                 summary['errors'] += 1
-                log(self.tag, f"staging.id={staging_id}: ERROR - {result['error']}")
+                log(self.tag, f"ERROR ({state_name}): {result['error']}")
+                # Reinsert failed row
+                self.reinsert_row(row)
+                summary['reinserted'] += 1
 
-        if not self.dry_run:
-            for corr_id in processed_correlations:
-                stats = check_correlation_complete(self.cursor, corr_id, self._completed_correlations)
-                if stats:
-                    summary['correlations_completed'].append(corr_id)
-                    publish_shredder_response(mq_channel, corr_id, stats)
+        # Check correlation completion
+        for corr_id, count in correlation_counts.items():
+            stats = check_correlation_complete(
+                self.cursor, corr_id, self._completed_correlations, count)
+            if stats:
+                summary['correlations_completed'].append(corr_id)
+                publish_shredder_response(mq_channel, corr_id, stats)
 
         return summary
-
-
-# =============================================================================
-# Staging Cleanup (supervisor only)
-# =============================================================================
-
-def purge_completed_staging(cursor, conn, min_age_seconds=60):
-    """
-    Delete staging rows that have been fully processed (tx_state=shredded).
-    Only deletes rows older than min_age_seconds to avoid racing with
-    correlation completion checks.
-    Returns number of staging rows deleted.
-    """
-    cursor.execute(f"""
-        DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-        WHERE tx_state = %s
-          AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
-        LIMIT 1000
-    """, (TX_STATE_SHREDDED, min_age_seconds))
-    deleted = cursor.rowcount
-    conn.commit()
-    return deleted
 
 
 # =============================================================================
@@ -709,9 +575,10 @@ class WorkerThread(threading.Thread):
 
                     if summary['processed'] > 0:
                         corr_info = f", corr_done={len(summary['correlations_completed'])}" if summary['correlations_completed'] else ""
+                        reinsert_info = f", reins={summary['reinserted']}" if summary['reinserted'] else ""
                         log(self.tag, f"Batch: {summary['processed']} "
                               f"(dec={summary['decoded_count']}, det={summary['detailed_count']}, "
-                              f"err={summary['errors']}{corr_info})")
+                              f"err={summary['errors']}{reinsert_info}{corr_info})")
                         consecutive_empty = 0
                         # Process more immediately if full batch
                         if summary['processed'] >= self.batch_size:
@@ -721,7 +588,6 @@ class WorkerThread(threading.Thread):
 
                     # Adaptive sleep
                     sleep_time = self.poll_idle_sec if consecutive_empty < 10 else self.poll_idle_sec * 2
-                    # Sleep in small increments so we can check stop_event
                     elapsed = 0.0
                     while elapsed < sleep_time and not self.stop_event.is_set():
                         time.sleep(min(0.5, sleep_time - elapsed))
@@ -768,8 +634,6 @@ def read_config(cursor):
         'poll_idle':        get_config_float(cursor, 'queue', 'shredder_wrk_poll_idle_sec', 5.0),
         'reconnect':        get_config_float(cursor, 'queue', 'shredder_wrk_reconnect_sec', 5.0),
         'shutdown_timeout': get_config_float(cursor, 'queue', 'shredder_wrk_shutdown_timeout_sec', 10.0),
-        'purge_every_n':    get_config_int(cursor, 'queue', 'shredder_wrk_purge_every_n', 10),
-        'purge_min_age':    get_config_int(cursor, 'queue', 'shredder_wrk_purge_min_age_sec', 60),
     }
 
 
@@ -784,7 +648,6 @@ def run_supervisor(dry_run=False):
     next_id = 1
     svr_conn = None
     svr_cursor = None
-    poll_counter = 0
 
     def ensure_svr_db():
         nonlocal svr_conn, svr_cursor
@@ -842,17 +705,6 @@ def run_supervisor(dry_run=False):
                 log('SVR', f'Stopping W-{wid}...')
                 stop_evt.set()
 
-            # Periodic purge (supervisor handles this, not workers)
-            poll_counter += 1
-            if cfg['purge_every_n'] > 0 and poll_counter % cfg['purge_every_n'] == 0:
-                try:
-                    purged = purge_completed_staging(svr_cursor, svr_conn, cfg['purge_min_age'])
-                    if purged > 0:
-                        log('SVR', f'Purged {purged} completed staging rows')
-                except Exception as e:
-                    log('SVR', f'Purge error: {e}')
-                    svr_conn = None  # Force reconnect
-
             time.sleep(cfg['supervisor_poll'])
 
     except KeyboardInterrupt:
@@ -880,7 +732,7 @@ def run_supervisor(dry_run=False):
 
 
 # =============================================================================
-# Single-run mode (unchanged)
+# Single-run mode
 # =============================================================================
 
 def run_once(batch_size=100, dry_run=False):
@@ -906,24 +758,13 @@ def run_once(batch_size=100, dry_run=False):
         while True:
             summary = processor.process_batch(batch_size)
 
-            if summary['processed'] == 0:
+            if summary['processed'] == 0 and summary['errors'] == 0:
                 break
 
             total_processed += summary['processed']
             total_decoded += summary['decoded_count']
             total_detailed += summary['detailed_count']
             total_errors += summary['errors']
-
-        # Purge all completed staging rows
-        if not dry_run:
-            total_purged = 0
-            while True:
-                purged = purge_completed_staging(processor.cursor, conn, min_age_seconds=0)
-                total_purged += purged
-                if purged < 1000:
-                    break
-            if total_purged > 0:
-                log('ONCE', f'Purged {total_purged} completed staging rows')
 
         log('ONCE', f"Total processed: {total_processed} "
               f"(decoded={total_decoded}, detailed={total_detailed}, errors={total_errors})")
