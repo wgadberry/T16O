@@ -56,7 +56,6 @@ from t16o_exchange.guide.common.config import (
 _rmq                = get_rabbitmq_config()
 _queues             = get_queue_names('aggregator')
 _enricher_queues    = get_queue_names('enricher')
-_producer_queues    = get_queue_names('producer')
 _retry              = get_retry_config()
 
 RABBITMQ_HOST       = _rmq['host']
@@ -72,12 +71,7 @@ RESPONSE_QUEUE      = _queues['response']
 DLQ_QUEUE           = _queues['dlq']
 ENRICHER_REQUEST_QUEUE = _enricher_queues['request']
 ENRICHER_DLQ_QUEUE     = _enricher_queues['dlq']
-PRODUCER_REQUEST_QUEUE = _producer_queues['request']
-PRODUCER_DLQ_QUEUE     = _producer_queues['dlq']
 DB_CONFIG           = get_db_config()
-
-# Auto-prime defaults
-DEFAULT_PRIME_SIG_CNT = 20
 
 # Config table keys
 CONFIG_TYPE_SYNC = 'sync'
@@ -154,10 +148,6 @@ def rmq_connect():
                      arguments={'x-max-priority': 10,
                                 'x-dead-letter-exchange': '',
                                 'x-dead-letter-routing-key': ENRICHER_DLQ_QUEUE})
-    ch.queue_declare(queue=PRODUCER_REQUEST_QUEUE, durable=True,
-                     arguments={'x-max-priority': 10,
-                                'x-dead-letter-exchange': '',
-                                'x-dead-letter-routing-key': PRODUCER_DLQ_QUEUE})
     return conn, ch
 
 
@@ -456,68 +446,6 @@ def backfill_pool_labels(tag, cursor, conn):
 
 
 # =============================================================================
-# Auto-prime: trigger producer for unprimed tokens with new guide edges
-# =============================================================================
-
-def prime_new_tokens(tag, cursor, conn, ch, pre_guide_max_id, post_guide_max_id, prime_sig_cnt):
-    """Find tokens with primed=0 that gained tx_guide edges in this sync pass.
-    Publishes prime requests to the producer queue and marks them primed=1.
-    Returns count of tokens primed. Never raises — logs errors and returns 0."""
-    if pre_guide_max_id >= post_guide_max_id or prime_sig_cnt <= 0:
-        return 0
-
-    try:
-        # Find distinct unprimed tokens in the new edge range
-        cursor.execute("""
-            SELECT DISTINCT t.id AS token_id, a.address AS mint_address
-            FROM tx_guide g
-            JOIN tx_token t ON t.id = g.token_id
-            JOIN tx_address a ON a.id = t.mint_address_id
-            WHERE g.id > %s AND g.id <= %s
-              AND t.primed = 0
-        """, (pre_guide_max_id, post_guide_max_id))
-        rows = cursor.fetchall()
-    except Exception as e:
-        log(tag, f"[prime] Query error (non-fatal): {e}")
-        return 0
-
-    if not rows:
-        return 0
-
-    # Batch all mints into a single prime message
-    token_ids = [row['token_id'] for row in rows]
-    mint_addresses = [row['mint_address'] for row in rows]
-
-    try:
-        msg = json.dumps({
-            'request_id': f"agg-prime-{uuid.uuid4().hex[:12]}",
-            'action': 'prime',
-            'priority': 1,
-            'batch': {
-                'filters': {'addresses': mint_addresses},
-                'prime_sig_cnt': prime_sig_cnt,
-            },
-        })
-        ch.basic_publish(
-            exchange='', routing_key=PRODUCER_REQUEST_QUEUE,
-            body=msg.encode('utf-8'),
-            properties=pika.BasicProperties(
-                delivery_mode=2, content_type='application/json', priority=1))
-
-        # Mark all as primed in one pass
-        placeholders = ','.join(['%s'] * len(token_ids))
-        cursor.execute(f"UPDATE tx_token SET primed = 1 WHERE id IN ({placeholders})", token_ids)
-        conn.commit()
-
-        log(tag, f"[prime] {len(mint_addresses)} tokens queued in 1 message ({prime_sig_cnt} sigs each)")
-        return len(mint_addresses)
-
-    except Exception as e:
-        log(tag, f"[prime] Publish error (non-fatal): {e}")
-        return 0
-
-
-# =============================================================================
 # Combined sync (used by both worker and manual modes)
 # =============================================================================
 
@@ -528,11 +456,7 @@ def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay,
         'guide': {'batches': 0, 'edges': 0, 'pending': 0},
         'tokens': {'last_id': 0, 'new_id': 0, 'rows': 0},
         'pool_backfill': 0,
-        'primed': 0,
     }
-
-    # Capture watermark before guide sync for prime eligibility
-    pre_guide_max_id = get_max_guide_id(cursor)
 
     if 'guide' in operations:
         cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0")
@@ -567,14 +491,6 @@ def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay,
 
     # Backfill pool labels that enricher has populated since guide_loader ran
     stats['pool_backfill'] = backfill_pool_labels(tag, cursor, conn)
-
-    # Auto-prime: publish prime requests for unprimed tokens with new edges
-    if rmq_channel and stats['guide']['edges'] > 0:
-        prime_sig_cnt = get_config_int(cursor, 'batch', 'aggregator_prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
-        if prime_sig_cnt > 0:
-            stats['primed'] = prime_new_tokens(
-                tag, cursor, conn, rmq_channel,
-                pre_guide_max_id, max_id, prime_sig_cnt)
 
     return stats
 
@@ -712,7 +628,6 @@ class WorkerThread(threading.Thread):
                 'guide_edges': stats['guide']['edges'],
                 'token_rows': stats['tokens']['rows'],
                 'pool_backfill': stats['pool_backfill'],
-                'primed': stats.get('primed', 0),
             }
 
             update_worker_request(cursor, db_conn, worker_log_id, 'completed', result)

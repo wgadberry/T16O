@@ -34,11 +34,13 @@ Manual modes (run directly, not as service):
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 import threading
+import uuid
 import requests
 import pika
 import mysql.connector
@@ -61,6 +63,8 @@ _solscan            = get_solscan_config()
 _rmq                = get_rabbitmq_config()
 _queues             = get_queue_names('enricher')
 _producer_queues    = get_queue_names('producer')
+_decoder_queues     = get_queue_names('decoder')
+_detailer_queues    = get_queue_names('detailer')
 _retry              = get_retry_config()
 
 SOLSCAN_API_BASE    = _solscan['api_base']
@@ -78,7 +82,9 @@ RESPONSE_QUEUE      = _queues['response']
 DLQ_QUEUE           = _queues['dlq']
 DB_CONFIG           = get_db_config()
 PRODUCER_REQUEST_QUEUE = _producer_queues['request']
-DEFAULT_PRIME_SIG_CNT  = 20
+DECODER_REQUEST_QUEUE  = _decoder_queues['request']
+DETAILER_REQUEST_QUEUE = _detailer_queues['request']
+PRIME_BATCH_SIZE       = 20
 
 MULTI_META_BATCH_SIZE = 50
 
@@ -200,7 +206,6 @@ def update_worker_request(cursor, conn, log_id, status, result=None):
 
 
 def log_daemon_request(cursor, conn, action, batch_size):
-    import uuid
     request_id = f"daemon-enricher-{uuid.uuid4().hex[:12]}"
     cursor.execute(
         "INSERT INTO tx_request_log "
@@ -344,41 +349,156 @@ def ensure_token(cursor, conn, mint_address):
 
 
 # =============================================================================
-# Auto-Prime: trigger producer for new mints with no history
+# Auto-Prime: load originating tx for unprimed tokens via Solscan token/meta
 # =============================================================================
 
-def check_already_primed(cursor, token_id):
-    """Return True if this token has already been primed."""
-    cursor.execute(
-        "SELECT primed FROM tx_token WHERE id = %s", (token_id,))
-    row = cursor.fetchone()
-    return row is not None and row.get('primed', 0) == 1
+def compute_sig_hash(signatures: list) -> str:
+    sorted_sigs = '|'.join(sorted(signatures))
+    return hashlib.sha256(sorted_sigs.encode()).hexdigest()
 
 
-def mark_as_primed(cursor, conn, token_id):
-    """Flag token as primed so it won't be re-primed."""
-    cursor.execute(
-        "UPDATE tx_token SET primed = 1 WHERE id = %s", (token_id,))
-    conn.commit()
+def publish_cascade_to_workers(ch, signatures, request_id=None, correlation_id=None):
+    """Cascade signatures directly to decoder + detailer queues.
+    Returns True on success."""
+    if not signatures:
+        return False
+    if not request_id:
+        request_id = f"enricher-prime-{uuid.uuid4().hex[:12]}"
+    if not correlation_id:
+        correlation_id = request_id
 
-
-def publish_prime_request(ch, mint_address, prime_sig_cnt):
-    """Publish a prime request to the producer queue (fire-and-forget)."""
-    import uuid
+    sig_hash = compute_sig_hash(signatures)
     msg = json.dumps({
-        'request_id': f"enricher-prime-{uuid.uuid4().hex[:12]}",
-        'action': 'prime',
+        'request_id': request_id,
+        'correlation_id': correlation_id,
+        'sig_hash': sig_hash,
+        'action': 'cascade',
+        'source_worker': 'enricher-prime',
+        'tx_origin': 3,
         'priority': 1,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'batch': {
-            'filters': {'mint_address': mint_address},
-            'prime_sig_cnt': prime_sig_cnt,
+            'signatures': signatures,
+            'batch_num': 1,
+            'total_batches': 1,
         },
     })
-    ch.basic_publish(
-        exchange='', routing_key=PRODUCER_REQUEST_QUEUE,
-        body=msg.encode('utf-8'),
-        properties=pika.BasicProperties(
-            delivery_mode=2, content_type='application/json', priority=1))
+    body = msg.encode('utf-8')
+    props = pika.BasicProperties(delivery_mode=2, content_type='application/json', priority=1)
+    try:
+        ch.basic_publish(exchange='', routing_key=DECODER_REQUEST_QUEUE, body=body, properties=props)
+        ch.basic_publish(exchange='', routing_key=DETAILER_REQUEST_QUEUE, body=body, properties=props)
+        return True
+    except Exception:
+        return False
+
+
+def prime_unprimed_tokens(tag, session, cursor, conn, ch, api_timeout):
+    """Find unprimed tokens, fetch create_tx from Solscan, cascade to decoder+detailer.
+    Returns count of tokens primed. Never raises."""
+    try:
+        cursor.execute("""
+            SELECT t.id AS token_id, a.address AS mint_address, t.token_json
+            FROM tx_token t
+            JOIN tx_address a ON a.id = t.mint_address_id
+            WHERE t.primed = 0
+            ORDER BY t.id
+            LIMIT %s
+        """, (PRIME_BATCH_SIZE,))
+        rows = cursor.fetchall()
+    except Exception as e:
+        log(tag, f"[prime] Query error: {e}")
+        return 0
+
+    if not rows:
+        return 0
+
+    log(tag, f"[prime] {len(rows)} unprimed tokens")
+
+    # Split into tokens that already have token_json (with create_tx) vs need API call
+    need_api = []
+    have_sig = []
+    for row in rows:
+        token_json = row.get('token_json')
+        if token_json:
+            try:
+                meta = json.loads(token_json) if isinstance(token_json, str) else token_json
+                sig = meta.get('create_tx') or meta.get('first_mint_tx')
+                if sig:
+                    have_sig.append((row['token_id'], row['mint_address'], sig))
+                    continue
+            except (json.JSONDecodeError, TypeError):
+                pass
+        need_api.append(row)
+
+    # Fetch metadata for tokens without cached create_tx
+    if need_api:
+        mint_addresses = [r['mint_address'] for r in need_api]
+        mint_to_row = {r['mint_address']: r for r in need_api}
+        log(tag, f"[prime] Calling Solscan token/meta/multi for {len(mint_addresses)} tokens")
+
+        results = fetch_token_meta_multi(session, mint_addresses, api_timeout)
+
+        for mint, meta in results.items():
+            sig = meta.get('create_tx') or meta.get('first_mint_tx')
+            if sig and mint in mint_to_row:
+                have_sig.append((mint_to_row[mint]['token_id'], mint, sig))
+
+                # Cache the token_json for future use
+                try:
+                    cursor.execute(
+                        "UPDATE tx_token SET token_json = COALESCE(token_json, %s) WHERE id = %s",
+                        (json.dumps(meta), mint_to_row[mint]['token_id']))
+                    conn.commit()
+                except Exception:
+                    pass
+
+    if not have_sig:
+        # Mark all as primed even without sigs (no create_tx available)
+        token_ids = [r['token_id'] for r in rows]
+        placeholders = ','.join(['%s'] * len(token_ids))
+        try:
+            cursor.execute(f"UPDATE tx_token SET primed = 1 WHERE id IN ({placeholders})", token_ids)
+            conn.commit()
+        except Exception:
+            pass
+        log(tag, f"[prime] No create_tx found for any of {len(rows)} tokens, marked primed")
+        return 0
+
+    # Filter out signatures that already exist in tx table
+    sigs = [s for _, _, s in have_sig]
+    try:
+        placeholders = ','.join(['%s'] * len(sigs))
+        cursor.execute(f"SELECT signature FROM tx WHERE signature IN ({placeholders})", sigs)
+        existing = {r['signature'] for r in cursor.fetchall()}
+    except Exception:
+        existing = set()
+
+    new_sigs = [(tid, mint, sig) for tid, mint, sig in have_sig if sig not in existing]
+    skipped = len(have_sig) - len(new_sigs)
+    if skipped:
+        log(tag, f"[prime] {skipped} signatures already in DB, skipping")
+
+    # Cascade new signatures to decoder + detailer
+    if new_sigs:
+        sig_list = [sig for _, _, sig in new_sigs]
+        request_id = f"enricher-prime-{uuid.uuid4().hex[:12]}"
+        if publish_cascade_to_workers(ch, sig_list, request_id=request_id):
+            log(tag, f"[prime] Cascaded {len(sig_list)} create_tx sigs to decoder+detailer")
+        else:
+            log(tag, f"[prime] Failed to cascade signatures")
+
+    # Mark all processed tokens as primed
+    all_token_ids = [r['token_id'] for r in rows]
+    placeholders = ','.join(['%s'] * len(all_token_ids))
+    try:
+        cursor.execute(f"UPDATE tx_token SET primed = 1 WHERE id IN ({placeholders})", all_token_ids)
+        conn.commit()
+    except Exception as e:
+        log(tag, f"[prime] Failed to mark primed: {e}")
+
+    log(tag, f"[prime] {len(all_token_ids)} tokens marked primed, {len(new_sigs)} new sigs cascaded")
+    return len(new_sigs)
 
 
 # =============================================================================
@@ -427,7 +547,7 @@ def claim_batch(cursor, conn, table, where_clause, where_params,
 # =============================================================================
 
 def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, api_timeout,
-                   rmq_channel=None, prime_sig_cnt=0):
+                   rmq_channel=None, prime_enabled=False):
     stats = {'processed': 0, 'updated': 0, 'failed': 0, 'backfill_updated': 0, 'primed': 0}
 
     # Phase 0: Local backfill from tx_address labels
@@ -547,17 +667,6 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                         conn.commit()
                         log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec) [{token_type or '?'}]")
                         stats['updated'] += 1
-
-                        # Auto-prime: trigger producer for new mints (once only)
-                        if rmq_channel and prime_sig_cnt > 0:
-                            try:
-                                if not check_already_primed(cursor, token_id):
-                                    publish_prime_request(rmq_channel, mint, prime_sig_cnt)
-                                    mark_as_primed(cursor, conn, token_id)
-                                    log(tag, f"    PRIME: {mint[:16]}... queued ({prime_sig_cnt} sigs)")
-                                    stats['primed'] += 1
-                            except Exception as e:
-                                log(tag, f"    PRIME error: {e}")
                     else:
                         stats['failed'] += 1
                 else:
@@ -572,6 +681,14 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
 
         if api_delay > 0 and chunk_start + MULTI_META_BATCH_SIZE < len(tokens):
             time.sleep(api_delay)
+
+    # Auto-prime: fetch create_tx for unprimed tokens and cascade to decoder+detailer
+    if rmq_channel and prime_enabled:
+        try:
+            primed = prime_unprimed_tokens(tag, session, cursor, conn, rmq_channel, api_timeout)
+            stats['primed'] = primed
+        except Exception as e:
+            log(tag, f"[prime] Error (non-fatal): {e}")
 
     return stats
 
@@ -977,7 +1094,6 @@ class WorkerThread(threading.Thread):
     def _handle_message(self, ch, method, properties, body, cursor, db_conn, session):
         worker_log_id = None
         try:
-            import uuid
             msg = json.loads(body.decode('utf-8'))
             request_id     = msg.get('request_id', str(uuid.uuid4()))
             correlation_id = msg.get('correlation_id', request_id)
@@ -998,7 +1114,7 @@ class WorkerThread(threading.Thread):
             limit = batch.get('limit', self.batch_limit)
             max_attempts = batch.get('max_attempts', self.max_attempts)
             delay = batch.get('delay', self.api_delay_sec)
-            prime_sig_cnt = get_config_int(cursor, 'batch', 'enricher_prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
+            prime_enabled = get_config_int(cursor, 'batch', 'enricher_prime_enabled', 1) > 0
 
             log(self.tag, f"Request {request_id[:8]} (action={action}, ops={operations})")
 
@@ -1011,7 +1127,7 @@ class WorkerThread(threading.Thread):
 
             if 'tokens' in operations:
                 s = enrich_tokens(self.tag, session, cursor, db_conn, limit, max_attempts, delay, self.api_timeout_sec,
-                                  rmq_channel=ch, prime_sig_cnt=prime_sig_cnt)
+                                  rmq_channel=ch, prime_enabled=prime_enabled)
                 total_updated += s.get('updated', 0)
                 all_stats['tokens'] = s
 
@@ -1050,7 +1166,7 @@ class WorkerThread(threading.Thread):
         """Handle supervisor-scheduled enrichment pass — loops until all types drained."""
         grand_total = 0
         pass_num = 0
-        prime_sig_cnt = get_config_int(cursor, 'batch', 'enricher_prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
+        prime_enabled = get_config_int(cursor, 'batch', 'enricher_prime_enabled', 1) > 0
 
         while not self.stop_event.is_set():
             pass_num += 1
@@ -1060,7 +1176,7 @@ class WorkerThread(threading.Thread):
             s = enrich_tokens(self.tag, session, cursor, db_conn,
                               self.batch_limit, self.max_attempts,
                               self.api_delay_sec, self.api_timeout_sec,
-                              rmq_channel=ch, prime_sig_cnt=prime_sig_cnt)
+                              rmq_channel=ch, prime_enabled=prime_enabled)
             pass_updated += s.get('updated', 0) + s.get('backfill_updated', 0)
             all_stats['tokens'] = s
 
@@ -1178,7 +1294,6 @@ def run_supervisor(dry_run=False):
             return False
 
     def publish_db_poll():
-        import uuid
         # Skip if queue already has pending messages (workers loop until drained)
         result = svr_rmq_ch.queue_declare(queue=REQUEST_QUEUE, passive=True)
         if result.method.message_count > 0:
