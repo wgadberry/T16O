@@ -367,11 +367,9 @@ def publish_cascade_to_workers(ch, signatures, request_id=None, correlation_id=N
     if not correlation_id:
         correlation_id = request_id
 
-    sig_hash = compute_sig_hash(signatures)
     msg = json.dumps({
         'request_id': request_id,
         'correlation_id': correlation_id,
-        'sig_hash': sig_hash,
         'action': 'cascade',
         'source_worker': 'enricher-prime',
         'tx_origin': 3,
