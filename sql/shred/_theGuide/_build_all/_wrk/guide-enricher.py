@@ -759,24 +759,39 @@ def enrich_pools(tag, session, cursor, conn, limit, max_attempts, api_delay, api
     stats = {'processed': 0, 'updated': 0, 'labels': 0, 'not_found': 0,
              'failed': 0, 'backfill_created': 0, 'backfill_updated': 0}
 
-    # Phase 0: Local backfill
+    # Phase 0: Local backfill (skip if no work)
     try:
-        cursor.execute("CALL sp_tx_pool_backfill(@created, @updated, @accounts)")
-        try:
-            while cursor.nextset():
+        cursor.execute("""
+            SELECT EXISTS(
+                SELECT 1 FROM tx_address a
+                LEFT JOIN tx_pool p ON p.pool_address_id = a.id
+                WHERE a.address_type IN ('pool','lp_token') AND p.id IS NULL
+                LIMIT 1
+            ) OR EXISTS(
+                SELECT 1 FROM tx_pool
+                WHERE token1_id IS NULL OR pool_label IS NULL
+                LIMIT 1
+            ) AS needs_work
+        """)
+        needs_work = cursor.fetchone()
+        needs_work = (needs_work.get('needs_work', 0) if isinstance(needs_work, dict) else (needs_work[0] if needs_work else 0))
+        if needs_work:
+            cursor.execute("CALL sp_tx_pool_backfill(@created, @updated, @accounts)")
+            try:
+                while cursor.nextset():
+                    pass
+            except:
                 pass
-        except:
-            pass
-        cursor.execute("SELECT @created, @updated, @accounts")
-        row = cursor.fetchone()
-        if isinstance(row, dict):
-            bf_c, bf_u, bf_a = row.get('@created', 0), row.get('@updated', 0), row.get('@accounts', 0)
-        else:
-            bf_c, bf_u, bf_a = (row[0] or 0, row[1] or 0, row[2] or 0) if row else (0, 0, 0)
-        stats['backfill_created'] = bf_c
-        stats['backfill_updated'] = bf_u
-        if bf_c or bf_u or bf_a:
-            log(tag, f"[pools] Phase 0: backfill created={bf_c}, updated={bf_u}, accounts={bf_a}")
+            cursor.execute("SELECT @created, @updated, @accounts")
+            row = cursor.fetchone()
+            if isinstance(row, dict):
+                bf_c, bf_u, bf_a = row.get('@created', 0), row.get('@updated', 0), row.get('@accounts', 0)
+            else:
+                bf_c, bf_u, bf_a = (row[0] or 0, row[1] or 0, row[2] or 0) if row else (0, 0, 0)
+            stats['backfill_created'] = bf_c
+            stats['backfill_updated'] = bf_u
+            if bf_c or bf_u or bf_a:
+                log(tag, f"[pools] Phase 0: backfill created={bf_c}, updated={bf_u}, accounts={bf_a}")
     except Exception as e:
         log(tag, f"[pools] Phase 0: backfill error: {e}")
 

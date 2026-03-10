@@ -428,6 +428,22 @@ def sync_token_participants(tag, cursor, conn, last_id, max_id, batch_size,
 def backfill_pool_labels(tag, cursor, conn):
     """Backfill tx_guide.pool_label from tx_pool where enricher has since populated it."""
     try:
+        # Quick check: any guide edges missing pool_label that tx_pool can fill?
+        cursor.execute("""
+            SELECT EXISTS(
+                SELECT 1 FROM tx_guide g
+                JOIN tx_pool p ON p.pool_address_id = g.pool_address_id
+                WHERE g.pool_address_id IS NOT NULL
+                  AND (g.pool_label IS NULL OR g.pool_label = '')
+                  AND p.pool_label IS NOT NULL AND p.pool_label != ''
+                LIMIT 1
+            ) AS needs_work
+        """)
+        row = cursor.fetchone()
+        needs_work = row.get('needs_work', 0) if isinstance(row, dict) else (row[0] if row else 0)
+        if not needs_work:
+            return 0
+
         cursor.execute("CALL sp_tx_guide_backfill_pool(@updated)")
         try:
             while cursor.nextset():
