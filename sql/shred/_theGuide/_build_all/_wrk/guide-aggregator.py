@@ -461,20 +461,24 @@ def backfill_pool_labels(tag, cursor, conn):
 def prime_new_tokens(tag, cursor, conn, ch, pre_guide_max_id, post_guide_max_id, prime_sig_cnt):
     """Find tokens with primed=0 that gained tx_guide edges in this sync pass.
     Publishes prime requests to the producer queue and marks them primed=1.
-    Returns count of tokens primed."""
+    Returns count of tokens primed. Never raises — logs errors and returns 0."""
     if pre_guide_max_id >= post_guide_max_id or prime_sig_cnt <= 0:
         return 0
 
-    # Find distinct unprimed tokens in the new edge range
-    cursor.execute("""
-        SELECT DISTINCT t.id AS token_id, a.address AS mint_address
-        FROM tx_guide g
-        JOIN tx_token t ON t.id = g.token_id
-        JOIN tx_address a ON a.id = t.mint_address_id
-        WHERE g.id > %s AND g.id <= %s
-          AND t.primed = 0
-    """, (pre_guide_max_id, post_guide_max_id))
-    rows = cursor.fetchall()
+    try:
+        # Find distinct unprimed tokens in the new edge range
+        cursor.execute("""
+            SELECT DISTINCT t.id AS token_id, a.address AS mint_address
+            FROM tx_guide g
+            JOIN tx_token t ON t.id = g.token_id
+            JOIN tx_address a ON a.id = t.mint_address_id
+            WHERE g.id > %s AND g.id <= %s
+              AND t.primed = 0
+        """, (pre_guide_max_id, post_guide_max_id))
+        rows = cursor.fetchall()
+    except Exception as e:
+        log(tag, f"[prime] Query error (non-fatal): {e}")
+        return 0
 
     if not rows:
         return 0
