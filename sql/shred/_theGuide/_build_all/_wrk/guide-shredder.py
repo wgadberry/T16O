@@ -384,10 +384,10 @@ class ShredderProcessor:
             WHERE tx_state IN (%s, %s)
               AND sig_hash IS NOT NULL
             GROUP BY sig_hash
-            HAVING SUM(tx_state) = 24
+            HAVING SUM(tx_state = %s) > 0 AND SUM(tx_state = %s) > 0
             ORDER BY MAX(priority) DESC
             LIMIT %s
-        """, (decoded_state, detailed_state, limit // 2))
+        """, (decoded_state, detailed_state, decoded_state, detailed_state, limit // 2))
         pair_hashes = [row['sig_hash'] for row in self.cursor.fetchall()]
 
         # Step 2: Claim both decoded and detailed rows for complete pairs
@@ -463,6 +463,9 @@ class ShredderProcessor:
         # Restore original tx_state so process_staging_row knows decoded vs detailed
         for row in rows:
             row['tx_state'] = original_states[row['id']]
+
+        # Sort so decoded (8) always processes before detailed (16) within each sig_hash
+        rows.sort(key=lambda r: (r.get('sig_hash') or '', r['tx_state'], r['id']))
 
         return rows
 
