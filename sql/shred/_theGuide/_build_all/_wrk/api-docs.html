@@ -121,6 +121,12 @@
                 "description": "Solana addresses to fetch signatures for",
                 "example": ["LegiuxbrPh7SKEpnTN1nB2AjtrmSGP7XJtYZV4spump"]
               },
+              "mint_addresses": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Array of mint addresses for batch prime mode (action='prime'). Alternative to single mint_address.",
+                "example": ["So11111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+              },
               "before": {
                 "oneOf": [
                   { "type": "string", "description": "Legacy: signature string" },
@@ -688,6 +694,21 @@
                         "mint_address": "J2UXqJ1HYRwjCviLEqkY9mhoEPJ5UnoHEnbeijCweREV"
                       },
                       "prime_sig_cnt": 50
+                    }
+                  }
+                },
+                "primeBatchMints": {
+                  "summary": "Prime multiple mints in a single request",
+                  "value": {
+                    "action": "prime",
+                    "batch": {
+                      "filters": {
+                        "mint_addresses": [
+                          "So11111111111111111111111111111112",
+                          "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                        ]
+                      },
+                      "prime_sig_cnt": 20
                     }
                   }
                 }
