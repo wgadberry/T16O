@@ -346,16 +346,13 @@ class ShredderProcessor:
     def fetch_pending_staging_rows(self, limit=50):
         """
         Claim and fetch staging rows that need processing.
-        Uses SELECT ... FOR UPDATE SKIP LOCKED for exclusive row claiming —
-        no two workers will ever claim the same row.
+        Uses atomic UPDATE to claim rows, avoiding locks that block INSERTs.
 
         Priority order:
-        1. Complete pairs (decoded + detailed for same sig_hash) — processed together
-        2. Unpaired decoded rows with NULL sig_hash (no pair expected)
-        3. Unpaired detailed rows with NULL sig_hash (no pair expected)
+        1. Complete pairs (decoded + detailed ready, SUM=24) - prevents starvation
+        2. Standalone decoded rows
+        3. Standalone detailed rows (where tx exists)
 
-        Rows with a sig_hash wait until their pair arrives — no wasted cycles
-        processing half-pairs that will just fail.
         Within each category, ordered by priority DESC.
         Decoded is always processed before detailed for the same sig_hash.
         """
@@ -372,125 +369,94 @@ class ShredderProcessor:
             """, (decoded_state, detailed_state, limit))
             return self.cursor.fetchall()
 
-        # Single atomic claim: SELECT FOR UPDATE SKIP LOCKED → UPDATE by collected IDs.
-        # Workers that arrive concurrently skip rows already locked by other workers.
-        claimed_ids = []
-        original_states = {}  # id -> original tx_state for the fetch result
+        claimed_count = 0
 
-        # Step 1: Find sig_hashes that have complete pairs (decoded + detailed)
+        # Step 1: Find complete pairs (SUM(tx_state) = 24) ordered by priority
         self.cursor.execute(f"""
-            SELECT sig_hash
+            SELECT sig_hash, MAX(priority) as max_priority
             FROM {STAGING_SCHEMA}.{STAGING_TABLE}
             WHERE tx_state IN (%s, %s)
               AND sig_hash IS NOT NULL
             GROUP BY sig_hash
-            HAVING SUM(tx_state = %s) > 0 AND SUM(tx_state = %s) > 0
-            ORDER BY MAX(priority) DESC
+            HAVING SUM(tx_state) = 24
+            ORDER BY max_priority DESC
             LIMIT %s
-        """, (decoded_state, detailed_state, decoded_state, detailed_state, limit // 2))
-        pair_hashes = [row['sig_hash'] for row in self.cursor.fetchall()]
+        """, (decoded_state, detailed_state, limit // 2))
 
-        # Step 2: Claim both decoded and detailed rows for complete pairs
-        if pair_hashes:
-            placeholders = ','.join(['%s'] * len(pair_hashes))
-            self.cursor.execute(f"""
-                SELECT id, tx_state
-                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-                WHERE tx_state IN (%s, %s)
-                  AND sig_hash IN ({placeholders})
-                FOR UPDATE SKIP LOCKED
-            """, (decoded_state, detailed_state, *pair_hashes))
-            for row in self.cursor.fetchall():
-                claimed_ids.append(row['id'])
-                original_states[row['id']] = row['tx_state']
+        complete_pairs = [row['sig_hash'] for row in self.cursor.fetchall()]
 
-        # Step 3: Claim unpaired decoded rows with no sig_hash (no pair expected)
-        remaining = limit - len(claimed_ids)
-        if remaining > 0:
+        # Step 2: Claim both decoded and detailed for complete pairs
+        if complete_pairs:
+            placeholders = ','.join(['%s'] * len(complete_pairs))
+
             self.cursor.execute(f"""
-                SELECT id
-                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 1,
+                    tx_state = {TX_STATE_PROCESSING}
                 WHERE tx_state = %s
-                  AND sig_hash IS NULL
+                  AND sig_hash IN ({placeholders})
+            """, (decoded_state, *complete_pairs))
+            decoded_from_pairs = self.cursor.rowcount
+
+            self.cursor.execute(f"""
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 2,
+                    tx_state = {TX_STATE_PROCESSING}
+                WHERE tx_state = %s
+                  AND sig_hash IN ({placeholders})
+                  AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
+            """, (detailed_state, *complete_pairs))
+            detailed_from_pairs = self.cursor.rowcount
+
+            claimed_count = decoded_from_pairs + detailed_from_pairs
+            self.db_conn.commit()
+
+        # Step 3: Claim standalone decoded rows (remaining slots)
+        remaining_slots = limit - claimed_count
+        if remaining_slots > 0:
+            self.cursor.execute(f"""
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 1,
+                    tx_state = {TX_STATE_PROCESSING}
+                WHERE tx_state = %s
                 ORDER BY priority DESC, created_utc ASC
                 LIMIT %s
-                FOR UPDATE SKIP LOCKED
-            """, (decoded_state, remaining))
-            for row in self.cursor.fetchall():
-                claimed_ids.append(row['id'])
-                original_states[row['id']] = decoded_state
+            """, (decoded_state, remaining_slots))
+            claimed_count += self.cursor.rowcount
+            self.db_conn.commit()
 
-        # Step 4: Claim unpaired detailed rows with no sig_hash (no pair expected)
-        remaining = limit - len(claimed_ids)
-        if remaining > 0:
+        # Step 4: Claim standalone detailed rows (remaining slots)
+        remaining_slots = limit - claimed_count
+        if remaining_slots > 0:
             self.cursor.execute(f"""
-                SELECT id
-                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
+                UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
+                SET priority = priority * 10 + 2,
+                    tx_state = {TX_STATE_PROCESSING}
                 WHERE tx_state = %s
-                  AND sig_hash IS NULL
                   AND attempt_cnt < {MAX_DETAILED_ATTEMPTS}
                 ORDER BY priority DESC, created_utc ASC
                 LIMIT %s
-                FOR UPDATE SKIP LOCKED
-            """, (detailed_state, remaining))
-            for row in self.cursor.fetchall():
-                claimed_ids.append(row['id'])
-                original_states[row['id']] = detailed_state
+            """, (detailed_state, remaining_slots))
+            claimed_count += self.cursor.rowcount
+            self.db_conn.commit()
 
-        # Step 5: Claim orphaned sig_hash rows older than 5 min (partner never arrived)
-        remaining = limit - len(claimed_ids)
-        if remaining > 0:
-            self.cursor.execute(f"""
-                SELECT id, tx_state
-                FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-                WHERE tx_state IN (%s, %s)
-                  AND sig_hash IS NOT NULL
-                  AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 300 SECOND)
-                  AND sig_hash NOT IN (
-                      SELECT sig_hash FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-                      WHERE sig_hash IS NOT NULL
-                      GROUP BY sig_hash
-                      HAVING SUM(tx_state = %s) > 0 AND SUM(tx_state = %s) > 0
-                  )
-                ORDER BY created_utc ASC
-                LIMIT %s
-                FOR UPDATE SKIP LOCKED
-            """, (decoded_state, detailed_state, decoded_state, detailed_state, remaining))
-            for row in self.cursor.fetchall():
-                claimed_ids.append(row['id'])
-                original_states[row['id']] = row['tx_state']
-
-        if not claimed_ids:
-            self.db_conn.commit()  # Release any implicit locks
+        if claimed_count == 0:
             return []
 
-        # Mark claimed rows as processing
-        placeholders = ','.join(['%s'] * len(claimed_ids))
+        # Step 5: Fetch claimed rows, ordered so decoded comes before detailed per sig_hash
         self.cursor.execute(f"""
-            UPDATE {STAGING_SCHEMA}.{STAGING_TABLE}
-            SET tx_state = {TX_STATE_PROCESSING}
-            WHERE id IN ({placeholders})
-        """, claimed_ids)
-        self.db_conn.commit()
-
-        # Fetch full row data for only our claimed IDs
-        # Order by sig_hash then tx_state so decoded processes before detailed
-        self.cursor.execute(f"""
-            SELECT id, priority, created_utc, correlation_id, sig_hash
+            SELECT id,
+                   IF(priority MOD 10 = 1, %s, %s) as tx_state,
+                   (priority DIV 10) as priority,
+                   created_utc,
+                   correlation_id,
+                   sig_hash
             FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-            WHERE id IN ({placeholders})
-            ORDER BY sig_hash, id ASC
-        """, claimed_ids)
+            WHERE tx_state = {TX_STATE_PROCESSING}
+            ORDER BY sig_hash, (priority MOD 10) ASC
+        """, (decoded_state, detailed_state))
 
-        rows = self.cursor.fetchall()
-        # Restore original tx_state so process_staging_row knows decoded vs detailed
-        for row in rows:
-            row['tx_state'] = original_states[row['id']]
-
-        # Sort so decoded (8) always processes before detailed (16) within each sig_hash
-        rows.sort(key=lambda r: (r.get('sig_hash') or '', r['tx_state'], r['id']))
-
-        return rows
+        return self.cursor.fetchall()
 
     def process_staging_row(self, staging_id, tx_state, priority):
         """
@@ -686,40 +652,17 @@ def purge_completed_staging(cursor, conn, min_age_seconds=60):
     Delete staging rows that have been fully processed (tx_state=shredded).
     Only deletes rows older than min_age_seconds to avoid racing with
     correlation completion checks.
-    For sig_hash rows, only purge when BOTH decode and detail are shredded
-    (prevents purging one half before the other arrives).
     Returns number of staging rows deleted.
     """
-    total_deleted = 0
-
-    # 1. Purge non-paired rows (no sig_hash) — safe to delete individually
     cursor.execute(f"""
         DELETE FROM {STAGING_SCHEMA}.{STAGING_TABLE}
         WHERE tx_state = %s
-          AND sig_hash IS NULL
           AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
         LIMIT 1000
     """, (TX_STATE_SHREDDED, min_age_seconds))
-    total_deleted += cursor.rowcount
+    deleted = cursor.rowcount
     conn.commit()
-
-    # 2. Purge paired rows — only when both halves are shredded
-    cursor.execute(f"""
-        DELETE t FROM {STAGING_SCHEMA}.{STAGING_TABLE} t
-        INNER JOIN (
-            SELECT sig_hash
-            FROM {STAGING_SCHEMA}.{STAGING_TABLE}
-            WHERE sig_hash IS NOT NULL
-              AND created_utc < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
-            GROUP BY sig_hash
-            HAVING MIN(tx_state) = %s AND MAX(tx_state) = %s
-            LIMIT 500
-        ) paired ON t.sig_hash = paired.sig_hash
-    """, (min_age_seconds, TX_STATE_SHREDDED, TX_STATE_SHREDDED))
-    total_deleted += cursor.rowcount
-    conn.commit()
-
-    return total_deleted
+    return deleted
 
 
 # =============================================================================
