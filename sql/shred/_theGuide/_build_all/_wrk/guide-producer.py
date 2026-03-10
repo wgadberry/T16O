@@ -1035,14 +1035,8 @@ def upsert_token_from_solscan(db_cursor, db_conn, mint_address: str, meta: dict)
 
 def process_prime_request(message: dict, rpc_session, gateway_channel, db_cursor, db_conn) -> dict:
     """
-    Prime mode: fetch the first N signatures for a mint from its origination.
-
-    Flow:
-    1. Resolve mint address in DB
-    2. Get first_mint_time from token_json (or Solscan API if missing)
-    3. Binary-search for signatures near origination time, fetch N oldest
-    4. Deduplicate against tx table
-    5. Cascade to decoder + detailer
+    Prime mode: fetch the first N signatures for one or more mints from origination.
+    Accepts batch.filters.mint_address (single) or batch.filters.mint_addresses (array).
     """
     request_id = message.get('request_id', 'unknown')
     correlation_id = message.get('correlation_id', request_id)
@@ -1052,15 +1046,61 @@ def process_prime_request(message: dict, rpc_session, gateway_channel, db_cursor
     priority = message.get('priority', 5)
     batch = message.get('batch', {})
     filters = batch.get('filters', {})
-    mint_address = filters.get('mint_address')
     prime_sig_cnt = batch.get('prime_sig_cnt', DEFAULT_PRIME_SIG_CNT)
 
-    if not mint_address:
-        return {'processed': 0, 'errors': 1, 'error': 'prime requires batch.filters.mint_address'}
+    # Support both single and array
+    mint_addresses = filters.get('mint_addresses', [])
+    if not mint_addresses:
+        single = filters.get('mint_address')
+        if single:
+            mint_addresses = [single]
+
+    if not mint_addresses:
+        return {'processed': 0, 'errors': 1, 'error': 'prime requires batch.filters.mint_address or mint_addresses'}
 
     if not db_cursor:
         return {'processed': 0, 'errors': 1, 'error': 'prime requires database connection'}
 
+    # Single mint — direct call (no sub-request_id needed)
+    if len(mint_addresses) == 1:
+        return _prime_single_mint(
+            message, mint_addresses[0], rpc_session, gateway_channel,
+            db_cursor, db_conn, request_id, correlation_id,
+            request_log_id, api_key_id, features, priority, prime_sig_cnt)
+
+    # Multiple mints — loop and aggregate
+    print(f"[{request_id[:8]}] PRIME mode: {len(mint_addresses)} mints, sig_cnt={prime_sig_cnt}")
+    totals = {'processed': 0, 'batches': 0, 'skipped': 0, 'errors': 0,
+              'mode': 'prime', 'mints': len(mint_addresses), 'cascade_to': []}
+
+    for idx, mint in enumerate(mint_addresses, 1):
+        sub_request_id = f"{request_id}-m{idx}" if len(request_id) + 4 <= 64 else request_id
+        result = _prime_single_mint(
+            message, mint, rpc_session, gateway_channel,
+            db_cursor, db_conn, sub_request_id, correlation_id,
+            request_log_id, api_key_id, features, priority, prime_sig_cnt)
+        totals['processed'] += result.get('processed', 0)
+        totals['batches'] += result.get('batches', 0)
+        totals['skipped'] += result.get('skipped', 0)
+        totals['errors'] += result.get('errors', 0)
+
+    print(f"[{request_id[:8]}] PRIME complete: {totals['processed']} sigs, {totals['batches']} batches, {totals['errors']} errors across {len(mint_addresses)} mints")
+    return totals
+
+
+def _prime_single_mint(message, mint_address, rpc_session, gateway_channel,
+                       db_cursor, db_conn, request_id, correlation_id,
+                       request_log_id, api_key_id, features, priority, prime_sig_cnt):
+    """
+    Prime a single mint: fetch the first N signatures from its origination.
+
+    Flow:
+    1. Resolve mint address in DB
+    2. Get first_mint_time from token_json (or Solscan API if missing)
+    3. Binary-search for signatures near origination time, fetch N oldest
+    4. Deduplicate against tx table
+    5. Cascade to decoder + detailer
+    """
     print(f"[{request_id[:8]}] PRIME mode: mint={mint_address[:20]}... sig_cnt={prime_sig_cnt}")
 
     # Step 1: Resolve mint in DB

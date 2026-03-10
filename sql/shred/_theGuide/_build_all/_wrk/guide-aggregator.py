@@ -483,36 +483,37 @@ def prime_new_tokens(tag, cursor, conn, ch, pre_guide_max_id, post_guide_max_id,
     if not rows:
         return 0
 
-    primed = 0
-    for row in rows:
-        token_id = row['token_id']
-        mint = row['mint_address']
-        try:
-            msg = json.dumps({
-                'request_id': f"agg-prime-{uuid.uuid4().hex[:12]}",
-                'action': 'prime',
-                'priority': 1,
-                'batch': {
-                    'filters': {'mint_address': mint},
-                    'prime_sig_cnt': prime_sig_cnt,
-                },
-            })
-            ch.basic_publish(
-                exchange='', routing_key=PRODUCER_REQUEST_QUEUE,
-                body=msg.encode('utf-8'),
-                properties=pika.BasicProperties(
-                    delivery_mode=2, content_type='application/json', priority=1))
+    # Batch all mints into a single prime message
+    token_ids = [row['token_id'] for row in rows]
+    mint_addresses = [row['mint_address'] for row in rows]
 
-            cursor.execute("UPDATE tx_token SET primed = 1 WHERE id = %s", (token_id,))
-            conn.commit()
-            primed += 1
-        except Exception as e:
-            log(tag, f"[prime] Error for {mint[:16]}...: {e}")
+    try:
+        msg = json.dumps({
+            'request_id': f"agg-prime-{uuid.uuid4().hex[:12]}",
+            'action': 'prime',
+            'priority': 1,
+            'batch': {
+                'filters': {'mint_addresses': mint_addresses},
+                'prime_sig_cnt': prime_sig_cnt,
+            },
+        })
+        ch.basic_publish(
+            exchange='', routing_key=PRODUCER_REQUEST_QUEUE,
+            body=msg.encode('utf-8'),
+            properties=pika.BasicProperties(
+                delivery_mode=2, content_type='application/json', priority=1))
 
-    if primed > 0:
-        log(tag, f"[prime] {primed} tokens queued for prime ({prime_sig_cnt} sigs each)")
+        # Mark all as primed in one pass
+        placeholders = ','.join(['%s'] * len(token_ids))
+        cursor.execute(f"UPDATE tx_token SET primed = 1 WHERE id IN ({placeholders})", token_ids)
+        conn.commit()
 
-    return primed
+        log(tag, f"[prime] {len(mint_addresses)} tokens queued in 1 message ({prime_sig_cnt} sigs each)")
+        return len(mint_addresses)
+
+    except Exception as e:
+        log(tag, f"[prime] Publish error (non-fatal): {e}")
+        return 0
 
 
 # =============================================================================
