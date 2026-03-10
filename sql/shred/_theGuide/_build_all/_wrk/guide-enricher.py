@@ -347,11 +347,19 @@ def ensure_token(cursor, conn, mint_address):
 # Auto-Prime: trigger producer for new mints with no history
 # =============================================================================
 
-def check_mint_has_history(cursor, token_id):
-    """Return True if this token already has any tx_guide edges."""
+def check_already_primed(cursor, token_id):
+    """Return True if this token has already been primed."""
     cursor.execute(
-        "SELECT 1 FROM tx_guide WHERE token_id = %s LIMIT 1", (token_id,))
-    return cursor.fetchone() is not None
+        "SELECT primed FROM tx_token WHERE id = %s", (token_id,))
+    row = cursor.fetchone()
+    return row is not None and row.get('primed', 0) == 1
+
+
+def mark_as_primed(cursor, conn, token_id):
+    """Flag token as primed so it won't be re-primed."""
+    cursor.execute(
+        "UPDATE tx_token SET primed = 1 WHERE id = %s", (token_id,))
+    conn.commit()
 
 
 def publish_prime_request(ch, mint_address, prime_sig_cnt):
@@ -540,11 +548,12 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
                         log(tag, f"    {mint[:16]}... {symbol or 'unnamed'} ({decimals} dec) [{token_type or '?'}]")
                         stats['updated'] += 1
 
-                        # Auto-prime: trigger producer for new mints with zero history
+                        # Auto-prime: trigger producer for new mints (once only)
                         if rmq_channel and prime_sig_cnt > 0:
                             try:
-                                if not check_mint_has_history(cursor, token_id):
+                                if not check_already_primed(cursor, token_id):
                                     publish_prime_request(rmq_channel, mint, prime_sig_cnt)
+                                    mark_as_primed(cursor, conn, token_id)
                                     log(tag, f"    PRIME: {mint[:16]}... queued ({prime_sig_cnt} sigs)")
                                     stats['primed'] += 1
                             except Exception as e:
