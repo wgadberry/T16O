@@ -52,7 +52,7 @@ from typing import Optional, Dict, List, Set
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from t16o_exchange.guide.common.config import (
     get_db_config, get_rabbitmq_config, get_solscan_config,
-    get_queue_names, get_retry_config,
+    get_queue_names, get_retry_config, nack_with_retry,
 )
 
 _solscan            = get_solscan_config()
@@ -716,7 +716,7 @@ class WorkerThread(threading.Thread):
                         rmq_conn.process_data_events(time_limit=0)
                         continue
 
-                    self._handle_message(ch, method, body, cursor, db_conn, session)
+                    self._handle_message(ch, method, properties, body, cursor, db_conn, session)
 
                     if self.batch_delay_sec > 0:
                         time.sleep(self.batch_delay_sec)
@@ -746,7 +746,7 @@ class WorkerThread(threading.Thread):
         session.close()
         log(self.tag, "Stopped")
 
-    def _handle_message(self, ch, method, body, cursor, db_conn, session):
+    def _handle_message(self, ch, method, properties, body, cursor, db_conn, session):
         worker_log_id = None
         try:
             import uuid
@@ -811,7 +811,8 @@ class WorkerThread(threading.Thread):
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
         except MySQLError:
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            nack_with_retry(ch, method.delivery_tag, properties,
+                            log_fn=lambda msg: log(self.tag, f"[DB ERROR] {msg}"))
             raise
         except Exception as e:
             log(self.tag, f"ERROR processing message -> DLQ: {e}")

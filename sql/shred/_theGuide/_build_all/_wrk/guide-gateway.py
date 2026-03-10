@@ -82,6 +82,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from t16o_exchange.guide.common.config import (
     get_db_config, get_rabbitmq_config, get_queue_names,
+    nack_with_retry,
 )
 
 _rmq = get_rabbitmq_config()
@@ -1763,8 +1764,9 @@ def run_queue_consumer(ready_event: threading.Event = None):
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                 except MySQLError as e:
-                    print(f"[DB ERROR] {e} - requeuing for retry")
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    print(f"[DB ERROR] {e}")
+                    nack_with_retry(ch, method.delivery_tag, properties,
+                                    log_fn=lambda msg: print(f"[DB ERROR] {msg}"))
                 except json.JSONDecodeError as e:
                     print(f"[ERROR] Invalid JSON -> DLQ: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
@@ -1923,9 +1925,9 @@ def run_response_consumer(ready_event: threading.Event = None):
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
                 except MySQLError as e:
-                    # MySQL errors are transient - requeue for retry
-                    print(f"[DB ERROR] {e} - will retry")
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    print(f"[DB ERROR] {e}")
+                    nack_with_retry(ch, method.delivery_tag, properties,
+                                    log_fn=lambda msg: print(f"[DB ERROR] {msg}"))
                 except Exception as e:
                     # Other errors - send to DLQ
                     print(f"[ERROR] Failed to process response: {e}")

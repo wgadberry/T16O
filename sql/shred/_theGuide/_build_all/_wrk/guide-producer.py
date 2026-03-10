@@ -41,7 +41,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from t16o_exchange.guide.common.config import (
     get_db_config, get_rabbitmq_config, get_rpc_config, get_queue_names,
-    get_solscan_config,
+    get_solscan_config, nack_with_retry,
 )
 
 _solscan                = get_solscan_config()
@@ -1628,8 +1628,9 @@ def run_queue_consumer(prefetch: int = 1):
                     print(f"[ERROR] Invalid JSON -> DLQ: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ
                 except MySQLError as e:
-                    print(f"[DB ERROR] {e} - requeuing for retry")
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    print(f"[DB ERROR] {e}")
+                    nack_with_retry(ch, method.delivery_tag, properties,
+                                    log_fn=lambda msg: print(f"[DB ERROR] {msg}"))
                 except Exception as e:
                     print(f"[ERROR] Failed to process message -> DLQ: {e}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)  # -> DLQ

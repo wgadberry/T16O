@@ -125,6 +125,46 @@ def get_retry_config() -> Dict[str, Any]:
     }
 
 
+# Default max redelivery count before sending to DLQ
+DEFAULT_MAX_REDELIVERY = 3
+
+
+def should_requeue(properties, max_retries: int = DEFAULT_MAX_REDELIVERY) -> bool:
+    """Check x-delivery-count header to decide requeue vs DLQ.
+
+    RabbitMQ 3.8+ tracks redelivery count in message headers.
+    Returns True if the message should be requeued, False if it should go to DLQ.
+    """
+    headers = getattr(properties, 'headers', None) or {}
+    delivery_count = headers.get('x-delivery-count', 0)
+    return delivery_count < max_retries
+
+
+def nack_with_retry(ch, delivery_tag, properties, log_fn=None,
+                    max_retries: int = DEFAULT_MAX_REDELIVERY):
+    """Nack a message, requeuing if under max retries, otherwise sending to DLQ.
+
+    Args:
+        ch: pika channel
+        delivery_tag: message delivery tag
+        properties: pika message properties (contains headers)
+        log_fn: optional callable(msg) for logging
+        max_retries: max redelivery attempts before DLQ
+    """
+    headers = getattr(properties, 'headers', None) or {}
+    delivery_count = headers.get('x-delivery-count', 0)
+    requeue = delivery_count < max_retries
+
+    if log_fn:
+        if requeue:
+            log_fn(f"Requeuing (attempt {delivery_count + 1}/{max_retries})")
+        else:
+            log_fn(f"Max retries ({max_retries}) exceeded -> DLQ")
+
+    ch.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
+    return requeue
+
+
 def get_service_config(service_name: str) -> Dict[str, Any]:
     """Get service-specific configuration (for Windows service wrappers)."""
     mq = get_rabbitmq_config()
