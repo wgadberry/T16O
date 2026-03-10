@@ -1165,12 +1165,14 @@ def process_prime_request(message: dict, rpc_session, gateway_channel, db_cursor
 
         print(f"  [PRIME] Fetched {len(prime_sigs)} signatures (including anchor tx)")
     else:
-        # Enricher-originated primes: skip fallback scan entirely.
+        # Auto-originated primes: skip fallback scan entirely.
         # These are auto-discovered tokens — if no anchor tx exists, the token
         # likely has massive history (e.g., Orca) and scanning would hang.
-        is_enricher_prime = request_id.startswith('enricher-prime-')
-        if is_enricher_prime:
-            print(f"  [PRIME] No anchor tx — skipping fallback for enricher-originated prime")
+        is_auto_prime = (request_id.startswith('enricher-prime-') or
+                         request_id.startswith('agg-prime-') or
+                         request_id.startswith('backfill-prime-'))
+        if is_auto_prime:
+            print(f"  [PRIME] No anchor tx — skipping fallback for auto-originated prime")
         else:
             # Fallback: no anchor tx — paginate to the end with a rolling window
             MAX_FALLBACK_PAGES = 500  # 500K sigs max (~100s at 0.2s/page)
