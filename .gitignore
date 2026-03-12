@@ -1,5 +1,8 @@
 # Angular widget workspace
-my-workspace/
+my-workspace/*
+!my-workspace/projects/
+my-workspace/projects/*
+!my-workspace/projects/terraform/
 
 # Build results
 [Dd]ebug/

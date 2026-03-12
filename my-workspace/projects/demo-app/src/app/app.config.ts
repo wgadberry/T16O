@@ -28,7 +28,7 @@ export const appConfig: ApplicationConfig = {
     // Client credentials for t16o-api auth
     { provide: API_CLIENT_ID, useValue: 'demo' },
     { provide: API_CLIENT_SECRET, useValue: 'a3f1b2c4-d5e6-7890-abcd-ef1234567890' },
-    // Point to local C# proxy (proxied via proxy.conf.json → https://localhost:5101)
+    // Proxied via proxy.conf.json → https://api.the16oracles.io/prod
     { provide: CLUSTER_MAP_API_URL, useValue: '/api/bubblemap' },
     { provide: CLUSTER_MAP_WALLET_TX_URL, useValue: '/api/bubblemap/wallet-txs' }
   ]
