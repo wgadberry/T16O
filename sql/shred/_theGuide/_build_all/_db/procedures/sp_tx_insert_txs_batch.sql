@@ -36,8 +36,10 @@ BEGIN
     SET v_total_count = ROW_COUNT();
 
     -- Main tx insert with JOINs (addresses already populated by sp_tx_prepopulate_lookups)
+    -- Uses ON DUPLICATE KEY UPDATE so decoder fills in agg fields even when
+    -- detailer created a skeleton tx record first (race condition).
     -- request_log_id is set for billing - only new records get this value
-    INSERT IGNORE INTO tx (
+    INSERT INTO tx (
         signature,
         block_id,
         block_time,
@@ -117,16 +119,35 @@ BEGIN
     LEFT JOIN tx_address tok2_addr ON tok2_addr.address = t.token_2
     LEFT JOIN tx_token tok2 ON tok2.mint_address_id = tok2_addr.id
     LEFT JOIN tx_address fee_addr ON fee_addr.address = t.fee_token
-    LEFT JOIN tx_token fee_tok ON fee_tok.mint_address_id = fee_addr.id;
+    LEFT JOIN tx_token fee_tok ON fee_tok.mint_address_id = fee_addr.id
+    ON DUPLICATE KEY UPDATE
+        fee = COALESCE(tx.fee, VALUES(fee)),
+        priority_fee = COALESCE(tx.priority_fee, VALUES(priority_fee)),
+        signer_address_id = COALESCE(tx.signer_address_id, VALUES(signer_address_id)),
+        agg_program_id = COALESCE(tx.agg_program_id, VALUES(agg_program_id)),
+        agg_account_address_id = COALESCE(tx.agg_account_address_id, VALUES(agg_account_address_id)),
+        agg_token_in_id = COALESCE(tx.agg_token_in_id, VALUES(agg_token_in_id)),
+        agg_token_out_id = COALESCE(tx.agg_token_out_id, VALUES(agg_token_out_id)),
+        agg_amount_in = COALESCE(tx.agg_amount_in, VALUES(agg_amount_in)),
+        agg_amount_out = COALESCE(tx.agg_amount_out, VALUES(agg_amount_out)),
+        agg_decimals_in = COALESCE(tx.agg_decimals_in, VALUES(agg_decimals_in)),
+        agg_decimals_out = COALESCE(tx.agg_decimals_out, VALUES(agg_decimals_out)),
+        agg_fee_amount = COALESCE(tx.agg_fee_amount, VALUES(agg_fee_amount)),
+        agg_fee_token_id = COALESCE(tx.agg_fee_token_id, VALUES(agg_fee_token_id)),
+        request_log_id = COALESCE(tx.request_log_id, VALUES(request_log_id)),
+        tx_origin = COALESCE(tx.tx_origin, VALUES(tx_origin)),
+        tx_state = tx.tx_state | 8;
 
     SET p_inserted_count = ROW_COUNT();
     SET p_skipped_count = v_total_count - p_inserted_count;
 
     -- Update temp table with tx_ids
+    -- is_new = 1 when decode hasn't run yet (bit 4 not set), so decoder
+    -- still processes skeleton rows created by detailer
     UPDATE tmp_batch_tx_signatures s
     JOIN tx ON tx.signature = s.signature
     SET s.tx_id = tx.id,
-        s.is_new = (tx.tx_state = 8);
+        s.is_new = (tx.tx_state & 4 = 0);
 
     -- Note: tmp_batch_tx_signatures available for caller
 END;;

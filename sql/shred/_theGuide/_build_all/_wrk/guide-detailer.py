@@ -255,23 +255,38 @@ async def process_signatures(tag, cursor, conn, session, signatures,
     if len(tx_data) < len(signatures):
         log(tag, f"Solscan returned {len(tx_data)}/{len(signatures)} transactions")
 
-    # Insert staging
-    tx_state = get_tx_state_detailed(cursor)
+    # Strip fields not used by sp_tx_parse_detail
+    _DETAIL_KEEP_FIELDS = {'tx_hash', 'block_time', 'block_id', 'signer', 'sol_bal_change', 'token_bal_change'}
     sanitized = sanitize_large_ints(detail_response)
-    t1 = time.time()
-    cursor.execute(
-        f"INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE} "
-        "(txs, tx_state, priority, correlation_id, sig_hash, request_log_id) "
-        "VALUES (%s,%s,%s,%s,%s,%s)",
-        (json.dumps(sanitized), tx_state, priority, correlation_id, sig_hash, request_log_id))
-    conn.commit()
-    staging_id = cursor.lastrowid
-    insert_time = time.time() - t1
+    sanitized['data'] = [{k: v for k, v in tx.items() if k in _DETAIL_KEEP_FIELDS} for tx in sanitized.get('data', [])]
 
-    result['staging_id'] = staging_id
+    # Call SP directly — bypass staging table entirely
+    txs_json = json.dumps(sanitized)
+    t1 = time.time()
+    cursor.execute("SET @tx=0, @sol=0, @tok=0, @skip=0")
+    cursor.execute(
+        "CALL sp_tx_parse_detail(%s, %s, @tx, @sol, @tok, @skip)",
+        (txs_json, request_log_id))
+    # Drain any result sets from the SP
+    try:
+        while cursor.nextset():
+            pass
+    except Exception:
+        pass
+    cursor.execute("SELECT @tx, @sol, @tok, @skip")
+    sp_row = cursor.fetchone()
+    conn.commit()
+    sp_time = time.time() - t1
+
+    sp_tx   = sp_row[0] or 0 if sp_row else 0
+    sp_sol  = sp_row[1] or 0 if sp_row else 0
+    sp_tok  = sp_row[2] or 0 if sp_row else 0
+    sp_skip = sp_row[3] or 0 if sp_row else 0
+
     result['processed'] = len(tx_data)
-    log(tag, f"Staged {len(tx_data)} txs -> staging.id={staging_id} "
-            f"(fetch={fetch_time:.2f}s, insert={insert_time:.3f}s)")
+    result['tx_count'] = sp_tx
+    log(tag, f"Detailed {len(tx_data)} txs: tx={sp_tx} sol={sp_sol} tok={sp_tok} "
+            f"skip={sp_skip} (fetch={fetch_time:.2f}s, sp={sp_time:.3f}s)")
     return result
 
 # =============================================================================
@@ -407,7 +422,6 @@ class WorkerThread(threading.Thread):
                 resp = {
                     'processed':  result['processed'],
                     'tx_count':   result['tx_count'],
-                    'staging_id': result['staging_id'],
                 }
 
             update_worker_request(cursor, db_conn, worker_log_id, status, resp)

@@ -192,13 +192,17 @@ def fetch_decoded_batch(session, signatures, api_timeout):
 # =============================================================================
 
 def filter_existing_signatures(cursor, signatures):
+    """Filter out signatures that have already been decoded (bit 4 set).
+    Skeleton records created by detailer (bit 4 not set) are treated as new."""
     if not signatures:
         return [], []
     ph = ','.join(['%s'] * len(signatures))
-    cursor.execute(f"SELECT signature FROM tx WHERE signature IN ({ph})", signatures)
-    existing = {row[0] for row in cursor.fetchall()}
-    new = [s for s in signatures if s not in existing]
-    old = [s for s in signatures if s in existing]
+    cursor.execute(
+        f"SELECT signature FROM tx WHERE signature IN ({ph}) AND tx_state & 4 != 0",
+        signatures)
+    already_decoded = {row[0] for row in cursor.fetchall()}
+    new = [s for s in signatures if s not in already_decoded]
+    old = [s for s in signatures if s in already_decoded]
     return new, old
 
 
@@ -249,22 +253,39 @@ def process_signatures(tag, cursor, conn, session, signatures,
     if len(actual_sigs) < len(new_sigs):
         log(tag, f"Solscan returned {len(actual_sigs)}/{len(new_sigs)} signatures")
 
-    # Insert staging
-    tx_state = get_tx_state_decoded(cursor)
-    t1 = time.time()
-    cursor.execute(
-        f"INSERT INTO {STAGING_SCHEMA}.{STAGING_TABLE} "
-        "(txs, tx_state, priority, correlation_id, sig_hash, request_log_id, tx_origin) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (json.dumps(decoded), tx_state, priority, correlation_id, sig_hash, request_log_id, tx_origin))
-    conn.commit()
-    staging_id = cursor.lastrowid
-    insert_time = time.time() - t1
+    # Strip fields not used by sp_tx_parse_decode
+    _DECODE_KEEP_FIELDS = {'tx_hash', 'block_id', 'block_time', 'fee', 'priority_fee',
+                           'one_line_summary', 'transfers', 'activities'}
+    decoded['data'] = [{k: v for k, v in tx.items() if k in _DECODE_KEEP_FIELDS} for tx in decoded.get('data', [])]
 
-    result['staging_id'] = staging_id
+    # Call SP directly — bypass staging table entirely
+    txs_json = json.dumps(decoded)
+    t1 = time.time()
+    cursor.execute("SET @tx=0, @xfer=0, @swap=0, @act=0, @skip=0")
+    cursor.execute(
+        "CALL sp_tx_parse_decode(%s, %s, %s, @tx, @xfer, @swap, @act, @skip)",
+        (txs_json, request_log_id, tx_origin))
+    # Drain any result sets from the SP
+    try:
+        while cursor.nextset():
+            pass
+    except Exception:
+        pass
+    cursor.execute("SELECT @tx, @xfer, @swap, @act, @skip")
+    sp_row = cursor.fetchone()
+    conn.commit()
+    sp_time = time.time() - t1
+
+    sp_tx    = sp_row[0] or 0 if sp_row else 0
+    sp_xfer  = sp_row[1] or 0 if sp_row else 0
+    sp_swap  = sp_row[2] or 0 if sp_row else 0
+    sp_act   = sp_row[3] or 0 if sp_row else 0
+    sp_skip  = sp_row[4] or 0 if sp_row else 0
+
     result['processed'] = len(actual_sigs)
-    log(tag, f"Staged {len(actual_sigs)} txs -> staging.id={staging_id} "
-            f"(fetch={fetch_time:.2f}s, insert={insert_time:.3f}s)")
+    result['tx_count'] = sp_tx
+    log(tag, f"Decoded {len(actual_sigs)} txs: tx={sp_tx} xfer={sp_xfer} swap={sp_swap} "
+            f"act={sp_act} skip={sp_skip} (fetch={fetch_time:.2f}s, sp={sp_time:.3f}s)")
     return result
 
 # =============================================================================
@@ -388,7 +409,6 @@ class WorkerThread(threading.Thread):
                 resp = {
                     'processed':  result['processed'],
                     'tx_count':   result['tx_count'],
-                    'staging_id': result['staging_id'],
                     'skipped':    result['skipped'],
                 }
 
