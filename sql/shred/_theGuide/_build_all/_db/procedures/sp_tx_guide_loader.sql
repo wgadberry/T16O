@@ -55,10 +55,15 @@ BEGIN
         priority_fee BIGINT UNSIGNED
     ) ENGINE=MEMORY;
 
+    -- Require both decode (bit 4) and detail (bit 16) before loading guide edges.
+    -- Skeleton tx records from detailer (tx_state=0 or 16) must not be picked up
+    -- before decoder has inserted transfers/swaps.
     INSERT INTO tmp_batch (tx_id, block_time, fee, priority_fee)
     SELECT id, block_time, fee, priority_fee
     FROM tx
     WHERE tx_state & 32 = 0
+      AND tx_state & 4 != 0
+      AND tx_state & 16 != 0
     ORDER BY id
     LIMIT p_batch_size;
 
