@@ -17,6 +17,8 @@ import os
 import sys
 import requests
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Generator, Dict, Any, Tuple
 from datetime import datetime, timezone
 
@@ -730,9 +732,117 @@ def process_multiple_addresses(
     message: dict, addresses: list, rpc_session, gateway_channel, db_cursor,
     request_id: str, correlation_id: str, priority: int,
     max_signatures: int, request_before: str, request_until: str,
-    request_log_id: int = None, api_key_id: int = None, features: int = 0
+    request_log_id: int = None, api_key_id: int = None, features: int = 0,
+    batch_threads: int = 5
 ) -> dict:
-    """Process multiple addresses in a single request, aggregating results"""
+    """Process multiple addresses in parallel, aggregating results.
+    Each thread gets its own RPC session; RabbitMQ publish is serialized via lock."""
+
+    if batch_threads <= 1 or len(addresses) <= 1:
+        # Fall back to sequential for single address or threads=1
+        return _process_addresses_sequential(
+            addresses, request_id, correlation_id, priority, max_signatures,
+            request_before, request_until, request_log_id, api_key_id, features,
+            rpc_session, gateway_channel, db_cursor)
+
+    print(f"[{request_id[:8]}] Processing {len(addresses)} addresses in parallel "
+          f"(threads={batch_threads}, correlation: {correlation_id[:8]})")
+
+    publish_lock = threading.Lock()
+    total_processed = 0
+    total_batches = 0
+    total_skipped = 0
+    total_errors = 0
+    address_results = []
+
+    def process_one(idx_address):
+        idx, address = idx_address
+        thread_session = requests.Session()
+        thread_session.headers.update(rpc_session.headers)
+
+        sub_message = {
+            'request_id': f"{request_id}-addr{idx}",
+            'correlation_id': correlation_id,
+            'request_log_id': request_log_id,
+            'api_key_id': api_key_id,
+            'features': features,
+            'priority': priority,
+            'batch': {
+                'filters': {
+                    'address': address,
+                    'before': request_before,
+                    'until': request_until
+                },
+                'address_sig_cnt': max_signatures
+            }
+        }
+
+        # Thread-safe gateway_channel wrapper
+        class LockedChannel:
+            def __init__(self, ch, lock):
+                self._ch = ch
+                self._lock = lock
+            def basic_publish(self, *args, **kwargs):
+                with self._lock:
+                    return self._ch.basic_publish(*args, **kwargs)
+            def __getattr__(self, name):
+                return getattr(self._ch, name)
+
+        locked_ch = LockedChannel(gateway_channel, publish_lock)
+        result = process_single_address(sub_message, thread_session, locked_ch, db_cursor=None)
+        thread_session.close()
+
+        print(f"  [{idx}/{len(addresses)}] {address[:20]}... -> "
+              f"{result.get('processed', 0)} sigs, {result.get('batches', 0)} batches")
+        return address, result
+
+    with ThreadPoolExecutor(max_workers=batch_threads) as executor:
+        futures = {executor.submit(process_one, (idx, addr)): addr
+                   for idx, addr in enumerate(addresses, 1)}
+
+        for future in as_completed(futures):
+            try:
+                address, result = future.result()
+                total_processed += result.get('processed', 0)
+                total_batches += result.get('batches', 0)
+                total_skipped += result.get('skipped', 0)
+                total_errors += result.get('errors', 0)
+                address_results.append({
+                    'address': address,
+                    'processed': result.get('processed', 0),
+                    'batches': result.get('batches', 0)
+                })
+            except Exception as e:
+                addr = futures[future]
+                print(f"  Error processing {addr[:20]}...: {e}")
+                total_errors += 1
+                address_results.append({
+                    'address': addr,
+                    'processed': 0,
+                    'batches': 0,
+                    'error': str(e)
+                })
+
+    print(f"[{request_id[:8]}] Parallel complete: {total_processed} sigs, "
+          f"{total_batches} batches, {total_errors} errors")
+
+    return {
+        'processed': total_processed,
+        'batches': total_batches,
+        'skipped': total_skipped,
+        'errors': total_errors,
+        'addresses': len(addresses),
+        'address_results': address_results,
+        'cascade_to': []
+    }
+
+
+def _process_addresses_sequential(
+    addresses, request_id, correlation_id, priority, max_signatures,
+    request_before, request_until, request_log_id, api_key_id, features,
+    rpc_session, gateway_channel, db_cursor
+) -> dict:
+    """Sequential fallback for single address or threads=1"""
     print(f"[{request_id[:8]}] Processing {len(addresses)} addresses (correlation: {correlation_id[:8]})")
 
     total_processed = 0
@@ -744,13 +854,12 @@ def process_multiple_addresses(
     for idx, address in enumerate(addresses, 1):
         print(f"  [{idx}/{len(addresses)}] {address[:20]}...")
 
-        # Create a sub-message for single address processing
         sub_message = {
             'request_id': f"{request_id}-addr{idx}",
             'correlation_id': correlation_id,
-            'request_log_id': request_log_id,  # For billing linkage
-            'api_key_id': api_key_id,  # For billing tracking
-            'features': features,  # Feature flags for data collection
+            'request_log_id': request_log_id,
+            'api_key_id': api_key_id,
+            'features': features,
             'priority': priority,
             'batch': {
                 'filters': {
@@ -1487,10 +1596,22 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
 
     # Process multiple addresses if provided
     if len(addresses) > 1:
+        # Read parallel thread count from config (runtime-editable)
+        batch_threads = 5
+        if db_cursor:
+            try:
+                db_cursor.execute(
+                    "SELECT config_value FROM config WHERE config_type='queue' AND config_key='producer_wrk_batch_threads'")
+                row = db_cursor.fetchone()
+                if row:
+                    batch_threads = int(row[0] if isinstance(row, tuple) else row.get('config_value', 5))
+            except Exception:
+                pass
+
         result = process_multiple_addresses(
             message, addresses, rpc_session, gateway_channel, db_cursor,
             request_id, correlation_id, priority, max_signatures, request_before, request_until,
-            request_log_id, api_key_id, features
+            request_log_id, api_key_id, features, batch_threads=batch_threads
         )
         # Merge signature context counts if both were used
         if sig_context_sigs or sig_context_skipped:
