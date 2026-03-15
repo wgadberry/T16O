@@ -371,16 +371,18 @@ def proxy_trigger_producer():
 @app.route('/api/bmap/get-wallet-txs', methods=['GET', 'POST'])
 def get_wallet_txs():
     """
-    Get wallet transaction history via sp_tx_bmap_get_wallet_txs.
+    Get wallet transaction history via sp_tx_bmap_get_wallet_txs_v2.
     - address: Wallet address (required)
     - mint: Token mint address (optional)
     - limit: Max rows (default 50, max 200)
+    - signature: Anchor transaction signature (optional — centers results around this tx)
     """
     if request.method == 'POST' and request.is_json:
         body = request.get_json(silent=True) or {}
         address = body.get('address')
         mint_address = body.get('mint')
         limit = body.get('limit', 50)
+        signature = body.get('signature')
         try:
             limit = int(limit)
         except (TypeError, ValueError):
@@ -389,6 +391,7 @@ def get_wallet_txs():
         address = request.args.get('address')
         mint_address = request.args.get('mint')
         limit = request.args.get('limit', default=50, type=int)
+        signature = request.args.get('signature')
 
     if not address:
         return jsonify({'error': 'address is required'}), 400
@@ -401,7 +404,7 @@ def get_wallet_txs():
             conn = get_connection()
             cursor = conn.cursor(dictionary=True)
             cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-            cursor.callproc('sp_tx_bmap_get_wallet_txs', [address, mint_address, min(limit, 200)])
+            cursor.callproc('sp_tx_bmap_get_wallet_txs_v2', [address, mint_address, min(limit, 200), signature or None])
 
             rows = []
             for result_set in cursor.stored_results():
@@ -433,6 +436,7 @@ def get_wallet_txs():
             return jsonify({
                 'address': address,
                 'mint': mint_address,
+                'signature': signature,
                 'count': len(txs),
                 'transactions': txs
             })

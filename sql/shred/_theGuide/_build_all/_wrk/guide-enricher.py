@@ -513,7 +513,7 @@ def claim_batch(cursor, conn, table, where_clause, where_params,
     # Step 1: Lock + claim IDs
     claim_sql = (
         f"SELECT id FROM {table} "
-        f"WHERE {where_clause} AND COALESCE(attempt_cnt, 0) < %s "
+        f"WHERE {where_clause} AND attempt_cnt < %s "
         f"ORDER BY id LIMIT %s "
         f"FOR UPDATE SKIP LOCKED"
     )
@@ -527,7 +527,7 @@ def claim_batch(cursor, conn, table, where_clause, where_params,
     # Step 2: Pre-increment (marks as claimed)
     placeholders = ','.join(['%s'] * len(claimed_ids))
     cursor.execute(
-        f"UPDATE {table} SET attempt_cnt = COALESCE(attempt_cnt, 0) + 1 "
+        f"UPDATE {table} SET attempt_cnt = attempt_cnt + 1 "
         f"WHERE id IN ({placeholders})", claimed_ids)
 
     # Step 3: Release locks
@@ -544,11 +544,8 @@ def claim_batch(cursor, conn, table, where_clause, where_params,
 # Token Enrichment
 # =============================================================================
 
-def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, api_timeout,
-                   rmq_channel=None, prime_enabled=False):
-    stats = {'processed': 0, 'updated': 0, 'failed': 0, 'backfill_updated': 0, 'primed': 0}
-
-    # Phase 0: Local backfill from tx_address labels
+def run_token_backfill(tag, cursor):
+    """Run sp_tx_token_backfill once. Returns count of updated tokens."""
     try:
         cursor.execute("CALL sp_tx_token_backfill(@updated)")
         try:
@@ -558,12 +555,18 @@ def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, ap
             pass
         cursor.execute("SELECT @updated")
         row = cursor.fetchone()
-        bf = row['@updated'] if isinstance(row, dict) else (row[0] if row else 0)
-        stats['backfill_updated'] = bf or 0
+        bf = (row['@updated'] if isinstance(row, dict) else (row[0] if row else 0)) or 0
         if bf:
-            log(tag, f"[tokens] Phase 0: backfill updated={bf}")
+            log(tag, f"[tokens] Backfill updated={bf}")
+        return bf
     except Exception as e:
-        log(tag, f"[tokens] Phase 0: backfill error: {e}")
+        log(tag, f"[tokens] Backfill error: {e}")
+        return 0
+
+
+def enrich_tokens(tag, session, cursor, conn, limit, max_attempts, api_delay, api_timeout,
+                   rmq_channel=None, prime_enabled=False):
+    stats = {'processed': 0, 'updated': 0, 'failed': 0, 'backfill_updated': 0, 'primed': 0}
 
     # Phase 1: Solscan API (claim batch with FOR UPDATE SKIP LOCKED)
     tokens = claim_batch(
@@ -757,20 +760,15 @@ def enrich_pools(tag, session, cursor, conn, limit, max_attempts, api_delay, api
     stats = {'processed': 0, 'updated': 0, 'labels': 0, 'not_found': 0,
              'failed': 0, 'backfill_created': 0, 'backfill_updated': 0}
 
-    # Phase 0: Local backfill (skip if no work)
+    # Phase 0: Local backfill — only run when new pool addresses exist without tx_pool records.
+    # Skip the expensive token/label backfill (Steps 2+3) on every cycle — those resolve
+    # only when new token data arrives, which happens after Phase 1/2 API calls.
     try:
         cursor.execute("""
             SELECT EXISTS(
                 SELECT 1 FROM tx_address a
                 LEFT JOIN tx_pool p ON p.pool_address_id = a.id
                 WHERE a.address_type IN ('pool','lp_token') AND p.id IS NULL
-                  AND a.label LIKE '%%(%%-%%)'
-                LIMIT 1
-            ) OR EXISTS(
-                SELECT 1 FROM tx_pool p
-                JOIN tx_address a ON a.id = p.pool_address_id
-                WHERE (p.token1_id IS NULL OR p.token2_id IS NULL OR p.pool_label IS NULL)
-                  AND a.label LIKE '%%(%%-%%)'
                 LIMIT 1
             ) AS needs_work
         """)
@@ -1142,6 +1140,7 @@ class WorkerThread(threading.Thread):
             all_stats = {}
 
             if 'tokens' in operations:
+                run_token_backfill(self.tag, cursor)
                 s = enrich_tokens(self.tag, session, cursor, db_conn, limit, max_attempts, delay, self.api_timeout_sec,
                                   rmq_channel=ch, prime_enabled=prime_enabled)
                 total_updated += s.get('updated', 0)
@@ -1179,43 +1178,39 @@ class WorkerThread(threading.Thread):
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
     def _handle_db_poll(self, ch, method, cursor, db_conn, session):
-        """Handle supervisor-scheduled enrichment pass — loops until all types drained."""
+        """Handle supervisor-scheduled enrichment pass — single batch per type per poll."""
         grand_total = 0
-        pass_num = 0
+        all_stats = {}
         prime_enabled = get_config_int(cursor, 'batch', 'enricher_prime_enabled', 1) > 0
 
-        while not self.stop_event.is_set():
-            pass_num += 1
-            pass_updated = 0
-            all_stats = {}
+        # Token backfill (once per poll)
+        bf = run_token_backfill(self.tag, cursor)
+        grand_total += bf
 
-            s = enrich_tokens(self.tag, session, cursor, db_conn,
-                              self.batch_limit, self.max_attempts,
-                              self.api_delay_sec, self.api_timeout_sec,
-                              rmq_channel=ch, prime_enabled=prime_enabled)
-            pass_updated += s.get('updated', 0) + s.get('backfill_updated', 0)
-            all_stats['tokens'] = s
+        # Tokens — single batch
+        s = enrich_tokens(self.tag, session, cursor, db_conn,
+                          self.batch_limit, self.max_attempts,
+                          self.api_delay_sec, self.api_timeout_sec,
+                          rmq_channel=ch, prime_enabled=prime_enabled)
+        grand_total += s.get('updated', 0)
+        all_stats['tokens'] = s
 
-            s = enrich_pools(self.tag, session, cursor, db_conn,
-                             self.batch_limit, self.max_attempts,
-                             self.api_delay_sec, self.api_timeout_sec)
-            pass_updated += s.get('updated', 0) + s.get('backfill_created', 0) + s.get('backfill_updated', 0)
-            all_stats['pools'] = s
+        # Pools — single batch
+        s = enrich_pools(self.tag, session, cursor, db_conn,
+                         self.batch_limit, self.max_attempts,
+                         self.api_delay_sec, self.api_timeout_sec)
+        grand_total += s.get('updated', 0) + s.get('backfill_created', 0) + s.get('backfill_updated', 0)
+        all_stats['pools'] = s
 
-            s = enrich_programs(self.tag, session, cursor, db_conn,
-                                self.batch_limit, self.max_attempts,
-                                self.api_delay_sec, self.api_timeout_sec)
-            pass_updated += s.get('updated', 0)
-            all_stats['programs'] = s
-
-            if pass_updated == 0:
-                break
-
-            grand_total += pass_updated
-            log(self.tag, f"DB poll pass {pass_num}: {pass_updated} items enriched")
+        # Programs — single batch
+        s = enrich_programs(self.tag, session, cursor, db_conn,
+                            self.batch_limit, self.max_attempts,
+                            self.api_delay_sec, self.api_timeout_sec)
+        grand_total += s.get('updated', 0)
+        all_stats['programs'] = s
 
         if grand_total > 0:
-            log(self.tag, f"DB poll complete: {grand_total} total across {pass_num} passes")
+            log(self.tag, f"DB poll: {grand_total} enriched")
             try:
                 dl_id = log_daemon_request(cursor, db_conn, 'db-poll-enrich', grand_total)
                 update_worker_request(cursor, db_conn, dl_id, 'completed', {

@@ -475,7 +475,7 @@ def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay,
     }
 
     if 'guide' in operations:
-        cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0")
+        cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0 AND tx_state & 4 != 0 AND tx_state & 16 != 0")
         row = cursor.fetchone()
         pending = row['cnt']
         stats['guide']['pending'] = pending
@@ -517,7 +517,7 @@ def run_sync(tag, cursor, conn, operations, batch_size, max_retries, base_delay,
 
 def get_sync_status(cursor):
     max_id = get_max_guide_id(cursor)
-    cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0")
+    cursor.execute("SELECT COUNT(*) AS cnt FROM tx WHERE tx_state & 32 = 0 AND tx_state & 4 != 0 AND tx_state & 16 != 0")
     pending = cursor.fetchone()['cnt']
     tokens_last = get_last_processed_id(cursor, TOKEN_PARTICIPANT_KEY)
 
@@ -647,10 +647,6 @@ class WorkerThread(threading.Thread):
             }
 
             update_worker_request(cursor, db_conn, worker_log_id, 'completed', result)
-
-            # Cascade to enricher if we processed data
-            if total > 0:
-                self._publish_cascade_to_enricher(ch, request_id, correlation_id, result, priority)
 
             self._publish_response(ch, request_id, correlation_id, 'completed', result)
             ch.basic_ack(delivery_tag=method.delivery_tag)

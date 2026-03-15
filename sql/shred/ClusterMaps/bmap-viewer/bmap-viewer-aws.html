@@ -3041,9 +3041,11 @@
             const panel = document.getElementById('wallet-txs-panel');
             if (!panel) return;
 
-            // Get current mint from form (optional filter)
+            // Get current mint and signature from form (optional filters)
             const mint = document.getElementById('mint_address')?.value || null;
+            const sig = document.getElementById('signature')?.value || null;
             const mintParam = mint ? `&mint=${encodeURIComponent(mint)}` : '';
+            const sigParam = sig ? `&signature=${encodeURIComponent(sig)}` : '';
             const addrShort = `${address.slice(0,6)}...${address.slice(-4)}`;
 
             panel.innerHTML = `
@@ -3062,7 +3064,7 @@
             panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
             try {
-                const resp = await fetch(`/api/bmap/get-wallet-txs?address=${encodeURIComponent(address)}${mintParam}&limit=100`);
+                const resp = await fetch(`/api/bmap/get-wallet-txs?address=${encodeURIComponent(address)}${mintParam}${sigParam}&limit=100`);
                 const data = await resp.json();
 
                 if (data.error) {
@@ -3116,9 +3118,11 @@
                     const amt = tx.amount != null ? formatNumber(tx.amount) : '-';
                     const postBal = tx.post_balance != null ? formatNumber(tx.post_balance) : '-';
                     const tokenSym = tx.token_symbol || (tx.mint_address ? tx.mint_address.slice(0,6) + '...' : '-');
+                    const isAnchor = sig && tx.signature === sig;
+                    const anchorStyle = isAnchor ? ' style="background:rgba(59,130,246,0.15);border-left:3px solid var(--accent);"' : '';
 
                     tableHtml += `
-                                <tr onclick="navigateTo('${tx.signature}')" title="Click to navigate to this transaction">
+                                <tr onclick="navigateTo('${tx.signature}')" title="Click to navigate to this transaction"${anchorStyle}>
                                     <td>${tx.block_time_utc || '-'}</td>
                                     <td>${dir}</td>
                                     <td><span class="type-badge" style="background:${typeColor(tx.type_code)}22;color:${typeColor(tx.type_code)};">${tx.type_code || '-'}</span></td>

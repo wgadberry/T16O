@@ -534,7 +534,7 @@ def save_funding_info(tag, cursor, conn, target_address, funding_info,
                                         else:
                                             token2_id = tok_row['id']
                     cursor.execute(
-                        "INSERT INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label) "
+                        "INSERT IGNORE INTO tx_pool (pool_address_id, program_id, token1_id, token2_id, pool_label) "
                         "VALUES (%s, %s, %s, %s, %s)",
                         (target_id, program_id, token1_id, token2_id, label))
 
