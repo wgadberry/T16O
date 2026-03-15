@@ -106,8 +106,11 @@
             "type": "object",
             "properties": {
               "signature": {
-                "type": "string",
-                "description": "Transaction signature to fetch context around. Returns the target plus surrounding signatures (default 5 on each side). Cannot be combined with addresses.",
+                "oneOf": [
+                  { "type": "string", "description": "Single signature: fetches context (adjacent signatures via RPC)" },
+                  { "type": "array", "items": { "type": "string" }, "description": "Array of signatures: direct cascade to decoder+detailer (no RPC context lookup). Use for bulk reprocessing." }
+                ],
+                "description": "Transaction signature(s). String: fetch target + surrounding context (default 5 each side). Array: direct cascade to decoder+detailer for bulk reprocessing.",
                 "example": "QBdff2JwMeo9ZUBKpp5yZKTc2KAy7jMNNurM6ow6M5JssnPzTbWgTmhoj5hNhVXppBQXqtUJ7ygF19H1ru14Si2"
               },
               "sig_adjacent_cnt": {

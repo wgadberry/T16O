@@ -1331,6 +1331,31 @@ def process_gateway_request(message: dict, rpc_session, gateway_channel, db_curs
     sig_context_skipped = 0
     sig_context_mint = None
     filter_signature = filters.get('signature')
+
+    # Array mode: direct cascade, no RPC context lookup
+    if isinstance(filter_signature, list):
+        sig_list = [s for s in filter_signature if s]
+        batches = 0
+        if sig_list:
+            batch_size = 20
+            for i in range(0, len(sig_list), batch_size):
+                chunk = sig_list[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(sig_list) + batch_size - 1) // batch_size
+                if publish_cascade_to_workers(gateway_channel, request_id, correlation_id,
+                                              chunk, batch_num, total_batches, priority,
+                                              request_log_id, api_key_id, features):
+                    batches += 1
+                    print(f"  [CASCADE] Sig array batch {batch_num}/{total_batches} -> decoder+detailer ({len(chunk)} sigs)")
+        return {
+            'processed': len(sig_list),
+            'batches': batches,
+            'skipped': 0,
+            'errors': 0,
+            'mode': 'signature-array',
+            'cascade_to': []
+        }
+
     if filter_signature:
         context_size = filters.get('sig_adjacent_cnt', filters.get('context_size', 5))
 
